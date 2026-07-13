@@ -20,6 +20,25 @@ Requirements: macOS 26+, Xcode 26+, Swift 6.2+, Rust 1.85+, Git, and the Codex C
 
 The Codex Run action executes `./script/build_and_run.sh` and stages `dist/Patchwright.app`.
 
+## Ingest your GitHub workspace
+
+Patchwright can build a read-only local snapshot from the GitHub account already authenticated by the GitHub CLI. Confirm the account once:
+
+```bash
+gh auth status
+```
+
+Launch the app and choose **Sync GitHub** in the toolbar or **Task → Sync GitHub** (`⌘⇧G`). The default sync discovers up to 100 accessible repositories and, per repository, ingests up to 1,000 records from each paginated resource:
+
+- issues and pull requests;
+- issue comments, pull-request review comments, and submitted reviews;
+- check runs for ingested pull-request head commits;
+- GitHub Actions workflow runs.
+
+Repository snapshots are replaced atomically in `~/.patchwright/patchwright.sqlite3`; a failed repository refresh preserves its previous complete snapshot. The app shows partial failures and the latest local snapshot time. The database is restricted to the current user, and the `gh auth token` value exists only in engine memory—it is not stored in SQLite or logs.
+
+This ingestion surface is read-only. It does not post comments, change labels, push branches, submit reviews, rerun workflows, or merge pull requests. GitHub mutations remain behind the separate approval-gated GitHub App lifecycle.
+
 ## Local services
 
 ```bash
@@ -38,4 +57,3 @@ The relay binds to loopback by default. Production HTTPS termination, GitHub App
 Merge is disabled in code. GitHub writes, network access, dependency installation, and workflow changes require action-specific approval. Set `PATCHWRIGHT_AUTOMATION_DISABLED=1` to fail closed for every mutating capability while retaining read-only inspection.
 
 See [the product design](docs/superpowers/specs/2026-07-13-patchwright-stages-1-3-design.md), [production plan](docs/production-plan.md), and [security operations](docs/security.md).
-
