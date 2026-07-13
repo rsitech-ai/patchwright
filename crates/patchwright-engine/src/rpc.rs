@@ -1,9 +1,12 @@
 use crate::{
-    EventStore, GhCliCredentialBroker, GitHubAccount, GitHubRepository, GitHubSource,
-    GitHubSyncSummary,
+    ConversionError, ConversionRequest, EventStore, GhCliCredentialBroker, GitHubAccount,
+    GitHubRepository, GitHubSource, GitHubSyncSummary, TaskConversionService,
 };
 use anyhow::{Context, Result, bail};
-use patchwright_core::{Task, TaskId};
+use patchwright_core::{
+    CredentialHealth, RepositoryBinding, RepositoryBindingDraft, RepositoryPermissionLevel,
+    RepositoryPermissionSnapshot, Task, TaskId,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 #[cfg(unix)]
@@ -79,12 +82,231 @@ async fn dispatch(request: Request, store: &Mutex<EventStore>) -> Value {
         ),
         "task.create" => create_task(request.id, &request.params, store),
         "task.timeline" => task_timeline(request.id, &request.params, store),
+        "task.previewFromGitHub" => preview_task_from_github(request.id, &request.params, store),
+        "task.createFromGitHub" => create_task_from_github(request.id, &request.params, store),
+        "repository.bind" => bind_repository(request.id, &request.params, store),
         "github.status" => github_status(request.id, store),
         "github.repositories" => github_repositories(request.id, store),
         "github.repository" => github_repository(request.id, &request.params, store),
         "github.sync" => sync_github(request.id, &request.params, store).await,
         _ => rpc_error(request.id, -32601, "method not found", None),
     }
+}
+
+fn bind_repository(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let binding_params = match binding_parameters(params) {
+        Ok(binding_params) => binding_params,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let full_name = &binding_params.full_name;
+    let installation_id = binding_params.installation_id;
+    let store = store.lock().expect("event store lock poisoned");
+    let snapshot = match store.github_repository(full_name) {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => {
+            return rpc_error(
+                id,
+                -32020,
+                "repository snapshot missing",
+                Some("sync the repository before binding it".into()),
+            );
+        }
+        Err(error) => {
+            return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+        }
+    };
+    if snapshot
+        .repository
+        .installation_id
+        .is_some_and(|expected| expected != installation_id)
+    {
+        return rpc_error(
+            id,
+            -32602,
+            "invalid parameters",
+            Some("installationId does not match the ingested repository".into()),
+        );
+    }
+    match store.repository_binding_by_full_name(full_name) {
+        Ok(Some(binding)) if binding.installation_id() == installation_id => {
+            return rpc_result(id, json!(binding));
+        }
+        Ok(Some(_)) => {
+            return rpc_error(
+                id,
+                -32021,
+                "repository binding failed",
+                Some("repository is already bound to a different installation".into()),
+            );
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+        }
+    }
+    let permissions = binding_permissions(snapshot.repository.permissions);
+    let draft = RepositoryBindingDraft {
+        github_repository_id: snapshot.repository.id,
+        full_name: snapshot.repository.full_name.clone(),
+        installation_id,
+        clone_url: format!("{}.git", snapshot.repository.html_url),
+        html_url: snapshot.repository.html_url,
+        default_branch: snapshot.repository.default_branch,
+        user_checkout: binding_params.user_checkout,
+        managed_clone: binding_params.managed_clone,
+        state_root: binding_params.state_root,
+        worktree_root: binding_params.worktree_root,
+        default_branch_sha: snapshot.repository.default_branch_sha,
+        default_branch_committed_at: match snapshot.repository.default_branch_committed_at {
+            Some(value) => match value.parse() {
+                Ok(timestamp) => Some(timestamp),
+                Err(error) => {
+                    return rpc_error(
+                        id,
+                        -32021,
+                        "repository binding failed",
+                        Some(format!("invalid default branch commit timestamp: {error}")),
+                    );
+                }
+            },
+            None => None,
+        },
+        permissions,
+        credential_health: CredentialHealth::Healthy,
+    };
+    let binding = match RepositoryBinding::try_from(draft) {
+        Ok(binding) => binding,
+        Err(error) => {
+            return rpc_error(id, -32602, "invalid parameters", Some(error.to_string()));
+        }
+    };
+    match store.save_repository_binding(&binding) {
+        Ok(()) => rpc_result(id, json!(binding)),
+        Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    }
+}
+
+struct BindingParameters {
+    full_name: String,
+    installation_id: u64,
+    user_checkout: Option<String>,
+    managed_clone: Option<String>,
+    state_root: String,
+    worktree_root: String,
+}
+
+fn binding_parameters(params: &Value) -> std::result::Result<BindingParameters, String> {
+    let full_name = required_string(params, "repositoryFullName")
+        .ok_or_else(|| "repositoryFullName is required".to_owned())?;
+    let installation_id = params
+        .get("installationId")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "installationId must be a positive integer".to_owned())?;
+    let state_root =
+        required_string(params, "stateRoot").ok_or_else(|| "stateRoot is required".to_owned())?;
+    let worktree_root = required_string(params, "worktreeRoot")
+        .ok_or_else(|| "worktreeRoot is required".to_owned())?;
+    Ok(BindingParameters {
+        full_name,
+        installation_id,
+        user_checkout: optional_string(params, "userCheckout"),
+        managed_clone: optional_string(params, "managedClone"),
+        state_root,
+        worktree_root,
+    })
+}
+
+fn preview_task_from_github(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let request = match conversion_request(params) {
+        Ok(request) => request,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let store = store.lock().expect("event store lock poisoned");
+    match TaskConversionService::new(&store).preview(request) {
+        Ok(preview) => rpc_result(id, json!(preview)),
+        Err(error) => conversion_rpc_error(id, error),
+    }
+}
+
+fn create_task_from_github(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let request = match conversion_request(params) {
+        Ok(request) => request,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let store = store.lock().expect("event store lock poisoned");
+    match TaskConversionService::new(&store).create(request) {
+        Ok(outcome) => rpc_result(id, json!(outcome)),
+        Err(error) => conversion_rpc_error(id, error),
+    }
+}
+
+fn conversion_request(params: &Value) -> std::result::Result<ConversionRequest, String> {
+    let repository_full_name = required_string(params, "repositoryFullName")
+        .ok_or_else(|| "repositoryFullName is required".to_owned())?;
+    let item_number = params
+        .get("itemNumber")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "itemNumber must be a positive integer".to_owned())?;
+    let expected_updated_at = required_string(params, "expectedUpdatedAt")
+        .ok_or_else(|| "expectedUpdatedAt is required".to_owned())?;
+    Ok(ConversionRequest {
+        repository_full_name,
+        item_number,
+        expected_updated_at,
+    })
+}
+
+fn conversion_rpc_error(id: Value, error: ConversionError) -> Value {
+    let (code, message) = match error {
+        ConversionError::SnapshotMissing => (-32030, "repository snapshot missing"),
+        ConversionError::ItemMissing => (-32031, "GitHub item missing"),
+        ConversionError::SnapshotStale => (-32032, "GitHub item snapshot stale"),
+        ConversionError::RepositoryBindingMissing => (-32033, "repository binding missing"),
+        ConversionError::RepositoryBindingMismatch => (-32034, "repository binding mismatch"),
+        ConversionError::ForkInaccessible => (-32035, "pull request fork inaccessible"),
+        ConversionError::IncompletePullRequest => (-32036, "pull request snapshot incomplete"),
+        ConversionError::IncompleteRepository => (-32037, "repository snapshot incomplete"),
+        ConversionError::InvalidRequest(_) | ConversionError::InvalidContract(_) => {
+            (-32602, "invalid parameters")
+        }
+        ConversionError::Persistence(_) => (-32000, "persistence failure"),
+    };
+    rpc_error(id, code, message, Some(error.to_string()))
+}
+
+fn binding_permissions(
+    permissions: crate::GitHubRepositoryPermissions,
+) -> RepositoryPermissionSnapshot {
+    let write = if permissions.push.is_granted() {
+        RepositoryPermissionLevel::Write
+    } else {
+        RepositoryPermissionLevel::Read
+    };
+    RepositoryPermissionSnapshot {
+        metadata: RepositoryPermissionLevel::Read,
+        contents: write,
+        issues: write,
+        pull_requests: write,
+        checks: RepositoryPermissionLevel::Read,
+        administration: RepositoryPermissionLevel::None,
+    }
+}
+
+fn required_string(params: &Value, key: &str) -> Option<String> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 4_096)
+        .map(str::to_owned)
+}
+
+fn optional_string(params: &Value, key: &str) -> Option<String> {
+    required_string(params, key)
 }
 
 fn create_task(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
