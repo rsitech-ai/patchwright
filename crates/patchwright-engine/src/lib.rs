@@ -1,5 +1,6 @@
 #![allow(clippy::missing_errors_doc, clippy::needless_pass_by_value)]
 
+pub mod codex;
 mod command;
 mod conversion;
 mod github;
