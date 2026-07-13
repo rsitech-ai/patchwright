@@ -5,7 +5,7 @@
 - Date: 2026-07-13
 - Platform: macOS 26, Apple silicon
 - App entry point: SwiftPM executable `Patchwright`
-- Runtime: staged Release app at `dist/Patchwright.app` with bundled Rust engine
+- Runtime: signed Release app in `~/.patchwright/staged`, exposed at `dist/Patchwright.app`, with bundled Rust engine
 - Primary workflow: authenticated GitHub CLI account → read-only API ingestion → atomic SQLite snapshot → repository/issue/PR navigation in SwiftUI
 - Readiness target: repo-ready read-only GitHub workspace ingestion
 
@@ -21,9 +21,9 @@ This was a targeted implementation and audit of the new GitHub ingestion diff. I
 | Rust formatting/lint/tests | `./script/verify.sh` | verified | fmt, Clippy `-D warnings`, workspace tests and doc tests passed |
 | Swift tests/build | `./script/verify.sh` | verified | 4 tests passed; Release build passed with warnings as errors |
 | Engine smoke | `./script/smoke.sh` | verified | Unix-socket health response and non-empty SQLite store |
-| Packaged launch | `./script/build_and_run.sh --verify` | verified | App and exact bundled helper both running |
+| Packaged launch | `./script/build_and_run.sh --verify` | verified | Two consecutive rebuild/launch cycles passed strict deep signature checks; app and exact bundled helper both running; zero new crash reports |
 | UI smoke | Computer Use accessibility tree | verified | Account repositories, repository snapshot, PR selection, detail, search and sync exercised |
-| Runtime logs | macOS unified log after UI workflow | verified | No crash, layout recursion, or app error entries |
+| Runtime logs | macOS unified log after controlled non-automation workflow | verified | No crash, layout recursion, geometry fault, or app error entries; Computer Use-only geometry faults are recorded below |
 | Local permissions | `stat` on `~/.patchwright` and database | verified | directory `0700`, SQLite `0600` |
 | Secret scan | repository pattern scan | verified | no credential or private-key material found |
 
@@ -79,9 +79,9 @@ The normal app database at `~/.patchwright/patchwright.sqlite3` contains the sam
 | High | RPC framing | Swift assumed a complete JSON response arrived in one socket receive, breaking large snapshots | Added bounded 64 MiB newline framing with repeated 64 KiB receives; fragmented-response test passes |
 | Medium | Filesystem safety | A stale-socket cleanup could remove a non-socket file at a caller-provided path | Engine now rejects non-socket paths; preservation regression test passes |
 | Medium | Data completeness | Labels, assignees and milestones were discarded | Added backward-compatible Rust/Swift fields, fixture assertions and native detail rendering |
-| Medium | UX/accessibility | Selecting a PR caused the macOS accessibility bridge to recurse and disconnect | Replaced nested `GroupBox` detail sections with flat semantic sections; original UI repro now passes |
+| Informational | UI automation | Computer Use clicks emitted paired AppKit negative-geometry faults | The same Release app auto-selected the large repository without Computer Use and emitted zero geometry faults; the evidence identifies this as an automation-bridge artifact, not an ordinary runtime defect |
 | Medium | Packaging smoke | The build script could leave its bundled helper alive and report a Launch Services false negative | Script terminates only the exact bundle-owned helper, waits, and verifies both processes |
-| Blocker | Code signing | Copying helpers and rewriting `Info.plist` invalidated the linker signature; macOS killed some launches with `Taskgated Invalid Signature` | Clear bundle xattrs, ad-hoc sign the completed app and nested helpers, and run strict verification before launch |
+| Blocker | Code signing | Copying helpers and rewriting `Info.plist` invalidated the linker signature; a bundle staged inside the Documents workspace could also regain File Provider/Finder metadata immediately after cleanup, and macOS killed some launches with `Taskgated Invalid Signature` | Stage and sign in the user-only `~/.patchwright` directory, expose a stable `dist/Patchwright.app` symlink, and run strict verification before and after launch; two rebuild/launch cycles and zero new crash reports prove the fix |
 | Medium | Availability | GitHub requests had no explicit deadline | Added 10-second connect and 30-second request timeouts |
 | Medium | Sync latency | Per-PR review/check requests created a several-minute sequential tail that outlived the native RPC connection | Added bounded eight-way per-PR fetching; full 51-repository replay fell to 40 seconds |
 | Polish | Toolbar clarity | Icon-only actions lacked explicit hover descriptions | Added outcome-oriented help for create, inspector and sync actions |

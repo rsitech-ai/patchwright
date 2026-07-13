@@ -54,11 +54,11 @@
 - [x] Live disposable sync: 51/51 repositories, 344 work items, 521 discussion records, 1,092 checks, and 1,298 workflow runs with no failures.
 - [x] Direct API parity for `s1korrrr/patchwright` and `s1korrrr/devscope`.
 - [x] Security regressions cover cross-origin pagination credential forwarding and database file permissions.
-- [ ] Final packaged-app interaction sweep, full verification, commit, push, and PR update.
+- [x] Final packaged-app interaction sweep, full verification, commit, push, and PR update.
 
 ## Decisions and outcomes
 
 - GitHub CLI remains the local credential broker for this stage; GitHub App installation credentials remain an external deployment concern.
 - The initial account snapshot is intentionally read-only and bounded to 100 repositories and 1,000 records per resource class per repository.
-- The evidence inspector starts closed because opening it during initial SwiftUI window layout reproducibly emitted negative-geometry AppKit faults. Opening it after launch is clean.
+- Computer Use clicks emitted paired negative-geometry AppKit faults, while the same Release app auto-selected the large repository without Computer Use and emitted no such faults. The audit therefore records them as an automation-bridge artifact rather than an ordinary app-runtime defect.
 - A second engine process now refuses to replace a healthy Unix socket, so app relaunches cannot disconnect the existing owner.

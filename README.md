@@ -18,7 +18,7 @@ Requirements: macOS 26+, Xcode 26+, Swift 6.2+, Rust 1.85+, Git, and the Codex C
 ./script/build_and_run.sh --verify
 ```
 
-The Codex Run action executes `./script/build_and_run.sh` and stages `dist/Patchwright.app`.
+The Codex Run action executes `./script/build_and_run.sh`. It signs the app in the user-only `~/.patchwright/staged` directory and exposes it at `dist/Patchwright.app` through a stable symlink, avoiding File Provider metadata races in Documents workspaces.
 
 ## Ingest your GitHub workspace
 
