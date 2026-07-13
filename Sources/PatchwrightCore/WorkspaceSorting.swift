@@ -372,7 +372,7 @@ public struct WorkspacePresentationPreferences: Codable, Equatable, Sendable {
     public init(
         repositorySort: RepositorySort = RepositorySort(key: .queuePriority, direction: .ascending),
         pullRequestSort: PullRequestSort = PullRequestSort(key: .queuePriority, direction: .ascending),
-        filter: WorkspaceFilter = WorkspaceFilter()
+        filter: WorkspaceFilter = WorkspaceFilter(open: true)
     ) {
         self.repositorySort = repositorySort
         self.pullRequestSort = pullRequestSort

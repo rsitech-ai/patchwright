@@ -5,94 +5,57 @@ struct SidebarView: View {
     @ObservedObject var store: WorkspaceStore
 
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 4) {
-                    sectionHeader("Tasks")
-                ForEach(store.tasks) { task in
-                    Button {
-                        store.selectedTaskID = task.id
-                    } label: {
-                        Label {
-                            VStack(alignment: .leading) {
-                                Text(task.title).lineLimit(1)
-                                Text(task.state.label).font(.caption).foregroundStyle(.secondary)
-                            }
-                        } icon: {
-                            Image(systemName: task.requiresAttention ? "exclamationmark.circle.fill" : "hammer")
-                                .foregroundStyle(task.requiresAttention ? .orange : .secondary)
+        List(selection: $store.primarySelection) {
+            Section("Workspace") {
+                ForEach(WorkspaceSection.allCases) { section in
+                    HStack(spacing: 8) {
+                        Label(section.title, systemImage: section.systemImage)
+                        Spacer()
+                        if let count = count(for: section), count > 0 {
+                            Text(count.formatted())
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
                         }
                     }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 6)
-                }
-                    sectionHeader("GitHub", trailing: githubLoginLabel)
-                if store.repositories.isEmpty {
-                    Text(store.githubStatus?.connected == true ? "No repositories ingested" : "Sync to connect your account")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                ForEach(store.repositories) { repository in
-                    Button {
-                        Task { await store.selectRepository(repository) }
-                    } label: {
-                        Label {
-                            VStack(alignment: .leading) {
-                                Text(repository.fullName).lineLimit(1)
-                                Text("\(repository.openIssuesCount) open · \(repository.private ? "Private" : "Public")")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        } icon: {
-                            Image(systemName: repository.private ? "lock" : "shippingbox")
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 6)
-                }
-                if let error = store.githubError {
-                    Label(error, systemImage: "exclamationmark.triangle")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .padding(6)
-                }
-                if let failures = store.githubSyncSummary?.failures, !failures.isEmpty {
-                    Text("\(failures.count) repositories could not be refreshed; existing snapshots were preserved.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .padding(6)
-                } else if let syncedAt = store.githubStatus?.lastSyncedAt {
-                    Text("Last local snapshot: \(syncedAt)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .padding(6)
+                    .tag(section)
+                    .accessibilityLabel(section.accessibilityLabel(count: count(for: section)))
                 }
             }
-                .padding(.vertical, 8)
-            }
-            Divider()
-            HStack { Circle().fill(connectionColor).frame(width: 8, height: 8); Text(connectionLabel).font(.caption); Spacer() }
+        }
+        .listStyle(.sidebar)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                Divider()
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(connectionColor)
+                        .frame(width: 8, height: 8)
+                        .accessibilityHidden(true)
+                    Text(connectionLabel)
+                        .font(.caption)
+                        .lineLimit(1)
+                    Spacer()
+                }
                 .padding(10)
+                .background(.bar)
+            }
         }
-        .background(.bar)
+        .navigationTitle("Patchwright")
     }
 
-    private func sectionHeader(_ title: String, trailing: String? = nil) -> some View {
-        HStack {
-            Text(title).font(.caption.bold()).foregroundStyle(.secondary)
-            Spacer()
-            if let trailing { Text(trailing).font(.caption2).foregroundStyle(.tertiary) }
+    private func count(for section: WorkspaceSection) -> Int? {
+        switch section {
+        case .queue: store.visiblePullRequests.count
+        case .issues: store.visibleIssues.count
+        case .repositories: store.repositories.count
+        case .activeTasks, .awaitingApproval, .monitoring, .completed: store.tasks(for: section).count
         }
-        .textCase(.uppercase)
-        .padding(.horizontal, 6)
-        .padding(.top, 8)
     }
 
-    private var connectionColor: Color { if case .connected = store.connectionState { .green } else { .orange } }
-    private var githubLoginLabel: String? {
-        guard let login = store.githubStatus?.account?.login else { return nil }
-        return "@\(login)"
+    private var connectionColor: Color {
+        if case .connected = store.connectionState { .green } else { .orange }
     }
+
     private var connectionLabel: String {
         switch store.connectionState {
         case .disconnected: "Engine disconnected"
@@ -103,8 +66,33 @@ struct SidebarView: View {
     }
 }
 
-private extension TaskState {
-    var label: String {
-        rawValue.replacingOccurrences(of: "([a-z])([A-Z])", with: "$1 $2", options: .regularExpression).capitalized
+extension WorkspaceSection {
+    var title: String {
+        switch self {
+        case .queue: "Pull Request Queue"
+        case .issues: "Issues"
+        case .repositories: "Repositories"
+        case .activeTasks: "Active Tasks"
+        case .awaitingApproval: "Awaiting Approval"
+        case .monitoring: "Monitoring"
+        case .completed: "Completed"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .queue: "list.number"
+        case .issues: "record.circle"
+        case .repositories: "shippingbox"
+        case .activeTasks: "hammer"
+        case .awaitingApproval: "person.crop.circle.badge.exclamationmark"
+        case .monitoring: "waveform.path.ecg"
+        case .completed: "checkmark.circle"
+        }
+    }
+
+    func accessibilityLabel(count: Int?) -> String {
+        guard let count, count > 0 else { return title }
+        return "\(title), \(count) items"
     }
 }

@@ -44,6 +44,19 @@ async fn socket_supports_health_create_and_timeline() {
     assert_eq!(github["result"]["connected"], false);
     assert_eq!(github["result"]["repositoryCount"], 0);
 
+    let tasks = call(
+        &mut stream,
+        json!({"jsonrpc":"2.0","id":13,"method":"task.list","params":{}}),
+    )
+    .await;
+    assert_eq!(tasks["result"].as_array().unwrap().len(), 0);
+    let queue = call(
+        &mut stream,
+        json!({"jsonrpc":"2.0","id":14,"method":"github.queue","params":{}}),
+    )
+    .await;
+    assert_eq!(queue["result"].as_array().unwrap().len(), 0);
+
     let second_database = directory.path().join("second.sqlite3");
     let second = tokio::time::timeout(
         std::time::Duration::from_millis(250),
