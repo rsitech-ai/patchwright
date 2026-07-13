@@ -27,14 +27,14 @@
 - Modify: `Sources/PatchwrightCore/Models.swift`
 - Modify: `Tests/PatchwrightCoreTests/ModelsTests.swift`
 
-- [ ] Add a Rust contract test for the approved happy path: `discovered → assessing → planned → awaitingPreparationApproval → preparing → implementing → verifying → reviewing → awaitingDeliveryApproval → delivering → monitoring → awaitingMergeApproval → merging → completed`.
-- [ ] Add tests proving skipped approvals fail; any nonterminal state may enter `paused`, `blocked`, `failed`, or `cancelled`; terminal states cannot leave; `paused` and `blocked` resume only to their recorded `resume_state`.
-- [ ] Run `cargo test -p patchwright-core --test domain_contract task_` and capture the missing-variant/transition RED.
-- [ ] Replace `AwaitingApproval` with `AwaitingPreparationApproval`; add `Assessing`, `Paused`, `Blocked`, `AwaitingMergeApproval`, and `Merging` in Rust and Swift.
-- [ ] Add `TaskInterruption { state, resume_state, reason }` and require a nonempty reason for paused/blocked/failed/cancelled transitions.
-- [ ] Mirror attention rules in Swift: preparation, delivery, merge, blocked, and failed require attention.
-- [ ] Run the focused Rust and Swift model tests and confirm GREEN.
-- [ ] Commit: `Model the durable task lifecycle`.
+- [x] Add a Rust contract test for the approved happy path: `discovered → assessing → planned → awaitingPreparationApproval → preparing → implementing → verifying → reviewing → awaitingDeliveryApproval → delivering → monitoring → awaitingMergeApproval → merging → completed`.
+- [x] Add tests proving skipped approvals fail; any nonterminal state may enter `paused`, `blocked`, `failed`, or `cancelled`; terminal states cannot leave; `paused` and `blocked` resume only to their recorded `resume_state`.
+- [x] Run `cargo test -p patchwright-core --test domain_contract task_` and capture the missing-variant/transition RED.
+- [x] Replace `AwaitingApproval` with `AwaitingPreparationApproval`; add `Assessing`, `Paused`, `Blocked`, `AwaitingMergeApproval`, and `Merging` in Rust and Swift.
+- [x] Add `TaskInterruption { state, resume_state, reason }` and require a nonempty reason for paused/blocked/failed/cancelled transitions.
+- [x] Mirror attention rules in Swift: preparation, delivery, merge, blocked, and failed require attention.
+- [x] Run the focused Rust and Swift model tests and confirm GREEN.
+- [x] Commit: `Model the durable task lifecycle`.
 
 ## Task 2: Add typed sources, repository bindings, and contracts
 

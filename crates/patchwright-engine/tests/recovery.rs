@@ -6,6 +6,7 @@ fn restart_replays_task_and_deduplicates_delivery() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("patchwright.sqlite3");
     let mut task = Task::new("Fix reconciliation", "/tmp/repository").unwrap();
+    task.transition(TaskState::Assessing).unwrap();
     task.transition(TaskState::Planned).unwrap();
 
     {
