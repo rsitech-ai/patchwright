@@ -44,13 +44,13 @@
 - Add: `crates/patchwright-core/src/contract.rs`
 - Add: `crates/patchwright-core/tests/task_contract.rs`
 
-- [ ] Write tests for `TaskSource::LocalRequest`, `GitHubIssue`, and `GitHubPullRequest`, including immutable repository/item URL, snapshot time, and PR base/head refs and SHAs.
-- [ ] Write boundary tests rejecting an empty repository name, non-HTTPS GitHub URLs, zero installation/repository IDs, missing PR SHAs, relative local roots, empty acceptance criteria, and duplicate dependency IDs.
-- [ ] Run `cargo test -p patchwright-core --test task_contract` and observe RED.
-- [ ] Add `RepositoryBinding`, `TaskSource`, `TaskContract`, `InstructionDigest`, `VerificationCommand`, `RiskClass`, and `SensitivePath` with private fields plus validating constructors.
-- [ ] Keep `Task` summary-compatible while adding `source`, `repository_binding_id`, `contract_version`, and optional interruption/checkpoint references with serde defaults for old rows.
-- [ ] Export the new public types and run focused tests, then `cargo test -p patchwright-core`.
-- [ ] Commit: `Add typed task contracts and repository bindings`.
+- [x] Write tests for `TaskSource::LocalRequest`, `GitHubIssue`, and `GitHubPullRequest`, including immutable repository/item URL, snapshot time, and PR base/head refs and SHAs.
+- [x] Write boundary tests rejecting an empty repository name, non-HTTPS GitHub URLs, zero installation/repository IDs, missing PR SHAs, relative local roots, empty acceptance criteria, and duplicate dependency IDs.
+- [x] Run `cargo test -p patchwright-core --test task_contract` and observe RED.
+- [x] Add `RepositoryBinding`, `TaskSource`, `TaskContract`, `InstructionDigest`, `VerificationCommand`, `RiskClass`, and `SensitivePath` with private fields plus validating constructors.
+- [x] Keep `Task` summary-compatible while adding `source`, `repository_binding_id`, `contract_version`, and optional interruption/checkpoint references with serde defaults for old rows.
+- [x] Export the new public types and run focused tests, then `cargo test -p patchwright-core`.
+- [x] Commit: `Add typed task contracts and repository bindings`.
 
 ## Task 3: Replace capability-only approvals with exact action fingerprints
 
