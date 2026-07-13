@@ -1,3 +1,4 @@
+import AppKit
 import PatchwrightCore
 import SwiftUI
 
@@ -7,28 +8,32 @@ struct ContentView: View {
     @State private var taskDraft: TaskDraft?
 
     var body: some View {
-        VStack(spacing: 0) {
-            commandBar
-            Divider()
-            HStack(spacing: 0) {
-                SidebarView(store: store)
-                    .frame(width: 270)
-                Divider()
-                HStack(spacing: 0) {
-                    detailContent
-                    if inspectorPresented {
-                        Divider()
-                        inspectorContent
-                            .frame(width: 300)
-                    }
+        NavigationSplitView {
+            SidebarView(store: store)
+                .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 280)
+        } content: {
+            WorkspaceTableView(store: store)
+                .navigationSplitViewColumnWidth(min: 420, ideal: 670)
+        } detail: {
+            detailContent
+                .frame(minWidth: 420)
+                .inspector(isPresented: $inspectorPresented) {
+                    inspectorContent
+                        .inspectorColumnWidth(min: 260, ideal: 320, max: 420)
                 }
-            }
         }
-        .overlay {
-            if store.isSyncingGitHub {
-                ProgressView("Ingesting GitHub… \(store.repositories.count) repositories available")
-                    .padding(18)
-                    .background(.regularMaterial, in: .rect(cornerRadius: 12))
+        .toolbar {
+            ToolbarItemGroup {
+                Button("New Local Task", systemImage: "plus") { chooseRepository() }
+                    .keyboardShortcut("n", modifiers: .command)
+                    .help("Create a task from a local Git repository")
+                Button("Inspector", systemImage: "sidebar.trailing") { inspectorPresented.toggle() }
+                    .help("Show evidence, approvals, instructions, and credential state")
+                Button("Sync GitHub", systemImage: "arrow.triangle.2.circlepath") {
+                    Task { await store.syncGitHub() }
+                }
+                .disabled(store.isSyncingGitHub)
+                .help("Refresh the local GitHub snapshot")
             }
         }
         .sheet(item: $taskDraft) { draft in
@@ -39,40 +44,25 @@ struct ContentView: View {
         .task { await store.refreshHealth() }
     }
 
-    private var commandBar: some View {
-        HStack(spacing: 12) {
-            Text("Patchwright").font(.headline)
-            Spacer()
-            Button("New Task", systemImage: "plus") { chooseRepository() }
-                .keyboardShortcut("n", modifiers: .command)
-                .help("Create a task from a local Git repository")
-            Button("Evidence", systemImage: "sidebar.trailing") { inspectorPresented.toggle() }
-                .help("Show or hide evidence and ingestion details")
-            Button("Sync GitHub", systemImage: "arrow.triangle.2.circlepath") {
-                Task { await store.syncGitHub() }
-            }
-            .disabled(store.isSyncingGitHub)
-            .help("Refresh the read-only local GitHub snapshot")
-        }
-        .buttonStyle(.borderless)
-        .padding(.horizontal, 12)
-        .frame(height: 42)
-        .background(.bar)
-    }
-
     @ViewBuilder private var detailContent: some View {
-        if let repository = store.selectedRepository, store.selectedTaskID == nil {
-            GitHubRepositoryView(snapshot: repository)
+        if let task = store.selectedTask {
+            TaskDetailView(task: task)
+        } else if let snapshot = store.selectedRepository {
+            GitHubRepositoryView(store: store, snapshot: snapshot, item: store.selectedWorkItem)
         } else {
-            TaskDetailView(task: store.tasks.first { $0.id == store.selectedTaskID })
+            ContentUnavailableView(
+                "Choose Work to Inspect",
+                systemImage: "sidebar.left",
+                description: Text("Select a repository, pull request, or task from the workspace table.")
+            )
         }
     }
 
     @ViewBuilder private var inspectorContent: some View {
-        if let repository = store.selectedRepository, store.selectedTaskID == nil {
-            GitHubInspector(snapshot: repository, status: store.githubStatus, summary: store.githubSyncSummary)
+        if let snapshot = store.selectedRepository, store.selectedTaskID == nil {
+            GitHubInspector(snapshot: snapshot, status: store.githubStatus, summary: store.githubSyncSummary)
         } else {
-            EvidenceInspector(task: store.tasks.first { $0.id == store.selectedTaskID })
+            EvidenceInspector(task: store.selectedTask)
         }
     }
 
@@ -101,7 +91,13 @@ private struct TaskComposer: View {
             Text("Create Engineering Task").font(.title2.bold())
             Text(draft.repositoryPath).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             TextField("What should Patchwright do?", text: $title)
-            HStack { Spacer(); Button("Cancel", role: .cancel) { dismiss() }; Button("Create") { create(title); dismiss() }.keyboardShortcut(.defaultAction).disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Create") { create(title); dismiss() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
         }
         .padding(24)
         .frame(width: 520)

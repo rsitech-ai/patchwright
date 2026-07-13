@@ -81,15 +81,35 @@ async fn dispatch(request: Request, store: &Mutex<EventStore>) -> Value {
             json!({"status":"ok","version":env!("CARGO_PKG_VERSION")}),
         ),
         "task.create" => create_task(request.id, &request.params, store),
+        "task.list" => list_tasks(request.id, store),
         "task.timeline" => task_timeline(request.id, &request.params, store),
         "task.previewFromGitHub" => preview_task_from_github(request.id, &request.params, store),
         "task.createFromGitHub" => create_task_from_github(request.id, &request.params, store),
         "repository.bind" => bind_repository(request.id, &request.params, store),
         "github.status" => github_status(request.id, store),
         "github.repositories" => github_repositories(request.id, store),
+        "github.queue" => github_queue(request.id, store),
         "github.repository" => github_repository(request.id, &request.params, store),
         "github.sync" => sync_github(request.id, &request.params, store).await,
         _ => rpc_error(request.id, -32601, "method not found", None),
+    }
+}
+
+fn list_tasks(id: Value, store: &Mutex<EventStore>) -> Value {
+    match store.lock().expect("event store lock poisoned").tasks() {
+        Ok(tasks) => rpc_result(id, json!(tasks)),
+        Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    }
+}
+
+fn github_queue(id: Value, store: &Mutex<EventStore>) -> Value {
+    match store
+        .lock()
+        .expect("event store lock poisoned")
+        .github_work_items()
+    {
+        Ok(items) => rpc_result(id, json!(items)),
+        Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
     }
 }
 

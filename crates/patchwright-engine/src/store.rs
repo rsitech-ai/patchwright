@@ -237,6 +237,15 @@ impl EventStore {
             .transpose()
     }
 
+    pub fn tasks(&self) -> Result<Vec<Task>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT payload FROM tasks ORDER BY updated_at DESC, id ASC")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|row| decode_json_row(row, "task"))
+            .collect::<Result<Vec<_>>>()
+    }
+
     pub fn create_converted_task(
         &self,
         task: &Task,
@@ -582,6 +591,25 @@ impl EventStore {
         })
         .collect::<Result<Vec<_>, _>>()
         .context("load GitHub repositories")
+    }
+
+    pub fn github_work_items(&self) -> Result<Vec<crate::GitHubWorkItem>> {
+        let mut statement = self.connection.prepare(
+            "SELECT snapshot_payload FROM github_snapshots ORDER BY full_name COLLATE NOCASE",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut items = Vec::new();
+        for row in rows {
+            let snapshot: GitHubRepositorySnapshot = decode_json_row(row, "GitHub snapshot")?;
+            items.extend(snapshot.work_items);
+        }
+        items.sort_by(|left, right| {
+            left.repository_full_name
+                .cmp(&right.repository_full_name)
+                .then_with(|| left.number.cmp(&right.number))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(items)
     }
 
     pub fn github_last_synced_at(&self) -> Result<Option<String>> {
