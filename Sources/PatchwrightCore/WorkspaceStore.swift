@@ -11,6 +11,9 @@ public final class WorkspaceStore: ObservableObject {
     @Published public private(set) var selectedRepository: GitHubRepositorySnapshot?
     @Published public private(set) var githubSyncSummary: GitHubSyncSummary?
     @Published public private(set) var isSyncingGitHub = false
+    @Published public private(set) var conversionPreview: ConversionPreview?
+    @Published public private(set) var isConvertingGitHubItem = false
+    @Published public private(set) var conversionError: String?
     @Published public var githubError: String?
     public let engine: any EngineServing
     private let healthRetryAttempts: Int
@@ -107,6 +110,42 @@ public final class WorkspaceStore: ObservableObject {
             selectedTaskID = task.id
         } catch {
             connectionState = .failed(error.localizedDescription)
+        }
+    }
+
+    public func previewTask(from item: GitHubWorkItem) async {
+        isConvertingGitHubItem = true
+        defer { isConvertingGitHubItem = false }
+        do {
+            conversionPreview = try await engine.previewTaskFromGitHub(item)
+            conversionError = nil
+        } catch {
+            conversionPreview = nil
+            conversionError = error.localizedDescription
+        }
+    }
+
+    public func createTask(from item: GitHubWorkItem) async {
+        guard let preview = conversionPreview,
+              preview.repositoryFullName == item.repositoryFullName,
+              preview.itemNumber == item.number,
+              preview.sourceUpdatedAt == item.updatedAt else {
+            conversionError = "Preview and confirm this GitHub item before creating a task."
+            return
+        }
+        isConvertingGitHubItem = true
+        defer { isConvertingGitHubItem = false }
+        do {
+            let outcome = try await engine.createTaskFromGitHub(item)
+            if !tasks.contains(where: { $0.id == outcome.task.id }) {
+                tasks.append(outcome.task)
+            }
+            selectedTaskID = outcome.task.id
+            conversionPreview = nil
+            conversionError = nil
+        } catch {
+            conversionPreview = nil
+            conversionError = error.localizedDescription
         }
     }
 }

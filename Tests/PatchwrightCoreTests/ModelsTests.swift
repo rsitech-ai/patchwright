@@ -26,6 +26,18 @@ final class ModelsTests: XCTestCase {
         XCTAssertTrue(task.requiresAttention)
     }
 
+    func testDecodesTypedGitHubPullRequestTaskSource() throws {
+        let data = Data(#"{"id":"5A8F17C3-733B-46EE-AE48-015D091A0B91","title":"Repair CI","repositoryPath":"/tmp/repo","state":"discovered","createdAt":"2026-07-13T10:00:00Z","updatedAt":"2026-07-13T10:01:00Z","source":{"kind":"githubPullRequest","details":{"repositoryId":42,"repositoryFullName":"acme/widget","number":8,"htmlUrl":"https://github.com/acme/widget/pull/8","snapshotAt":"2026-07-13T10:00:00Z","baseRef":"main","baseSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","headRef":"repair","headSha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}},"repositoryBindingId":"11111111-1111-1111-1111-111111111111","contractVersion":1}"#.utf8)
+        let task = try JSONDecoder.patchwright.decode(EngineeringTask.self, from: data)
+        guard case .githubPullRequest(let source) = task.source else {
+            return XCTFail("Expected GitHub pull request source")
+        }
+        XCTAssertEqual(source.repositoryID, 42)
+        XCTAssertEqual(source.baseSHA, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        XCTAssertEqual(source.headSHA, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        XCTAssertEqual(task.contractVersion, 1)
+    }
+
     func testTaskAttentionStatesCoverEveryOperatorGate() {
         for state in [
             TaskState.awaitingPreparationApproval,

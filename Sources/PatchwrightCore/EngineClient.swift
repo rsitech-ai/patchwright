@@ -23,6 +23,32 @@ public protocol EngineServing: Sendable {
     ) async throws -> Result
 }
 
+public extension EngineServing {
+    func previewTaskFromGitHub(_ item: GitHubWorkItem) async throws -> ConversionPreview {
+        try await call(
+            method: "task.previewFromGitHub",
+            params: conversionParameters(for: item),
+            as: ConversionPreview.self
+        )
+    }
+
+    func createTaskFromGitHub(_ item: GitHubWorkItem) async throws -> ConversionOutcome {
+        try await call(
+            method: "task.createFromGitHub",
+            params: conversionParameters(for: item),
+            as: ConversionOutcome.self
+        )
+    }
+}
+
+private func conversionParameters(for item: GitHubWorkItem) -> [String: String] {
+    [
+        "repositoryFullName": item.repositoryFullName,
+        "itemNumber": String(item.number),
+        "expectedUpdatedAt": ISO8601DateFormatter().string(from: item.updatedAt),
+    ]
+}
+
 private struct RPCRequest: Encodable {
     let jsonrpc = "2.0"
     let id: String
