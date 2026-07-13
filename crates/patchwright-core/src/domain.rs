@@ -1,3 +1,4 @@
+use crate::{RepositoryBindingId, TaskSource};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::Path, str::FromStr};
@@ -135,6 +136,14 @@ pub struct Task {
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interruption: Option<TaskInterruption>,
+    #[serde(default)]
+    pub source: TaskSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_binding_id: Option<RepositoryBindingId>,
+    #[serde(default = "default_contract_version")]
+    pub contract_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<Uuid>,
 }
 
 impl Task {
@@ -163,6 +172,10 @@ impl Task {
             created_at: now,
             updated_at: now,
             interruption: None,
+            source: TaskSource::LocalRequest,
+            repository_binding_id: None,
+            contract_version: default_contract_version(),
+            checkpoint_id: None,
         })
     }
 
@@ -250,6 +263,10 @@ impl Task {
     pub const fn interruption(&self) -> Option<&TaskInterruption> {
         self.interruption.as_ref()
     }
+}
+
+const fn default_contract_version() -> u32 {
+    1
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
