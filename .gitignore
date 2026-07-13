@@ -1,0 +1,8 @@
+/.build/
+/target/
+/dist/
+/.patchwright/
+*.sqlite3*
+*.sock
+.DS_Store
+
