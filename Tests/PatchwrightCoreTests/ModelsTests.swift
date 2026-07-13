@@ -10,9 +10,27 @@ final class ModelsTests: XCTestCase {
         XCTAssertTrue(task.requiresAttention)
     }
 
+    func testDecodesGitHubRepositorySnapshot() throws {
+        let data = Data(#"{"repository":{"id":1,"fullName":"octocat/hello","description":null,"private":false,"archived":false,"defaultBranch":"main","htmlUrl":"https://github.com/octocat/hello","updatedAt":"2026-07-13T10:00:00Z","openIssuesCount":1},"workItems":[{"id":10,"repositoryFullName":"octocat/hello","number":1,"kind":"pullRequest","title":"Ship it","state":"open","body":"Body","author":"octocat","htmlUrl":"https://github.com/octocat/hello/pull/1","draft":true,"commentsCount":2,"headSha":"abc","updatedAt":"2026-07-13T10:00:00Z","labels":["bug"],"assignees":["hubot"],"milestone":"v1"}],"discussions":[],"checks":[],"workflowRuns":[]}"#.utf8)
+        let snapshot = try JSONDecoder.patchwright.decode(GitHubRepositorySnapshot.self, from: data)
+        XCTAssertEqual(snapshot.repository.fullName, "octocat/hello")
+        XCTAssertEqual(snapshot.workItems.first?.kind, .pullRequest)
+        XCTAssertEqual(snapshot.workItems.first?.headSHA, "abc")
+        XCTAssertEqual(snapshot.workItems.first?.labels, ["bug"])
+        XCTAssertEqual(snapshot.workItems.first?.assignees, ["hubot"])
+        XCTAssertEqual(snapshot.workItems.first?.milestone, "v1")
+    }
+
+    func testJSONLineFramerWaitsForACompleteFragmentedResponse() throws {
+        var framer = JSONLineFramer(maximumBytes: 128)
+        XCTAssertNil(try framer.append(Data(#"{"result":{"repositories":51"#.utf8)))
+        let line = try XCTUnwrap(framer.append(Data("}}\nignored".utf8)))
+        XCTAssertEqual(String(decoding: line, as: UTF8.self), #"{"result":{"repositories":51}}"#)
+    }
+
     @MainActor
     func testWorkspaceStoreSurfacesEngineFailure() async {
-        let store = WorkspaceStore(engine: FailingEngine())
+        let store = WorkspaceStore(engine: FailingEngine(), healthRetryAttempts: 1)
         await store.refreshHealth()
         XCTAssertEqual(store.connectionState, .failed("Engine unavailable"))
     }

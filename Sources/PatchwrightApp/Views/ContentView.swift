@@ -3,25 +3,32 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var store: WorkspaceStore
-    @State private var inspectorPresented = true
+    @State private var inspectorPresented = false
     @State private var taskDraft: TaskDraft?
 
     var body: some View {
-        NavigationSplitView {
-            SidebarView(store: store)
-                .navigationSplitViewColumnWidth(min: 220, ideal: 260)
-        } detail: {
-            TaskDetailView(task: store.tasks.first { $0.id == store.selectedTaskID })
+        VStack(spacing: 0) {
+            commandBar
+            Divider()
+            HStack(spacing: 0) {
+                SidebarView(store: store)
+                    .frame(width: 270)
+                Divider()
+                HStack(spacing: 0) {
+                    detailContent
+                    if inspectorPresented {
+                        Divider()
+                        inspectorContent
+                            .frame(width: 300)
+                    }
+                }
+            }
         }
-        .inspector(isPresented: $inspectorPresented) {
-            EvidenceInspector(task: store.tasks.first { $0.id == store.selectedTaskID })
-                .inspectorColumnWidth(min: 250, ideal: 300, max: 420)
-        }
-        .toolbar {
-            ToolbarItemGroup {
-                Button("New Task", systemImage: "plus") { chooseRepository() }
-                    .keyboardShortcut("n", modifiers: .command)
-                Button("Toggle Evidence", systemImage: "sidebar.trailing") { inspectorPresented.toggle() }
+        .overlay {
+            if store.isSyncingGitHub {
+                ProgressView("Ingesting GitHub… \(store.repositories.count) repositories available")
+                    .padding(18)
+                    .background(.regularMaterial, in: .rect(cornerRadius: 12))
             }
         }
         .sheet(item: $taskDraft) { draft in
@@ -30,6 +37,43 @@ struct ContentView: View {
             }
         }
         .task { await store.refreshHealth() }
+    }
+
+    private var commandBar: some View {
+        HStack(spacing: 12) {
+            Text("Patchwright").font(.headline)
+            Spacer()
+            Button("New Task", systemImage: "plus") { chooseRepository() }
+                .keyboardShortcut("n", modifiers: .command)
+                .help("Create a task from a local Git repository")
+            Button("Evidence", systemImage: "sidebar.trailing") { inspectorPresented.toggle() }
+                .help("Show or hide evidence and ingestion details")
+            Button("Sync GitHub", systemImage: "arrow.triangle.2.circlepath") {
+                Task { await store.syncGitHub() }
+            }
+            .disabled(store.isSyncingGitHub)
+            .help("Refresh the read-only local GitHub snapshot")
+        }
+        .buttonStyle(.borderless)
+        .padding(.horizontal, 12)
+        .frame(height: 42)
+        .background(.bar)
+    }
+
+    @ViewBuilder private var detailContent: some View {
+        if let repository = store.selectedRepository, store.selectedTaskID == nil {
+            GitHubRepositoryView(snapshot: repository)
+        } else {
+            TaskDetailView(task: store.tasks.first { $0.id == store.selectedTaskID })
+        }
+    }
+
+    @ViewBuilder private var inspectorContent: some View {
+        if let repository = store.selectedRepository, store.selectedTaskID == nil {
+            GitHubInspector(snapshot: repository, status: store.githubStatus, summary: store.githubSyncSummary)
+        } else {
+            EvidenceInspector(task: store.tasks.first { $0.id == store.selectedTaskID })
+        }
     }
 
     private func chooseRepository() {
@@ -63,4 +107,3 @@ private struct TaskComposer: View {
         .frame(width: 520)
     }
 }
-

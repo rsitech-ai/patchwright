@@ -36,6 +36,24 @@ private struct RPCResponse<Result: Decodable>: Decodable {
     let error: Failure?
 }
 
+struct JSONLineFramer: Sendable {
+    private var buffer = Data()
+    private let maximumBytes: Int
+
+    init(maximumBytes: Int) {
+        self.maximumBytes = maximumBytes
+    }
+
+    mutating func append(_ chunk: Data) throws -> Data? {
+        guard buffer.count <= maximumBytes - chunk.count else {
+            throw EngineError.invalidResponse
+        }
+        buffer.append(chunk)
+        guard let newline = buffer.firstIndex(of: 0x0A) else { return nil }
+        return Data(buffer[..<newline])
+    }
+}
+
 public actor UnixEngineClient: EngineServing {
     private let socketPath: String
 
@@ -63,23 +81,19 @@ public actor UnixEngineClient: EngineServing {
             connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
+                    connection.stateUpdateHandler = nil
                     connection.send(content: payload, completion: .contentProcessed { error in
                         if let error {
                             connection.cancel()
                             continuation.resume(throwing: EngineError.connectionFailed(error.localizedDescription))
                             return
                         }
-                        connection.receive(minimumIncompleteLength: 1, maximumLength: 1_048_576) { data, _, _, error in
+                        receiveJSONLine(
+                            connection: connection,
+                            framer: JSONLineFramer(maximumBytes: 64 * 1_024 * 1_024)
+                        ) { result in
                             connection.cancel()
-                            if let error {
-                                continuation.resume(throwing: EngineError.connectionFailed(error.localizedDescription))
-                            } else if let data, let newline = data.firstIndex(of: 0x0A) {
-                                continuation.resume(returning: data[..<newline])
-                            } else if let data, !data.isEmpty {
-                                continuation.resume(returning: data)
-                            } else {
-                                continuation.resume(throwing: EngineError.invalidResponse)
-                            }
+                            continuation.resume(with: result)
                         }
                     })
                 case .failed(let error):
@@ -93,3 +107,27 @@ public actor UnixEngineClient: EngineServing {
     }
 }
 
+private func receiveJSONLine(
+    connection: NWConnection,
+    framer: JSONLineFramer,
+    completion: @escaping @Sendable (Result<Data, Error>) -> Void
+) {
+    connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { data, _, isComplete, error in
+        if let error {
+            completion(.failure(EngineError.connectionFailed(error.localizedDescription)))
+            return
+        }
+        var next = framer
+        do {
+            if let data, let line = try next.append(data) {
+                completion(.success(line))
+            } else if isComplete {
+                completion(.failure(EngineError.invalidResponse))
+            } else {
+                receiveJSONLine(connection: connection, framer: next, completion: completion)
+            }
+        } catch {
+            completion(.failure(error))
+        }
+    }
+}
