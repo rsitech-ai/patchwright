@@ -26,3 +26,14 @@ public struct ConversionOutcome: Codable, Equatable, Sendable {
     public let task: EngineeringTask
     public let created: Bool
 }
+
+public struct RepositoryBindingSummary: Codable, Equatable, Sendable {
+    public let id: UUID
+    public let githubRepositoryId: UInt64
+    public let fullName: String
+    public let installationId: UInt64
+    public let managedClone: String?
+    public let worktreeRoot: String
+    public var githubRepositoryID: UInt64 { githubRepositoryId }
+    public var installationID: UInt64 { installationId }
+}
