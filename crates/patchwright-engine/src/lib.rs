@@ -10,9 +10,9 @@ mod worktree;
 
 pub use command::{CommandOutput, CommandRunner, CommandSpec};
 pub use github::{
-    GhCliCredentialBroker, GitHubAccount, GitHubCheckRun, GitHubDiscussion, GitHubRepository,
-    GitHubRepositorySnapshot, GitHubSource, GitHubSyncSummary, GitHubToken, GitHubWorkItem,
-    GitHubWorkflowRun, WorkItemKind,
+    GhCliCredentialBroker, GitHubAccount, GitHubCheckRun, GitHubDiscussion, GitHubPermission,
+    GitHubRepository, GitHubRepositoryPermissions, GitHubRepositorySnapshot, GitHubSource,
+    GitHubSyncSummary, GitHubToken, GitHubWorkItem, GitHubWorkflowRun, WorkItemKind,
 };
 pub use jobs::{
     CancellationState, Job, JobCheckpoint, JobError, JobId, JobKind, JobState, TaskCheckpoint,
