@@ -41,14 +41,33 @@ final class ModelsTests: XCTestCase {
     }
 
     func testDecodesGitHubRepositorySnapshot() throws {
-        let data = Data(#"{"repository":{"id":1,"fullName":"octocat/hello","description":null,"private":false,"archived":false,"defaultBranch":"main","htmlUrl":"https://github.com/octocat/hello","updatedAt":"2026-07-13T10:00:00Z","openIssuesCount":1},"workItems":[{"id":10,"repositoryFullName":"octocat/hello","number":1,"kind":"pullRequest","title":"Ship it","state":"open","body":"Body","author":"octocat","htmlUrl":"https://github.com/octocat/hello/pull/1","draft":true,"commentsCount":2,"headSha":"abc","updatedAt":"2026-07-13T10:00:00Z","labels":["bug"],"assignees":["hubot"],"milestone":"v1"}],"discussions":[],"checks":[],"workflowRuns":[]}"#.utf8)
+        let data = Data(#"{"repository":{"id":1,"fullName":"octocat/hello","description":null,"private":false,"archived":false,"defaultBranch":"main","htmlUrl":"https://github.com/octocat/hello","updatedAt":"2026-07-13T10:00:00Z","pushedAt":"2026-07-13T09:30:00Z","openIssuesCount":1,"openPullRequestCount":1,"failingCheckCount":2,"defaultBranchSha":"def","defaultBranchCommittedAt":"2026-07-13T09:00:00Z","installationId":99,"permissions":{"admin":false,"maintain":true,"push":true,"triage":true,"pull":true}},"workItems":[{"id":10,"repositoryFullName":"octocat/hello","number":1,"kind":"pullRequest","title":"Ship it","state":"open","body":"Body","author":"octocat","htmlUrl":"https://github.com/octocat/hello/pull/1","draft":true,"commentsCount":2,"headSha":"abc","baseSha":"def","headRef":"feature","baseRef":"main","createdAt":"2026-07-12T08:00:00Z","headCommittedAt":"2026-07-13T08:30:00Z","latestReviewAt":"2026-07-13T09:45:00Z","updatedAt":"2026-07-13T10:00:00Z","reviewDecision":"changesRequested","ciHealth":"failing","mergeable":false,"mergeableState":"dirty","headRepositoryFullName":"fork/hello","headRepositoryFork":true,"maintainerCanModify":true,"additions":12,"deletions":3,"changedFiles":2,"labels":["bug"],"assignees":["hubot"],"milestone":"v1"}],"discussions":[],"checks":[],"workflowRuns":[]}"#.utf8)
         let snapshot = try JSONDecoder.patchwright.decode(GitHubRepositorySnapshot.self, from: data)
         XCTAssertEqual(snapshot.repository.fullName, "octocat/hello")
+        XCTAssertEqual(snapshot.repository.openPullRequestCount, 1)
+        XCTAssertEqual(snapshot.repository.failingCheckCount, 2)
+        XCTAssertEqual(snapshot.repository.defaultBranchSHA, "def")
+        XCTAssertEqual(snapshot.repository.installationID, 99)
+        XCTAssertEqual(snapshot.repository.updatedAt, ISO8601DateFormatter().date(from: "2026-07-13T10:00:00Z"))
         XCTAssertEqual(snapshot.workItems.first?.kind, .pullRequest)
         XCTAssertEqual(snapshot.workItems.first?.headSHA, "abc")
+        XCTAssertEqual(snapshot.workItems.first?.baseSHA, "def")
+        XCTAssertEqual(snapshot.workItems.first?.reviewDecision, "changesRequested")
+        XCTAssertEqual(snapshot.workItems.first?.ciHealth, "failing")
+        XCTAssertEqual(snapshot.workItems.first?.changedFiles, 2)
+        XCTAssertEqual(snapshot.workItems.first?.headCommittedAt, ISO8601DateFormatter().date(from: "2026-07-13T08:30:00Z"))
         XCTAssertEqual(snapshot.workItems.first?.labels, ["bug"])
         XCTAssertEqual(snapshot.workItems.first?.assignees, ["hubot"])
         XCTAssertEqual(snapshot.workItems.first?.milestone, "v1")
+    }
+
+    func testDecodesLegacyGitHubRepositorySnapshotWithNewMetadataAbsent() throws {
+        let data = Data(#"{"repository":{"id":1,"fullName":"octocat/hello","description":null,"private":false,"archived":false,"defaultBranch":"main","htmlUrl":"https://github.com/octocat/hello","updatedAt":"2026-07-13T10:00:00Z","openIssuesCount":1},"workItems":[{"id":10,"repositoryFullName":"octocat/hello","number":1,"kind":"issue","title":"Legacy","state":"open","body":null,"author":"octocat","htmlUrl":"https://github.com/octocat/hello/issues/1","draft":false,"commentsCount":0,"headSha":null,"updatedAt":"2026-07-13T10:00:00Z","labels":[],"assignees":[],"milestone":null}],"discussions":[],"checks":[],"workflowRuns":[]}"#.utf8)
+        let snapshot = try JSONDecoder.patchwright.decode(GitHubRepositorySnapshot.self, from: data)
+        XCTAssertNil(snapshot.repository.pushedAt)
+        XCTAssertNil(snapshot.repository.defaultBranchSHA)
+        XCTAssertNil(snapshot.workItems.first?.headCommittedAt)
+        XCTAssertEqual(snapshot.workItems.first?.updatedAt, ISO8601DateFormatter().date(from: "2026-07-13T10:00:00Z"))
     }
 
     func testJSONLineFramerWaitsForACompleteFragmentedResponse() throws {

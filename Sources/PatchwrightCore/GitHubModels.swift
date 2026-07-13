@@ -16,9 +16,26 @@ public struct GitHubRepository: Codable, Identifiable, Equatable, Sendable {
     public let archived: Bool
     public let defaultBranch: String
     public let htmlUrl: String
-    public let updatedAt: String
+    public let updatedAt: Date
+    public let pushedAt: Date?
     public let openIssuesCount: UInt64
+    public let openPullRequestCount: UInt64?
+    public let failingCheckCount: UInt64?
+    public let defaultBranchSha: String?
+    public let defaultBranchCommittedAt: Date?
+    public let installationId: UInt64?
+    public let permissions: GitHubRepositoryPermissions?
     public var htmlURL: String { htmlUrl }
+    public var defaultBranchSHA: String? { defaultBranchSha }
+    public var installationID: UInt64? { installationId }
+}
+
+public struct GitHubRepositoryPermissions: Codable, Equatable, Sendable {
+    public let admin: Bool
+    public let maintain: Bool
+    public let push: Bool
+    public let triage: Bool
+    public let pull: Bool
 }
 
 public enum GitHubWorkItemKind: String, Codable, Sendable { case issue, pullRequest }
@@ -35,11 +52,30 @@ public struct GitHubWorkItem: Codable, Identifiable, Equatable, Sendable {
     public let htmlUrl: String
     public let draft: Bool
     public let commentsCount: UInt64
+    public let baseRef: String?
+    public let baseSha: String?
+    public let headRef: String?
     public let headSha: String?
-    public let updatedAt: String
+    public let createdAt: Date?
+    public let headCommittedAt: Date?
+    public let latestReviewAt: Date?
+    public let updatedAt: Date
+    public let reviewDecision: String?
+    public let ciHealth: String?
+    public let mergeable: Bool?
+    public let mergeableState: String?
+    public let rebaseable: Bool?
+    public let hasConflicts: Bool?
+    public let headRepositoryFullName: String?
+    public let headRepositoryFork: Bool?
+    public let maintainerCanModify: Bool?
+    public let additions: UInt64?
+    public let deletions: UInt64?
+    public let changedFiles: UInt64?
     public let labels: [String]
     public let assignees: [String]
     public let milestone: String?
+    public var baseSHA: String? { baseSha }
     public var headSHA: String? { headSha }
     public var htmlURL: String { htmlUrl }
 }
