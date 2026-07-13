@@ -18,4 +18,7 @@ pub use instructions::{
     EffectiveInstructions, InstructionConflict, InstructionKind, InstructionResolver,
     InstructionSource,
 };
-pub use policy::{Approval, Capability, Policy, PolicyDecision};
+pub use policy::{
+    ActionFingerprint, ActionFingerprintDraft, Approval, ApprovalClass, ApprovalError, Capability,
+    Policy, PolicyDecision,
+};
