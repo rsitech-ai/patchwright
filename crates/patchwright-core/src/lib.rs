@@ -2,6 +2,7 @@ mod contract;
 mod domain;
 mod instructions;
 mod policy;
+mod sorting;
 
 pub use contract::{
     ContractError, CredentialHealth, GitHubIssueSource, GitHubIssueSourceInput,
@@ -21,4 +22,9 @@ pub use instructions::{
 pub use policy::{
     ActionFingerprint, ActionFingerprintDraft, Approval, ApprovalClass, ApprovalError, Capability,
     Policy, PolicyDecision,
+};
+pub use sorting::{
+    CiHealth, PullRequestQueueRecord, PullRequestQueueState, PullRequestSort, PullRequestSortKey,
+    RepositoryQueueRecord, RepositorySort, RepositorySortKey, ReviewState, SortDirection,
+    WorkspaceFilter, sort_pull_requests, sort_repositories,
 };
