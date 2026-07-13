@@ -59,14 +59,14 @@
 - Add: `crates/patchwright-core/tests/approval_contract.rs`
 - Modify: `crates/patchwright-core/src/lib.rs`
 
-- [ ] Add tests for four `ApprovalClass` values: `CodexRuntime`, `LocalCapability`, `GitHubDelivery`, and `Merge`.
-- [ ] Add tests proving an approval is rejected for a different task, repository, capability, action digest, head/base SHA, policy hash, instruction hash, expiration, or invalidation generation.
-- [ ] Add a test proving `MergePullRequest` is approval-required—not globally denied—and only a `Merge` approval with exact PR state authorizes it.
-- [ ] Run `cargo test -p patchwright-core --test approval_contract` and observe RED.
-- [ ] Add `ActionFingerprint` containing task ID, repository ID/name, optional PR/branch/head/base, typed payload SHA-256, policy/instruction hashes, and invalidation generation.
-- [ ] Replace `Approval::for_capability` with `Approval::new(class, capability, fingerprint, approver, now, expires_at)` and `Policy::authorize(capability, fingerprint, approval, now)`.
-- [ ] Preserve the automation kill switch and deny admin bypass as a separate non-approvable capability.
-- [ ] Update existing tests/callers, run all core tests, and commit: `Bind approvals to exact actions`.
+- [x] Add tests for four `ApprovalClass` values: `CodexRuntime`, `LocalCapability`, `GitHubDelivery`, and `Merge`.
+- [x] Add tests proving an approval is rejected for a different task, repository, capability, action digest, head/base SHA, policy hash, instruction hash, expiration, or invalidation generation.
+- [x] Add a test proving `MergePullRequest` is approval-required—not globally denied—and only a `Merge` approval with exact PR state authorizes it.
+- [x] Run `cargo test -p patchwright-core --test approval_contract` and observe RED.
+- [x] Add `ActionFingerprint` containing task ID, repository ID/name, optional PR/branch/head/base, typed payload SHA-256, policy/instruction hashes, and invalidation generation.
+- [x] Replace `Approval::for_capability` with `Approval::new(class, capability, fingerprint, approver, now, expires_at)` and `Policy::authorize(capability, fingerprint, approval, now)`.
+- [x] Preserve the automation kill switch and deny admin bypass as a separate non-approvable capability.
+- [x] Update existing tests/callers, run all core tests, and commit: `Bind approvals to exact actions`.
 
 ## Task 4: Persist schema versions, checkpoints, jobs, approvals, and bindings
 
