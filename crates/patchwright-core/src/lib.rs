@@ -3,7 +3,8 @@ mod instructions;
 mod policy;
 
 pub use domain::{
-    Evidence, Finding, FindingSeverity, Task, TaskEvent, TaskId, TaskState, ValidationError,
+    Evidence, Finding, FindingSeverity, Task, TaskEvent, TaskId, TaskInterruption, TaskState,
+    ValidationError,
 };
 pub use instructions::{
     EffectiveInstructions, InstructionConflict, InstructionKind, InstructionResolver,
