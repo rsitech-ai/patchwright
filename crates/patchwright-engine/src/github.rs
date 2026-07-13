@@ -1,7 +1,14 @@
 use anyhow::{Context, Result, bail};
 use reqwest::{Client, Url, header::LINK};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{fmt, path::PathBuf, process::Command, sync::Arc, time::Duration};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    path::PathBuf,
+    process::Command,
+    sync::Arc,
+    time::Duration,
+};
 
 const API_VERSION: &str = "2026-03-10";
 
@@ -78,8 +85,73 @@ pub struct GitHubRepository {
     pub html_url: String,
     #[serde(alias = "updated_at")]
     pub updated_at: String,
+    #[serde(default, alias = "pushed_at")]
+    pub pushed_at: Option<String>,
     #[serde(alias = "open_issues_count")]
     pub open_issues_count: u64,
+    #[serde(default)]
+    pub open_pull_request_count: u64,
+    #[serde(default)]
+    pub failing_check_count: u64,
+    #[serde(default)]
+    pub default_branch_sha: Option<String>,
+    #[serde(default)]
+    pub default_branch_committed_at: Option<String>,
+    #[serde(default, alias = "installation_id")]
+    pub installation_id: Option<u64>,
+    #[serde(default)]
+    pub permissions: GitHubRepositoryPermissions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubRepositoryPermissions {
+    #[serde(default)]
+    pub admin: GitHubPermission,
+    #[serde(default)]
+    pub maintain: GitHubPermission,
+    #[serde(default)]
+    pub push: GitHubPermission,
+    #[serde(default)]
+    pub triage: GitHubPermission,
+    #[serde(default)]
+    pub pull: GitHubPermission,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum GitHubPermission {
+    #[default]
+    Denied,
+    Granted,
+}
+
+impl GitHubPermission {
+    #[must_use]
+    pub const fn is_granted(self) -> bool {
+        matches!(self, Self::Granted)
+    }
+}
+
+impl Serialize for GitHubPermission {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bool(self.is_granted())
+    }
+}
+
+impl<'de> Deserialize<'de> for GitHubPermission {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(if bool::deserialize(deserializer)? {
+            Self::Granted
+        } else {
+            Self::Denied
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -103,8 +175,44 @@ pub struct GitHubWorkItem {
     pub html_url: String,
     pub draft: bool,
     pub comments_count: u64,
+    #[serde(default)]
+    pub base_ref: Option<String>,
+    #[serde(default)]
+    pub base_sha: Option<String>,
+    #[serde(default)]
+    pub head_ref: Option<String>,
     pub head_sha: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub head_committed_at: Option<String>,
+    #[serde(default)]
+    pub latest_review_at: Option<String>,
     pub updated_at: String,
+    #[serde(default)]
+    pub review_decision: Option<String>,
+    #[serde(default)]
+    pub ci_health: Option<String>,
+    #[serde(default)]
+    pub mergeable: Option<bool>,
+    #[serde(default)]
+    pub mergeable_state: Option<String>,
+    #[serde(default)]
+    pub rebaseable: Option<bool>,
+    #[serde(default)]
+    pub has_conflicts: Option<bool>,
+    #[serde(default)]
+    pub head_repository_full_name: Option<String>,
+    #[serde(default)]
+    pub head_repository_fork: bool,
+    #[serde(default)]
+    pub maintainer_can_modify: bool,
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
+    #[serde(default)]
+    pub changed_files: u64,
     #[serde(default)]
     pub labels: Vec<String>,
     #[serde(default)]
@@ -229,21 +337,41 @@ impl GitHubSource {
                 resource_limit,
             )
             .await?;
+        let default_branch_commit: WireCommit = self
+            .get(&format!(
+                "{base}/commits/{}",
+                encode_path_segment(&repository.default_branch)
+            ))
+            .await?;
+        let enriched_pulls = self.enrich_pulls(&base, pull_rows).await?;
+        let pull_rows = enriched_pulls
+            .iter()
+            .map(|pull| pull.pull.clone())
+            .collect::<Vec<_>>();
+        let discussions = self.discussions(&base, &pull_rows, resource_limit).await?;
+        let checks = self.checks(&base, &pull_rows, resource_limit).await?;
         let mut work_items = issue_rows
             .into_iter()
             .filter(|item| item.pull_request.is_none())
-            .map(|item| item.into_item(&repository.full_name, WorkItemKind::Issue, None))
+            .map(|item| item.into_item(&repository.full_name, WorkItemKind::Issue))
             .collect::<Vec<_>>();
-        work_items.extend(pull_rows.iter().cloned().map(|pull| {
-            pull.item.into_item(
+        work_items.extend(enriched_pulls.into_iter().map(|pull| {
+            let item_number = pull.pull.item.number;
+            let item_discussions = discussions
+                .iter()
+                .filter(|entry| entry.item_number == item_number)
+                .collect::<Vec<_>>();
+            let item_checks = checks
+                .iter()
+                .filter(|entry| entry.item_number == item_number)
+                .collect::<Vec<_>>();
+            pull.into_item(
                 &repository.full_name,
-                WorkItemKind::PullRequest,
-                Some((pull.draft, pull.head.sha)),
+                latest_review_at(&item_discussions),
+                review_decision(&item_discussions),
+                ci_health(&item_checks),
             )
         }));
-
-        let discussions = self.discussions(&base, &pull_rows, resource_limit).await?;
-        let checks = self.checks(&base, &pull_rows, resource_limit).await?;
         let workflow_runs = self
             .paginated_field(
                 &format!("{base}/actions/runs?per_page=100"),
@@ -251,13 +379,65 @@ impl GitHubSource {
                 resource_limit,
             )
             .await?;
+        let mut repository = repository.clone();
+        repository.default_branch_sha = Some(default_branch_commit.sha);
+        repository.default_branch_committed_at = Some(default_branch_commit.commit.committer.date);
+        repository.open_pull_request_count = pull_rows
+            .iter()
+            .filter(|pull| pull.item.state == "open")
+            .count() as u64;
+        let open_pull_requests = pull_rows
+            .iter()
+            .filter(|pull| pull.item.state == "open")
+            .map(|pull| pull.item.number)
+            .collect::<HashSet<_>>();
+        repository.failing_check_count = checks
+            .iter()
+            .filter(|check| {
+                open_pull_requests.contains(&check.item_number)
+                    && is_failing_conclusion(check.conclusion.as_deref())
+            })
+            .count() as u64;
         Ok(GitHubRepositorySnapshot {
-            repository: repository.clone(),
+            repository,
             work_items,
             discussions,
             checks,
             workflow_runs,
         })
+    }
+
+    async fn enrich_pulls(
+        &self,
+        base: &str,
+        pull_rows: Vec<WirePull>,
+    ) -> Result<Vec<EnrichedPull>> {
+        let source = Arc::new(self.clone());
+        let concurrency = Arc::new(tokio::sync::Semaphore::new(8));
+        let mut jobs = tokio::task::JoinSet::new();
+        for pull in pull_rows {
+            let source = Arc::clone(&source);
+            let concurrency = Arc::clone(&concurrency);
+            let base = base.to_owned();
+            let detail_path = format!("{base}/pulls/{}", pull.item.number);
+            jobs.spawn(async move {
+                let _permit = concurrency.acquire_owned().await?;
+                let detail: WirePull = source.get(&detail_path).await?;
+                let commit: WireCommit = source
+                    .get(&format!("{base}/commits/{}", detail.head.sha))
+                    .await?;
+                Ok::<_, anyhow::Error>(EnrichedPull {
+                    pull: detail,
+                    head_committed_at: Some(commit.commit.committer.date),
+                })
+            });
+        }
+        let mut enriched = Vec::new();
+        while let Some(result) = jobs.join_next().await {
+            enriched.push(result.context("join GitHub pull enrichment")??);
+        }
+        enriched.sort_by_key(|pull| pull.pull.item.number);
+        Ok(enriched)
     }
 
     async fn discussions(
@@ -482,13 +662,112 @@ fn next_link(header: &str) -> Option<String> {
     })
 }
 
+fn latest_review_at(discussions: &[&GitHubDiscussion]) -> Option<String> {
+    discussions
+        .iter()
+        .filter(|entry| entry.kind.starts_with("review"))
+        .filter_map(|entry| entry.updated_at.as_ref())
+        .max()
+        .cloned()
+}
+
+fn review_decision(discussions: &[&GitHubDiscussion]) -> Option<String> {
+    let mut latest_by_reviewer = HashMap::<&str, (&str, &str)>::new();
+    for entry in discussions.iter().filter(|entry| entry.kind == "review") {
+        let Some(state) = entry.state.as_deref() else {
+            continue;
+        };
+        let submitted_at = entry.updated_at.as_deref().unwrap_or_default();
+        let replace = latest_by_reviewer
+            .get(entry.author.as_str())
+            .is_none_or(|(current, _)| submitted_at >= *current);
+        if replace {
+            latest_by_reviewer.insert(&entry.author, (submitted_at, state));
+        }
+    }
+    let states = latest_by_reviewer
+        .values()
+        .map(|(_, state)| state.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if states
+        .iter()
+        .any(|state| matches!(state.as_str(), "changes_requested" | "changesrequested"))
+    {
+        Some("changesRequested".into())
+    } else if states.iter().any(|state| state == "approved") {
+        Some("approved".into())
+    } else if states.is_empty() {
+        None
+    } else {
+        Some("reviewRequired".into())
+    }
+}
+
+fn ci_health(checks: &[&GitHubCheckRun]) -> String {
+    if checks.is_empty() {
+        return "unknown".into();
+    }
+    if checks.iter().any(|check| check.status != "completed") {
+        return "pending".into();
+    }
+    if checks
+        .iter()
+        .any(|check| is_failing_conclusion(check.conclusion.as_deref()))
+    {
+        return "failing".into();
+    }
+    if checks.iter().all(|check| {
+        matches!(
+            check.conclusion.as_deref(),
+            Some("success" | "neutral" | "skipped")
+        )
+    }) {
+        "passing".into()
+    } else {
+        "unknown".into()
+    }
+}
+
+fn is_failing_conclusion(conclusion: Option<&str>) -> bool {
+    matches!(
+        conclusion,
+        Some(
+            "failure" | "timed_out" | "cancelled" | "action_required" | "startup_failure" | "stale"
+        )
+    )
+}
+
+fn encode_path_segment(value: &str) -> String {
+    value
+        .bytes()
+        .fold(String::with_capacity(value.len()), |mut encoded, byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                encoded.push(char::from(byte));
+            } else {
+                use std::fmt::Write as _;
+                write!(encoded, "%{byte:02X}").expect("writing to String cannot fail");
+            }
+            encoded
+        })
+}
+
 #[derive(Clone, Deserialize)]
 struct User {
     login: String,
 }
 #[derive(Clone, Deserialize)]
-struct Head {
+struct WireRef {
     sha: String,
+    #[serde(rename = "ref")]
+    ref_name: String,
+    #[serde(default)]
+    repo: Option<WireRepositoryIdentity>,
+}
+#[derive(Clone, Deserialize)]
+struct WireRepositoryIdentity {
+    full_name: String,
+    #[serde(default)]
+    fork: bool,
 }
 #[derive(Clone, Deserialize)]
 struct WireItem {
@@ -503,6 +782,8 @@ struct WireItem {
     draft: bool,
     #[serde(default)]
     comments: u64,
+    #[serde(default)]
+    created_at: Option<String>,
     updated_at: String,
     #[serde(default)]
     pull_request: Option<serde_json::Value>,
@@ -514,13 +795,7 @@ struct WireItem {
     milestone: Option<WireMilestone>,
 }
 impl WireItem {
-    fn into_item(
-        self,
-        repository: &str,
-        kind: WorkItemKind,
-        pull: Option<(bool, String)>,
-    ) -> GitHubWorkItem {
-        let (draft, head_sha) = pull.map_or((self.draft, None), |(draft, sha)| (draft, Some(sha)));
+    fn into_item(self, repository: &str, kind: WorkItemKind) -> GitHubWorkItem {
         GitHubWorkItem {
             id: self.id,
             repository_full_name: repository.into(),
@@ -531,10 +806,28 @@ impl WireItem {
             body: self.body,
             author: self.user.login,
             html_url: self.html_url,
-            draft,
+            draft: self.draft,
             comments_count: self.comments,
-            head_sha,
+            base_ref: None,
+            base_sha: None,
+            head_ref: None,
+            head_sha: None,
+            created_at: self.created_at,
+            head_committed_at: None,
+            latest_review_at: None,
             updated_at: self.updated_at,
+            review_decision: None,
+            ci_health: None,
+            mergeable: None,
+            mergeable_state: None,
+            rebaseable: None,
+            has_conflicts: None,
+            head_repository_full_name: None,
+            head_repository_fork: false,
+            maintainer_can_modify: false,
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
             labels: self.labels.into_iter().map(|label| label.name).collect(),
             assignees: self.assignees.into_iter().map(|user| user.login).collect(),
             milestone: self.milestone.map(|milestone| milestone.title),
@@ -555,9 +848,118 @@ struct WireMilestone {
 struct WirePull {
     #[serde(flatten)]
     item: WireItem,
-    head: Head,
+    head: WireRef,
+    base: WireRef,
     #[serde(default)]
     draft: bool,
+    #[serde(default)]
+    maintainer_can_modify: bool,
+    #[serde(default)]
+    mergeable: Option<bool>,
+    #[serde(default)]
+    mergeable_state: Option<String>,
+    #[serde(default)]
+    rebaseable: Option<bool>,
+    #[serde(default)]
+    additions: u64,
+    #[serde(default)]
+    deletions: u64,
+    #[serde(default)]
+    changed_files: u64,
+}
+
+struct EnrichedPull {
+    pull: WirePull,
+    head_committed_at: Option<String>,
+}
+
+impl EnrichedPull {
+    fn into_item(
+        self,
+        repository: &str,
+        latest_review_at: Option<String>,
+        review_decision: Option<String>,
+        ci_health: String,
+    ) -> GitHubWorkItem {
+        let head_repository_full_name = self
+            .pull
+            .head
+            .repo
+            .as_ref()
+            .map(|repository| repository.full_name.clone());
+        let head_repository_fork = self
+            .pull
+            .head
+            .repo
+            .as_ref()
+            .is_some_and(|repository| repository.fork);
+        GitHubWorkItem {
+            id: self.pull.item.id,
+            repository_full_name: repository.into(),
+            number: self.pull.item.number,
+            kind: WorkItemKind::PullRequest,
+            title: self.pull.item.title,
+            state: self.pull.item.state,
+            body: self.pull.item.body,
+            author: self.pull.item.user.login,
+            html_url: self.pull.item.html_url,
+            draft: self.pull.draft,
+            comments_count: self.pull.item.comments,
+            base_ref: Some(self.pull.base.ref_name),
+            base_sha: Some(self.pull.base.sha),
+            head_ref: Some(self.pull.head.ref_name),
+            head_sha: Some(self.pull.head.sha),
+            created_at: self.pull.item.created_at,
+            head_committed_at: self.head_committed_at,
+            latest_review_at,
+            updated_at: self.pull.item.updated_at,
+            review_decision,
+            ci_health: Some(ci_health),
+            mergeable: self.pull.mergeable,
+            mergeable_state: self.pull.mergeable_state.clone(),
+            rebaseable: self.pull.rebaseable,
+            has_conflicts: self.pull.mergeable.map(|mergeable| {
+                !mergeable && self.pull.mergeable_state.as_deref() == Some("dirty")
+            }),
+            head_repository_full_name,
+            head_repository_fork,
+            maintainer_can_modify: self.pull.maintainer_can_modify,
+            additions: self.pull.additions,
+            deletions: self.pull.deletions,
+            changed_files: self.pull.changed_files,
+            labels: self
+                .pull
+                .item
+                .labels
+                .into_iter()
+                .map(|label| label.name)
+                .collect(),
+            assignees: self
+                .pull
+                .item
+                .assignees
+                .into_iter()
+                .map(|user| user.login)
+                .collect(),
+            milestone: self.pull.item.milestone.map(|milestone| milestone.title),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct WireCommit {
+    sha: String,
+    commit: WireCommitMetadata,
+}
+
+#[derive(Deserialize)]
+struct WireCommitMetadata {
+    committer: WireCommitter,
+}
+
+#[derive(Deserialize)]
+struct WireCommitter {
+    date: String,
 }
 #[derive(Deserialize)]
 struct WireComment {
