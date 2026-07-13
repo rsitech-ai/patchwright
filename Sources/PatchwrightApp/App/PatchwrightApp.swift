@@ -3,12 +3,13 @@ import SwiftUI
 
 @main
 struct PatchwrightApp: App {
+    @StateObject private var engineProcess: EngineProcessController
     @StateObject private var store: WorkspaceStore
 
     init() {
-        let socket = ProcessInfo.processInfo.environment["PATCHWRIGHT_SOCKET"]
-            ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: ".patchwright/engine.sock").path
-        _store = StateObject(wrappedValue: WorkspaceStore(engine: UnixEngineClient(socketPath: socket)))
+        let engineProcess = EngineProcessController()
+        _engineProcess = StateObject(wrappedValue: engineProcess)
+        _store = StateObject(wrappedValue: WorkspaceStore(engine: UnixEngineClient(socketPath: engineProcess.socketPath)))
     }
 
     var body: some Scene {
@@ -18,4 +19,3 @@ struct PatchwrightApp: App {
         Settings { SettingsView() }
     }
 }
-

@@ -36,6 +36,31 @@ async fn socket_supports_health_create_and_timeline() {
     .await;
     assert_eq!(health["result"]["status"], "ok");
 
+    let github = call(
+        &mut stream,
+        json!({"jsonrpc":"2.0","id":11,"method":"github.status","params":{}}),
+    )
+    .await;
+    assert_eq!(github["result"]["connected"], false);
+    assert_eq!(github["result"]["repositoryCount"], 0);
+
+    let second_database = directory.path().join("second.sqlite3");
+    let second = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        serve(&socket, &second_database),
+    )
+    .await
+    .expect("a second server should fail instead of replacing the live socket")
+    .unwrap_err();
+    assert!(second.to_string().contains("already running"));
+
+    let still_healthy = call(
+        &mut stream,
+        json!({"jsonrpc":"2.0","id":12,"method":"system.health","params":{}}),
+    )
+    .await;
+    assert_eq!(still_healthy["result"]["status"], "ok");
+
     let invalid = call(
         &mut stream,
         json!({"jsonrpc":"2.0","id":2,"method":"task.create","params":{"title":""}}),
@@ -62,4 +87,23 @@ async fn socket_supports_health_create_and_timeline() {
     assert_eq!(timeline["result"].as_array().unwrap().len(), 1);
 
     server.abort();
+}
+
+#[tokio::test]
+async fn serve_never_deletes_a_non_socket_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("engine.sock");
+    let database = directory.path().join("engine.sqlite3");
+    std::fs::write(&socket, "keep me").unwrap();
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        serve(&socket, &database),
+    )
+    .await
+    .expect("serve should reject a non-socket path promptly")
+    .unwrap_err();
+
+    assert!(error.to_string().contains("not a Unix socket"));
+    assert_eq!(std::fs::read_to_string(&socket).unwrap(), "keep me");
 }
