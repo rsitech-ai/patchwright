@@ -2,6 +2,7 @@
 
 mod command;
 mod github;
+mod jobs;
 mod repository;
 mod rpc;
 mod store;
@@ -12,6 +13,9 @@ pub use github::{
     GhCliCredentialBroker, GitHubAccount, GitHubCheckRun, GitHubDiscussion, GitHubRepository,
     GitHubRepositorySnapshot, GitHubSource, GitHubSyncSummary, GitHubToken, GitHubWorkItem,
     GitHubWorkflowRun, WorkItemKind,
+};
+pub use jobs::{
+    CancellationState, Job, JobCheckpoint, JobError, JobId, JobKind, JobState, TaskCheckpoint,
 };
 pub use repository::{RepositoryInspection, RepositoryService};
 pub use rpc::serve;

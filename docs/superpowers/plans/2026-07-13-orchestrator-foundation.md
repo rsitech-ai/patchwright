@@ -77,15 +77,15 @@
 - Add: `crates/patchwright-engine/tests/durable_jobs.rs`
 - Modify: `crates/patchwright-engine/tests/recovery.rs`
 
-- [ ] Write migration tests that open a Stage 1–3 database fixture, retain existing task/GitHub payloads, and add `schema_migrations`, `repository_bindings`, `task_contracts`, `approvals`, `jobs`, `job_events`, and `task_checkpoints`.
-- [ ] Write atomicity tests proving task state/event/checkpoint commit together and a simulated failure leaves all three unchanged.
-- [ ] Write restart tests for queued/running/cancelling/cancelled/succeeded/failed jobs and recovery of a running job to `interrupted`, never silently `running`.
-- [ ] Run `cargo test -p patchwright-engine --test durable_jobs --test recovery` and observe RED.
-- [ ] Add monotonic integer schema migrations inside one `BEGIN IMMEDIATE` transaction.
-- [ ] Implement `JobId`, `JobKind`, `JobState`, `CancellationState`, `JobCheckpoint`, and store methods for compare-and-set transitions and append-only job events.
-- [ ] Store approval payloads and action digests, but never source bodies, command output, or credentials in job summary columns.
-- [ ] Run focused tests, restart them against the same temporary database, then run all engine tests.
-- [ ] Commit: `Persist durable jobs and checkpoints`.
+- [x] Write migration tests that open a Stage 1–3 database fixture, retain existing task/GitHub payloads, and add `schema_migrations`, `repository_bindings`, `task_contracts`, `approvals`, `jobs`, `job_events`, and `task_checkpoints`.
+- [x] Write atomicity tests proving task state/event/checkpoint commit together and a simulated failure leaves all three unchanged.
+- [x] Write restart tests for queued/running/cancelling/cancelled/succeeded/failed jobs and recovery of a running job to `interrupted`, never silently `running`.
+- [x] Run `cargo test -p patchwright-engine --test durable_jobs --test recovery` and observe RED.
+- [x] Add monotonic integer schema migrations inside one `BEGIN IMMEDIATE` transaction.
+- [x] Implement `JobId`, `JobKind`, `JobState`, `CancellationState`, `JobCheckpoint`, and store methods for compare-and-set transitions and append-only job events.
+- [x] Store approval payloads and action digests, but never source bodies, command output, or credentials in job summary columns.
+- [x] Run focused tests, restart them against the same temporary database, then run all engine tests.
+- [x] Commit: `Persist durable jobs and checkpoints`.
 
 ## Task 5: Enrich GitHub snapshots for sorting and queue assessment
 
