@@ -34,6 +34,16 @@ public enum TaskState: String, Codable, CaseIterable, Sendable {
             false
         }
     }
+
+    public var displayName: String {
+        rawValue
+            .replacingOccurrences(
+                of: "([a-z])([A-Z])",
+                with: "$1 $2",
+                options: .regularExpression
+            )
+            .capitalized
+    }
 }
 
 public struct TaskInterruption: Codable, Hashable, Sendable {

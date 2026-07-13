@@ -39,6 +39,28 @@ public extension EngineServing {
             as: ConversionOutcome.self
         )
     }
+
+    func bindRepository(_ repository: GitHubRepository) async throws -> RepositoryBindingSummary {
+        guard let installationID = repository.installationID else {
+            throw EngineError.remote(
+                code: -32033,
+                message: "Install the Patchwright GitHub App for this repository before creating tasks."
+            )
+        }
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: ".patchwright/repositories/\(repository.id)", directoryHint: .isDirectory)
+        return try await call(
+            method: "repository.bind",
+            params: [
+                "repositoryFullName": repository.fullName,
+                "installationId": String(installationID),
+                "managedClone": root.appending(path: "repository", directoryHint: .isDirectory).path,
+                "stateRoot": root.appending(path: "state", directoryHint: .isDirectory).path,
+                "worktreeRoot": root.appending(path: "worktrees", directoryHint: .isDirectory).path,
+            ],
+            as: RepositoryBindingSummary.self
+        )
+    }
 }
 
 private func conversionParameters(for item: GitHubWorkItem) -> [String: String] {
