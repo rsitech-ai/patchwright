@@ -3,7 +3,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
+    fmt,
     path::{Component, Path},
+    str::FromStr,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -22,6 +24,20 @@ impl RepositoryBindingId {
 impl Default for RepositoryBindingId {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl fmt::Display for RepositoryBindingId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for RepositoryBindingId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(value).map(Self)
     }
 }
 
