@@ -1,6 +1,7 @@
 use crate::TaskId;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -192,6 +193,16 @@ impl ActionFingerprint {
     pub const fn invalidation_generation(&self) -> u64 {
         self.invalidation_generation
     }
+
+    #[must_use]
+    /// Returns the canonical SHA-256 identity used by durable approval storage.
+    ///
+    /// # Panics
+    /// Panics only if serde cannot serialize the validated in-memory fingerprint structure.
+    pub fn digest_sha256(&self) -> String {
+        let payload = serde_json::to_vec(self).expect("action fingerprint serialization");
+        format!("{:x}", Sha256::digest(payload))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -246,8 +257,28 @@ impl Approval {
     }
 
     #[must_use]
+    pub const fn id(&self) -> Uuid {
+        self.id
+    }
+
+    #[must_use]
     pub const fn capability(&self) -> Capability {
         self.capability
+    }
+
+    #[must_use]
+    pub fn approved_by(&self) -> &str {
+        &self.approved_by
+    }
+
+    #[must_use]
+    pub const fn approved_at(&self) -> DateTime<Utc> {
+        self.approved_at
+    }
+
+    #[must_use]
+    pub const fn expires_at(&self) -> DateTime<Utc> {
+        self.expires_at
     }
 
     #[must_use]

@@ -1,7 +1,13 @@
-use crate::{GitHubAccount, GitHubRepository, GitHubRepositorySnapshot};
-use anyhow::{Context, Result};
-use patchwright_core::{Task, TaskId};
-use rusqlite::{Connection, OptionalExtension, params};
+use crate::{
+    CancellationState, GitHubAccount, GitHubRepository, GitHubRepositorySnapshot, Job,
+    JobCheckpoint, JobId, JobState, TaskCheckpoint, jobs::validate_summary,
+};
+use anyhow::{Context, Result, bail};
+use patchwright_core::{
+    Approval, RepositoryBinding, RepositoryBindingId, Task, TaskContract, TaskId,
+};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::{Serialize, de::DeserializeOwned};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -16,47 +22,25 @@ impl EventStore {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create database directory {}", parent.display()))?;
         }
-        let connection = Connection::open(path)
+        let mut connection = Connection::open(path)
             .with_context(|| format!("open event database {}", path.display()))?;
         #[cfg(unix)]
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("restrict event database permissions {}", path.display()))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.execute_batch(
-            "BEGIN;
-             CREATE TABLE IF NOT EXISTS tasks (
-                 id TEXT PRIMARY KEY,
-                 payload TEXT NOT NULL,
-                 updated_at TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS task_events (
-                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                 task_id TEXT NOT NULL,
-                 summary TEXT NOT NULL,
-                 payload TEXT NOT NULL,
-                 occurred_at TEXT NOT NULL
-             );
-             CREATE INDEX IF NOT EXISTS task_events_task_id ON task_events(task_id, sequence);
-             CREATE TABLE IF NOT EXISTS deliveries (
-                 key TEXT PRIMARY KEY,
-                 result TEXT,
-                 claimed_at TEXT NOT NULL,
-                 completed_at TEXT
-             );
-             CREATE TABLE IF NOT EXISTS github_account (
-                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                 payload TEXT NOT NULL,
-                 synced_at TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS github_snapshots (
-                 full_name TEXT PRIMARY KEY,
-                 repository_payload TEXT NOT NULL,
-                 snapshot_payload TEXT NOT NULL,
-                 synced_at TEXT NOT NULL
-             );
-             COMMIT;",
-        )?;
-        Ok(Self { connection })
+        apply_migrations(&mut connection)?;
+        let store = Self { connection };
+        store.recover_interrupted_jobs()?;
+        Ok(store)
+    }
+
+    pub fn schema_versions(&self) -> Result<Vec<u32>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT version FROM schema_migrations ORDER BY version")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("load schema migration versions")
     }
 
     pub fn save_task(&self, task: &Task, summary: &str) -> Result<()> {
@@ -73,6 +57,159 @@ impl EventStore {
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn save_task_with_checkpoint(
+        &self,
+        task: &Task,
+        summary: &str,
+        checkpoint: &TaskCheckpoint,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            task.id == checkpoint.task_id,
+            "checkpoint task does not match"
+        );
+        anyhow::ensure!(
+            task.state == checkpoint.state,
+            "checkpoint state does not match"
+        );
+        validate_summary(checkpoint.summary.clone())?;
+        let payload = serde_json::to_string(task)?;
+        let checkpoint_payload = serde_json::to_string(checkpoint)?;
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO tasks(id, payload, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
+            params![task.id.to_string(), payload, task.updated_at.to_rfc3339()],
+        )?;
+        transaction.execute(
+            "INSERT INTO task_events(task_id, summary, payload, occurred_at) VALUES (?1, ?2, ?3, ?4)",
+            params![task.id.to_string(), summary, payload, task.updated_at.to_rfc3339()],
+        )?;
+        transaction.execute(
+            "INSERT INTO task_checkpoints(id, task_id, state, summary, payload, occurred_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                checkpoint.id.to_string(),
+                checkpoint.task_id.to_string(),
+                enum_name(checkpoint.state),
+                checkpoint.summary,
+                checkpoint_payload,
+                checkpoint.occurred_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn task_checkpoints(&self, task_id: TaskId) -> Result<Vec<TaskCheckpoint>> {
+        let mut statement = self.connection.prepare(
+            "SELECT payload FROM task_checkpoints WHERE task_id = ?1 ORDER BY occurred_at, id",
+        )?;
+        let rows = statement.query_map([task_id.to_string()], |row| row.get::<_, String>(0))?;
+        rows.map(|row| decode_json_row(row, "task checkpoint"))
+            .collect::<Result<Vec<_>>>()
+    }
+
+    pub fn save_repository_binding(&self, binding: &RepositoryBinding) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO repository_bindings(id, full_name, payload, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET full_name=excluded.full_name,
+                 payload=excluded.payload, updated_at=excluded.updated_at",
+            params![
+                binding.id().to_string(),
+                binding.full_name(),
+                serde_json::to_string(binding)?,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn repository_binding(&self, id: RepositoryBindingId) -> Result<Option<RepositoryBinding>> {
+        self.load_json_optional(
+            "SELECT payload FROM repository_bindings WHERE id = ?1",
+            &id.to_string(),
+            "repository binding",
+        )
+    }
+
+    pub fn save_task_contract(&self, contract: &TaskContract) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO task_contracts(task_id, binding_id, version, payload, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(task_id) DO UPDATE SET binding_id=excluded.binding_id,
+                 version=excluded.version, payload=excluded.payload, updated_at=excluded.updated_at",
+            params![
+                contract.task_id().to_string(),
+                contract.repository_binding_id().to_string(),
+                contract.version(),
+                serde_json::to_string(contract)?,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn task_contract(&self, task_id: TaskId) -> Result<Option<TaskContract>> {
+        self.load_json_optional(
+            "SELECT payload FROM task_contracts WHERE task_id = ?1",
+            &task_id.to_string(),
+            "task contract",
+        )
+    }
+
+    pub fn save_approval(&self, approval: &Approval) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO approvals(id, task_id, capability, action_digest, payload, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,
+                 action_digest=excluded.action_digest, expires_at=excluded.expires_at",
+            params![
+                approval.id().to_string(),
+                approval.fingerprint().task_id().to_string(),
+                enum_name(approval.capability()),
+                approval.fingerprint().digest_sha256(),
+                serde_json::to_string(approval)?,
+                approval.expires_at().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn approval(&self, id: uuid::Uuid) -> Result<Option<Approval>> {
+        self.load_json_optional(
+            "SELECT payload FROM approvals WHERE id = ?1",
+            &id.to_string(),
+            "approval",
+        )
+    }
+
+    pub fn approval_action_digest(&self, id: uuid::Uuid) -> Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT action_digest FROM approvals WHERE id = ?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("load approval action digest")
+    }
+
+    fn load_json_optional<T: DeserializeOwned>(
+        &self,
+        statement: &str,
+        key: &str,
+        label: &'static str,
+    ) -> Result<Option<T>> {
+        let payload: Option<String> = self
+            .connection
+            .query_row(statement, [key], |row| row.get(0))
+            .optional()?;
+        payload
+            .map(|value| serde_json::from_str(&value).with_context(|| format!("decode {label}")))
+            .transpose()
     }
 
     pub fn load_task(&self, id: TaskId) -> Result<Option<Task>> {
@@ -124,6 +261,193 @@ impl EventStore {
             )
             .optional()
             .context("load delivery result")
+    }
+
+    pub fn create_job(&self, job: &Job) -> Result<()> {
+        let checkpoint_payload = job
+            .checkpoint
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO jobs(
+                 id, kind, task_id, state, cancellation_state, summary, checkpoint_payload,
+                 created_at, updated_at, generation
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                job.id.to_string(),
+                enum_name(job.kind),
+                job.task_id.map(|value| value.to_string()),
+                enum_name(job.state),
+                enum_name(job.cancellation),
+                job.summary,
+                checkpoint_payload,
+                job.created_at.to_rfc3339(),
+                job.updated_at.to_rfc3339(),
+                job.generation,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO job_events(job_id, state, summary, checkpoint_payload, occurred_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                job.id.to_string(),
+                enum_name(job.state),
+                job.summary,
+                checkpoint_payload,
+                job.created_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn transition_job(
+        &self,
+        id: JobId,
+        expected: JobState,
+        next: JobState,
+        cancellation: CancellationState,
+        summary: &str,
+        checkpoint: Option<&JobCheckpoint>,
+    ) -> Result<bool> {
+        if !expected.permits(next) {
+            bail!("invalid job transition: {expected:?} -> {next:?}");
+        }
+        let summary = validate_summary(summary.to_owned())?;
+        let transaction = self.connection.unchecked_transaction()?;
+        let current: Option<(String, Option<String>, u64)> = transaction
+            .query_row(
+                "SELECT state, checkpoint_payload, generation FROM jobs WHERE id = ?1",
+                [id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((current_state, existing_checkpoint, generation)) = current else {
+            transaction.rollback()?;
+            return Ok(false);
+        };
+        if current_state != enum_name(expected) {
+            transaction.rollback()?;
+            return Ok(false);
+        }
+        let checkpoint_payload = checkpoint
+            .map(serde_json::to_string)
+            .transpose()?
+            .or(existing_checkpoint);
+        let occurred_at = chrono::Utc::now();
+        let updated = transaction.execute(
+            "UPDATE jobs SET state = ?2, cancellation_state = ?3, summary = ?4,
+                 checkpoint_payload = ?5, updated_at = ?6, generation = ?7
+             WHERE id = ?1 AND state = ?8 AND generation = ?9",
+            params![
+                id.to_string(),
+                enum_name(next),
+                enum_name(cancellation),
+                summary,
+                checkpoint_payload,
+                occurred_at.to_rfc3339(),
+                generation + 1,
+                enum_name(expected),
+                generation,
+            ],
+        )?;
+        if updated != 1 {
+            transaction.rollback()?;
+            return Ok(false);
+        }
+        transaction.execute(
+            "INSERT INTO job_events(job_id, state, summary, checkpoint_payload, occurred_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                id.to_string(),
+                enum_name(next),
+                summary,
+                checkpoint_payload,
+                occurred_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    pub fn job(&self, id: JobId) -> Result<Option<Job>> {
+        self.connection
+            .query_row(
+                "SELECT kind, task_id, state, cancellation_state, summary, checkpoint_payload,
+                        created_at, updated_at, generation
+                 FROM jobs WHERE id = ?1",
+                [id.to_string()],
+                |row| {
+                    let kind: String = row.get(0)?;
+                    let task_id: Option<String> = row.get(1)?;
+                    let state: String = row.get(2)?;
+                    let cancellation: String = row.get(3)?;
+                    let summary: String = row.get(4)?;
+                    let checkpoint: Option<String> = row.get(5)?;
+                    let created_at: String = row.get(6)?;
+                    let updated_at: String = row.get(7)?;
+                    let generation: u64 = row.get(8)?;
+                    Ok((
+                        kind,
+                        task_id,
+                        state,
+                        cancellation,
+                        summary,
+                        checkpoint,
+                        created_at,
+                        updated_at,
+                        generation,
+                    ))
+                },
+            )
+            .optional()?
+            .map(|row| decode_job(id, row))
+            .transpose()
+    }
+
+    pub fn job_timeline(&self, id: JobId) -> Result<Vec<String>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT summary FROM job_events WHERE job_id = ?1 ORDER BY sequence")?;
+        let rows = statement.query_map([id.to_string()], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("load job timeline")
+    }
+
+    fn recover_interrupted_jobs(&self) -> Result<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let recoverable = {
+            let mut statement = transaction.prepare(
+                "SELECT id, generation FROM jobs
+                 WHERE state IN ('running', 'cancelling') ORDER BY id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for (id, generation) in recoverable {
+            let occurred_at = chrono::Utc::now().to_rfc3339();
+            let summary = "engine restart interrupted job";
+            let updated = transaction.execute(
+                "UPDATE jobs SET state = 'interrupted', summary = ?2, updated_at = ?3,
+                     generation = ?4 WHERE id = ?1 AND generation = ?5
+                     AND state IN ('running', 'cancelling')",
+                params![id, summary, occurred_at, generation + 1, generation],
+            )?;
+            if updated == 1 {
+                transaction.execute(
+                    "INSERT INTO job_events(job_id, state, summary, checkpoint_payload, occurred_at)
+                     SELECT id, 'interrupted', ?2, checkpoint_payload, ?3 FROM jobs WHERE id = ?1",
+                    params![id, summary, occurred_at],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn save_github_account(&self, account: &GitHubAccount) -> Result<()> {
@@ -207,3 +531,182 @@ impl EventStore {
             .transpose()
     }
 }
+
+type PersistedJobRow = (
+    String,
+    Option<String>,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    String,
+    u64,
+);
+
+fn decode_job(id: JobId, row: PersistedJobRow) -> Result<Job> {
+    Ok(Job {
+        id,
+        kind: decode_enum(&row.0, "job kind")?,
+        task_id: row
+            .1
+            .map(|value| value.parse().context("decode job task id"))
+            .transpose()?,
+        state: decode_enum(&row.2, "job state")?,
+        cancellation: decode_enum(&row.3, "job cancellation state")?,
+        summary: validate_summary(row.4)?,
+        checkpoint: row
+            .5
+            .map(|value| serde_json::from_str(&value).context("decode job checkpoint"))
+            .transpose()?,
+        created_at: row.6.parse().context("decode job creation time")?,
+        updated_at: row.7.parse().context("decode job update time")?,
+        generation: row.8,
+    })
+}
+
+fn enum_name<T: Serialize>(value: T) -> String {
+    serde_json::to_value(value)
+        .expect("enum serialization")
+        .as_str()
+        .expect("enum serializes as a string")
+        .to_owned()
+}
+
+fn decode_enum<T: DeserializeOwned>(value: &str, label: &'static str) -> Result<T> {
+    serde_json::from_value(serde_json::Value::String(value.to_owned()))
+        .with_context(|| format!("decode {label}"))
+}
+
+fn decode_json_row<T: DeserializeOwned>(
+    row: std::result::Result<String, rusqlite::Error>,
+    label: &'static str,
+) -> Result<T> {
+    let payload = row?;
+    serde_json::from_str(&payload).with_context(|| format!("decode {label}"))
+}
+
+fn apply_migrations(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+             version INTEGER PRIMARY KEY,
+             applied_at TEXT NOT NULL
+         );",
+    )?;
+    let applied = {
+        let mut statement =
+            transaction.prepare("SELECT version FROM schema_migrations ORDER BY version")?;
+        let rows = statement.query_map([], |row| row.get::<_, u32>(0))?;
+        rows.collect::<std::result::Result<std::collections::HashSet<_>, _>>()?
+    };
+    for (version, sql) in MIGRATIONS {
+        if applied.contains(version) {
+            continue;
+        }
+        transaction
+            .execute_batch(sql)
+            .with_context(|| format!("apply schema migration {version}"))?;
+        transaction.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+            params![version, chrono::Utc::now().to_rfc3339()],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+const MIGRATIONS: &[(u32, &str)] = &[
+    (
+        1,
+        "CREATE TABLE IF NOT EXISTS tasks (
+             id TEXT PRIMARY KEY,
+             payload TEXT NOT NULL,
+             updated_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS task_events (
+             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+             task_id TEXT NOT NULL,
+             summary TEXT NOT NULL,
+             payload TEXT NOT NULL,
+             occurred_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS task_events_task_id ON task_events(task_id, sequence);
+         CREATE TABLE IF NOT EXISTS deliveries (
+             key TEXT PRIMARY KEY,
+             result TEXT,
+             claimed_at TEXT NOT NULL,
+             completed_at TEXT
+         );
+         CREATE TABLE IF NOT EXISTS github_account (
+             singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+             payload TEXT NOT NULL,
+             synced_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS github_snapshots (
+             full_name TEXT PRIMARY KEY,
+             repository_payload TEXT NOT NULL,
+             snapshot_payload TEXT NOT NULL,
+             synced_at TEXT NOT NULL
+         );",
+    ),
+    (
+        2,
+        "CREATE TABLE IF NOT EXISTS repository_bindings (
+             id TEXT PRIMARY KEY,
+             full_name TEXT NOT NULL UNIQUE,
+             payload TEXT NOT NULL,
+             updated_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS task_contracts (
+             task_id TEXT PRIMARY KEY,
+             binding_id TEXT NOT NULL,
+             version INTEGER NOT NULL,
+             payload TEXT NOT NULL,
+             updated_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS task_contracts_binding_id
+             ON task_contracts(binding_id, task_id);
+         CREATE TABLE IF NOT EXISTS approvals (
+             id TEXT PRIMARY KEY,
+             task_id TEXT NOT NULL,
+             capability TEXT NOT NULL,
+             action_digest TEXT NOT NULL,
+             payload TEXT NOT NULL,
+             expires_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS approvals_task_id ON approvals(task_id, expires_at);
+         CREATE TABLE IF NOT EXISTS jobs (
+             id TEXT PRIMARY KEY,
+             kind TEXT NOT NULL,
+             task_id TEXT,
+             state TEXT NOT NULL,
+             cancellation_state TEXT NOT NULL,
+             summary TEXT NOT NULL,
+             checkpoint_payload TEXT,
+             created_at TEXT NOT NULL,
+             updated_at TEXT NOT NULL,
+             generation INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, updated_at);
+         CREATE TABLE IF NOT EXISTS job_events (
+             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+             job_id TEXT NOT NULL,
+             state TEXT NOT NULL,
+             summary TEXT NOT NULL,
+             checkpoint_payload TEXT,
+             occurred_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS job_events_job_id ON job_events(job_id, sequence);
+         CREATE TABLE IF NOT EXISTS task_checkpoints (
+             id TEXT PRIMARY KEY,
+             task_id TEXT NOT NULL,
+             state TEXT NOT NULL,
+             summary TEXT NOT NULL,
+             payload TEXT NOT NULL,
+             occurred_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS task_checkpoints_task_id
+             ON task_checkpoints(task_id, occurred_at);",
+    ),
+];
