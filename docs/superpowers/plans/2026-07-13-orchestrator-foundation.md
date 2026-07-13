@@ -149,15 +149,15 @@
 - Modify: `Sources/PatchwrightCore/WorkspaceStore.swift`
 - Add: `Tests/PatchwrightCoreTests/WorkspacePresentationTests.swift`
 
-- [ ] Add store tests for primary navigation, table selection, sort persistence, conversion preview/success/failure, attention counts, relative/exact timestamps, and empty/loading/partial/cancelled/blocked states.
-- [ ] Observe RED before view changes.
-- [ ] Use adjustable `NavigationSplitView`; add Queue, Repositories, Active Tasks, Awaiting Approval, Monitoring, and Completed sources.
-- [ ] Use native sortable `Table` columns for priority, repository, PR, queue state, CI, review, conflict/base, latest commit, updated time, and assigned task. Remove fixed-width manual columns.
-- [ ] Add task workbench tabs Overview, Codex, Changes, Verification, Delivery, Merge and an optional inspector for evidence/approvals/instructions/credentials.
-- [ ] Add outcome-oriented help and accessibility labels to icon-only actions. Display relative localized dates with exact values in details/help.
-- [ ] Run Swift tests, `swift build -c release -Xswiftc -warnings-as-errors`, and `./script/build_and_run.sh --verify`.
-- [ ] Manually verify keyboard navigation, resize, Light/Dark, Reduce Motion, long titles/bodies, and explicit error/empty states; record evidence in `docs/audits/2026-07-13-orchestrator-foundation.md`.
-- [ ] Commit: `Build the native orchestration workbench`.
+- [x] Add store tests for primary navigation, table selection, sort persistence, conversion preview/success/failure, attention counts, relative/exact timestamps, and empty/loading/partial/cancelled/blocked states.
+- [x] Observe RED before view changes.
+- [x] Use adjustable `NavigationSplitView`; add Queue, Repositories, Active Tasks, Awaiting Approval, Monitoring, and Completed sources.
+- [x] Use native sortable `Table` columns for priority, repository, PR, queue state, CI, review, conflict/base, latest commit, updated time, and assigned task. Remove fixed-width manual columns.
+- [x] Add task workbench tabs Overview, Codex, Changes, Verification, Delivery, Merge and an optional inspector for evidence/approvals/instructions/credentials.
+- [x] Add outcome-oriented help and accessibility labels to icon-only actions. Display relative localized dates with exact values in details/help.
+- [x] Run Swift tests, `swift build -c release -Xswiftc -warnings-as-errors`, and `./script/build_and_run.sh --verify`.
+- [ ] Manually verify keyboard navigation, resize, Light/Dark, Reduce Motion, long titles/bodies, and explicit error/empty states; record evidence in `docs/audits/2026-07-13-orchestrator-foundation.md`. Dark appearance, resize, long body, search, and empty/error states passed; Light appearance and Reduce Motion remain a manual follow-up.
+- [x] Commit: `Build the native orchestration workbench`.
 
 ## Task 9: Foundation verification gate
 
@@ -165,9 +165,9 @@
 - Modify: `script/verify.sh`
 - Add: `docs/audits/2026-07-13-orchestrator-foundation.md`
 
-- [ ] Add exact foundation focused suites to the verification script without weakening existing gates.
-- [ ] Run `cargo fmt --all -- --check`, strict Clippy, all Rust tests, all Swift tests, and warnings-as-errors Release build.
-- [ ] Run disposable migration/restart, issue conversion, PR conversion, sort/filter parity, staged-app launch, relaunch persistence, and log checks.
-- [ ] Scan tracked files and built artifacts for tokens/private keys and confirm database mode `0600`.
-- [ ] Record exact commands, counts, failures, retained rollback, and readiness label; do not claim Codex/GitHub-write/release readiness from this gate.
-- [ ] Commit: `Verify the orchestrator foundation`.
+- [x] Add exact foundation focused suites to the verification script without weakening existing gates.
+- [x] Run `cargo fmt --all -- --check`, strict Clippy, all Rust tests, all Swift tests, and warnings-as-errors Release build.
+- [x] Run disposable migration/restart, issue conversion, PR conversion, sort/filter parity, staged-app launch, relaunch persistence, and log checks. The audit records the Computer Use/native-Table geometry diagnostic separately from app crash/hang evidence.
+- [x] Scan tracked files and built artifacts for tokens/private keys and confirm database mode `0600`.
+- [x] Record exact commands, counts, failures, retained rollback, and readiness label; do not claim Codex/GitHub-write/release readiness from this gate.
+- [x] Commit: `Verify the orchestrator foundation`.
