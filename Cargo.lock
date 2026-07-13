@@ -950,8 +950,11 @@ name = "patchwright-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
+ "http",
  "patchwright-core",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",

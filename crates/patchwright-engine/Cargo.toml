@@ -9,6 +9,7 @@ license.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 patchwright-core.workspace = true
+reqwest.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -19,6 +20,8 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
+http.workspace = true
 tempfile.workspace = true
 
 [lints.rust]
@@ -27,4 +30,3 @@ unsafe_code = "warn"
 [lints.clippy]
 all = "warn"
 pedantic = "warn"
-
