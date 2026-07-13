@@ -39,8 +39,10 @@ impl FromStr for TaskId {
 #[serde(rename_all = "camelCase")]
 pub enum TaskState {
     Discovered,
+    Assessing,
     Planned,
-    AwaitingApproval,
+    #[serde(alias = "awaitingApproval")]
+    AwaitingPreparationApproval,
     Preparing,
     Implementing,
     Verifying,
@@ -48,6 +50,10 @@ pub enum TaskState {
     AwaitingDeliveryApproval,
     Delivering,
     Monitoring,
+    AwaitingMergeApproval,
+    Merging,
+    Paused,
+    Blocked,
     Completed,
     Failed,
     Cancelled,
@@ -64,18 +70,35 @@ impl TaskState {
     fn permits(self, next: Self) -> bool {
         matches!(
             (self, next),
-            (Self::Discovered, Self::Planned)
-                | (Self::Planned, Self::AwaitingApproval)
-                | (Self::AwaitingApproval, Self::Preparing)
+            (Self::Discovered, Self::Assessing)
+                | (Self::Assessing, Self::Planned)
+                | (Self::Planned, Self::AwaitingPreparationApproval)
+                | (Self::AwaitingPreparationApproval, Self::Preparing)
                 | (Self::Preparing, Self::Implementing)
                 | (Self::Implementing, Self::Verifying)
                 | (Self::Verifying, Self::Reviewing)
                 | (Self::Reviewing, Self::AwaitingDeliveryApproval)
                 | (Self::AwaitingDeliveryApproval, Self::Delivering)
                 | (Self::Delivering, Self::Monitoring)
-                | (Self::Monitoring, Self::Completed)
-        ) || (!matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
-            && matches!(next, Self::Failed | Self::Cancelled))
+                | (Self::Monitoring, Self::AwaitingMergeApproval)
+                | (Self::AwaitingMergeApproval, Self::Merging)
+                | (Self::Merging, Self::Completed)
+        )
+    }
+
+    const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+
+    const fn is_interruption(self) -> bool {
+        matches!(
+            self,
+            Self::Paused | Self::Blocked | Self::Failed | Self::Cancelled
+        )
+    }
+
+    const fn is_recoverable_interruption(self) -> bool {
+        matches!(self, Self::Paused | Self::Blocked)
     }
 }
 
@@ -87,6 +110,18 @@ pub enum ValidationError {
     RelativeRepository,
     #[error("invalid transition: {from} -> {to}")]
     InvalidTransition { from: TaskState, to: TaskState },
+    #[error("interruption reason must not be empty")]
+    EmptyInterruptionReason,
+    #[error("{state} is not an interruption state")]
+    InvalidInterruptionState { state: TaskState },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskInterruption {
+    pub state: TaskState,
+    pub resume_state: TaskState,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -98,6 +133,8 @@ pub struct Task {
     pub state: TaskState,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interruption: Option<TaskInterruption>,
 }
 
 impl Task {
@@ -125,6 +162,7 @@ impl Task {
             state: TaskState::Discovered,
             created_at: now,
             updated_at: now,
+            interruption: None,
         })
     }
 
@@ -147,6 +185,70 @@ impl Task {
         self.state = next;
         self.updated_at = Utc::now();
         Ok(())
+    }
+
+    /// Interrupts a nonterminal task while retaining its resumable state and evidence reason.
+    ///
+    /// # Errors
+    /// Returns [`ValidationError`] when the target is not an interruption state, the task is
+    /// terminal, or the reason is empty.
+    pub fn interrupt(
+        &mut self,
+        interruption_state: TaskState,
+        reason: impl Into<String>,
+    ) -> Result<(), ValidationError> {
+        if !interruption_state.is_interruption() {
+            return Err(ValidationError::InvalidInterruptionState {
+                state: interruption_state,
+            });
+        }
+        if self.state.is_terminal() || self.state.is_interruption() {
+            return Err(ValidationError::InvalidTransition {
+                from: self.state,
+                to: interruption_state,
+            });
+        }
+        let reason = reason.into().trim().to_owned();
+        if reason.is_empty() {
+            return Err(ValidationError::EmptyInterruptionReason);
+        }
+        let resume_state = self.state;
+        self.state = interruption_state;
+        self.interruption = Some(TaskInterruption {
+            state: interruption_state,
+            resume_state,
+            reason,
+        });
+        self.updated_at = Utc::now();
+        Ok(())
+    }
+
+    /// Resumes a paused or blocked task at its recorded prior state.
+    ///
+    /// # Errors
+    /// Returns [`ValidationError::InvalidTransition`] for terminal or nonrecoverable states.
+    pub fn resume(&mut self) -> Result<(), ValidationError> {
+        let Some(interruption) = self.interruption.as_ref() else {
+            return Err(ValidationError::InvalidTransition {
+                from: self.state,
+                to: self.state,
+            });
+        };
+        if !self.state.is_recoverable_interruption() || interruption.state != self.state {
+            return Err(ValidationError::InvalidTransition {
+                from: self.state,
+                to: interruption.resume_state,
+            });
+        }
+        self.state = interruption.resume_state;
+        self.interruption = None;
+        self.updated_at = Utc::now();
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn interruption(&self) -> Option<&TaskInterruption> {
+        self.interruption.as_ref()
     }
 }
 

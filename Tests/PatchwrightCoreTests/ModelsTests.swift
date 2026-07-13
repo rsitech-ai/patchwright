@@ -3,11 +3,41 @@ import XCTest
 
 final class ModelsTests: XCTestCase {
     func testDecodesEngineTask() throws {
-        let data = Data(#"{"id":"5A8F17C3-733B-46EE-AE48-015D091A0B91","title":"Fix issue","repositoryPath":"/tmp/repo","state":"awaitingApproval","createdAt":"2026-07-13T10:00:00Z","updatedAt":"2026-07-13T10:01:00Z"}"#.utf8)
+        let data = Data(#"{"id":"5A8F17C3-733B-46EE-AE48-015D091A0B91","title":"Fix issue","repositoryPath":"/tmp/repo","state":"awaitingPreparationApproval","createdAt":"2026-07-13T10:00:00Z","updatedAt":"2026-07-13T10:01:00Z"}"#.utf8)
         let task = try JSONDecoder.patchwright.decode(EngineeringTask.self, from: data)
         XCTAssertEqual(task.title, "Fix issue")
-        XCTAssertEqual(task.state, .awaitingApproval)
+        XCTAssertEqual(task.state, .awaitingPreparationApproval)
         XCTAssertTrue(task.requiresAttention)
+    }
+
+    func testDecodesLegacyPreparationApprovalState() throws {
+        let state = try JSONDecoder.patchwright.decode(TaskState.self, from: Data(#""awaitingApproval""#.utf8))
+        XCTAssertEqual(state, .awaitingPreparationApproval)
+        let encoded = try JSONEncoder().encode(state)
+        XCTAssertEqual(String(decoding: encoded, as: UTF8.self), #""awaitingPreparationApproval""#)
+    }
+
+    func testDecodesRecoverableTaskInterruption() throws {
+        let data = Data(#"{"id":"5A8F17C3-733B-46EE-AE48-015D091A0B91","title":"Fix issue","repositoryPath":"/tmp/repo","state":"blocked","createdAt":"2026-07-13T10:00:00Z","updatedAt":"2026-07-13T10:01:00Z","interruption":{"state":"blocked","resumeState":"assessing","reason":"Repository binding required"}}"#.utf8)
+        let task = try JSONDecoder.patchwright.decode(EngineeringTask.self, from: data)
+        XCTAssertEqual(task.state, .blocked)
+        XCTAssertEqual(task.interruption?.resumeState, .assessing)
+        XCTAssertEqual(task.interruption?.reason, "Repository binding required")
+        XCTAssertTrue(task.requiresAttention)
+    }
+
+    func testTaskAttentionStatesCoverEveryOperatorGate() {
+        for state in [
+            TaskState.awaitingPreparationApproval,
+            .awaitingDeliveryApproval,
+            .awaitingMergeApproval,
+            .blocked,
+            .failed,
+        ] {
+            XCTAssertTrue(state.requiresAttention)
+        }
+        XCTAssertFalse(TaskState.implementing.requiresAttention)
+        XCTAssertFalse(TaskState.paused.requiresAttention)
     }
 
     func testDecodesGitHubRepositorySnapshot() throws {
