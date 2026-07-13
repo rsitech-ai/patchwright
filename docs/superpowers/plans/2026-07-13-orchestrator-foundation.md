@@ -129,13 +129,13 @@
 - Modify: `Sources/PatchwrightCore/EngineClient.swift`
 - Modify: `Sources/PatchwrightCore/WorkspaceStore.swift`
 
-- [ ] Add tests for `task.createFromGitHub` using issue and PR snapshots, duplicate conversion idempotency, missing/stale snapshot, missing repository binding, inaccessible fork, and exact source SHA retention.
-- [ ] Observe JSON-RPC method-not-found RED.
-- [ ] Implement `TaskConversionService` that reads a complete snapshot, builds the contract, records source snapshot identity, proposes repository binding/managed clone, and atomically inserts task+contract+event.
-- [ ] Return a typed `ConversionPreview` before worktree creation. No capability is granted by conversion.
-- [ ] Add `repository.bind` and `task.createFromGitHub` RPC methods with bounded string/ID validation and stable error codes.
-- [ ] Add Swift client/store commands that refresh the created task and select it.
-- [ ] Run RPC/store/Swift tests and commit: `Convert GitHub work items into durable tasks`.
+- [x] Add tests for `task.createFromGitHub` using issue and PR snapshots, duplicate conversion idempotency, missing/stale snapshot, missing repository binding, inaccessible fork, and exact source SHA retention.
+- [x] Observe JSON-RPC method-not-found RED.
+- [x] Implement `TaskConversionService` that reads a complete snapshot, builds the contract, records source snapshot identity, proposes repository binding/managed clone, and atomically inserts task+contract+event.
+- [x] Return a typed `ConversionPreview` before worktree creation. No capability is granted by conversion.
+- [x] Add `repository.bind` and `task.createFromGitHub` RPC methods with bounded string/ID validation and stable error codes.
+- [x] Add Swift client/store commands that refresh the created task and select it.
+- [x] Run RPC/store/Swift tests and commit: `Convert GitHub work items into durable tasks`.
 
 ## Task 8: Build the native queue/workbench shell
 
