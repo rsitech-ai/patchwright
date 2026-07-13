@@ -135,6 +135,17 @@ impl EventStore {
         )
     }
 
+    pub fn repository_binding_by_full_name(
+        &self,
+        full_name: &str,
+    ) -> Result<Option<RepositoryBinding>> {
+        self.load_json_optional(
+            "SELECT payload FROM repository_bindings WHERE full_name = ?1",
+            full_name,
+            "repository binding",
+        )
+    }
+
     pub fn save_task_contract(&self, contract: &TaskContract) -> Result<()> {
         self.connection.execute(
             "INSERT INTO task_contracts(task_id, binding_id, version, payload, updated_at)
@@ -224,6 +235,69 @@ impl EventStore {
         payload
             .map(|value| serde_json::from_str(&value).context("decode persisted task"))
             .transpose()
+    }
+
+    pub fn create_converted_task(
+        &self,
+        task: &Task,
+        contract: &TaskContract,
+        source_key: &str,
+    ) -> Result<(Task, bool)> {
+        anyhow::ensure!(
+            task.id == contract.task_id(),
+            "task contract ID does not match"
+        );
+        anyhow::ensure!(
+            task.repository_binding_id == Some(contract.repository_binding_id()),
+            "task contract binding does not match"
+        );
+        anyhow::ensure!(!source_key.is_empty(), "source key is required");
+        let transaction = self.connection.unchecked_transaction()?;
+        let existing_task_id: Option<String> = transaction
+            .query_row(
+                "SELECT task_id FROM task_sources WHERE source_key = ?1",
+                [source_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(existing_task_id) = existing_task_id {
+            let payload: String = transaction.query_row(
+                "SELECT payload FROM tasks WHERE id = ?1",
+                [existing_task_id],
+                |row| row.get(0),
+            )?;
+            let existing = serde_json::from_str(&payload).context("decode converted task")?;
+            transaction.rollback()?;
+            return Ok((existing, false));
+        }
+        let task_payload = serde_json::to_string(task)?;
+        let occurred_at = task.updated_at.to_rfc3339();
+        transaction.execute(
+            "INSERT INTO tasks(id, payload, updated_at) VALUES (?1, ?2, ?3)",
+            params![task.id.to_string(), task_payload, occurred_at],
+        )?;
+        transaction.execute(
+            "INSERT INTO task_events(task_id, summary, payload, occurred_at)
+             VALUES (?1, 'task created from GitHub snapshot', ?2, ?3)",
+            params![task.id.to_string(), task_payload, occurred_at],
+        )?;
+        transaction.execute(
+            "INSERT INTO task_contracts(task_id, binding_id, version, payload, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                task.id.to_string(),
+                contract.repository_binding_id().to_string(),
+                contract.version(),
+                serde_json::to_string(contract)?,
+                occurred_at,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO task_sources(source_key, task_id, created_at) VALUES (?1, ?2, ?3)",
+            params![source_key, task.id.to_string(), occurred_at],
+        )?;
+        transaction.commit()?;
+        Ok((task.clone(), true))
     }
 
     pub fn timeline(&self, id: TaskId) -> Result<Vec<String>> {
@@ -463,13 +537,14 @@ impl EventStore {
         let transaction = self.connection.unchecked_transaction()?;
         transaction.execute(
             "INSERT INTO github_snapshots(full_name, repository_payload, snapshot_payload, synced_at)
-             VALUES (?1, ?2, ?3, datetime('now'))
+             VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(full_name) DO UPDATE SET repository_payload=excluded.repository_payload,
                  snapshot_payload=excluded.snapshot_payload, synced_at=excluded.synced_at",
             params![
                 snapshot.repository.full_name,
                 serde_json::to_string(&snapshot.repository)?,
                 serde_json::to_string(snapshot)?,
+                chrono::Utc::now().to_rfc3339(),
             ],
         )?;
         transaction.commit()?;
@@ -530,6 +605,26 @@ impl EventStore {
             .map(|value| serde_json::from_str(&value).context("decode GitHub snapshot"))
             .transpose()
     }
+
+    pub fn github_repository_with_snapshot_at(
+        &self,
+        full_name: &str,
+    ) -> Result<Option<(GitHubRepositorySnapshot, chrono::DateTime<chrono::Utc>)>> {
+        let row: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT snapshot_payload, synced_at FROM github_snapshots WHERE full_name = ?1",
+                [full_name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        row.map(|(payload, synced_at)| {
+            let snapshot = serde_json::from_str(&payload).context("decode GitHub snapshot")?;
+            let snapshot_at = parse_persisted_timestamp(&synced_at)?;
+            Ok((snapshot, snapshot_at))
+        })
+        .transpose()
+    }
 }
 
 type PersistedJobRow = (
@@ -584,6 +679,15 @@ fn decode_json_row<T: DeserializeOwned>(
 ) -> Result<T> {
     let payload = row?;
     serde_json::from_str(&payload).with_context(|| format!("decode {label}"))
+}
+
+fn parse_persisted_timestamp(value: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    if let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(value) {
+        return Ok(timestamp.with_timezone(&chrono::Utc));
+    }
+    chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+        .map(|timestamp| timestamp.and_utc())
+        .context("decode persisted timestamp")
 }
 
 fn apply_migrations(connection: &mut Connection) -> Result<()> {
@@ -708,5 +812,14 @@ const MIGRATIONS: &[(u32, &str)] = &[
          );
          CREATE INDEX IF NOT EXISTS task_checkpoints_task_id
              ON task_checkpoints(task_id, occurred_at);",
+    ),
+    (
+        3,
+        "CREATE TABLE IF NOT EXISTS task_sources (
+             source_key TEXT PRIMARY KEY,
+             task_id TEXT NOT NULL UNIQUE,
+             created_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS task_sources_task_id ON task_sources(task_id);",
     ),
 ];

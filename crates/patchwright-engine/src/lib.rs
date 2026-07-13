@@ -1,6 +1,7 @@
 #![allow(clippy::missing_errors_doc, clippy::needless_pass_by_value)]
 
 mod command;
+mod conversion;
 mod github;
 mod jobs;
 mod repository;
@@ -9,6 +10,9 @@ mod store;
 mod worktree;
 
 pub use command::{CommandOutput, CommandRunner, CommandSpec};
+pub use conversion::{
+    ConversionError, ConversionOutcome, ConversionPreview, ConversionRequest, TaskConversionService,
+};
 pub use github::{
     GhCliCredentialBroker, GitHubAccount, GitHubCheckRun, GitHubDiscussion, GitHubPermission,
     GitHubRepository, GitHubRepositoryPermissions, GitHubRepositorySnapshot, GitHubSource,
