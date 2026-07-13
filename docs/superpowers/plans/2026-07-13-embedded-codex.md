@@ -28,11 +28,11 @@
 - Add: `crates/patchwright-engine/tests/fixtures/codex/*.jsonl`
 
 - [ ] Capture sanitized fixtures for initialize/result, initialized, account/read, thread/start, thread/resume, turn/start, turn/steer, turn/interrupt, streamed item notifications, approval requests, completion, and error.
-- [ ] Write decode/encode tests that reject unknown required enum values, missing IDs, oversized lines, malformed JSON, duplicate completion, and a response ID that does not match a pending request.
-- [ ] Run `cargo test -p patchwright-engine --test codex_protocol` and observe missing-module RED.
-- [ ] Implement typed request/response/notification envelopes with serde tagging only at the exact discriminator fields emitted by the validated official schema; retain an explicit `Unsupported` event for forward-compatible notifications.
-- [ ] Add a 4 MiB per-line bound and redact credential-shaped fields from debug output.
-- [ ] Add `script/verify_codex_schema.sh` that resolves the exact `codex` executable/version and compares required methods/fields with generated app-server schema output.
+- [x] Write decode/encode tests that reject unknown required enum values, missing IDs, oversized lines, malformed JSON, duplicate completion, and a response ID that does not match a pending request.
+- [x] Run `cargo test -p patchwright-engine --test codex_protocol` and observe missing-module RED.
+- [x] Implement typed request/response/notification envelopes with serde tagging only at the exact discriminator fields emitted by the validated official schema; retain an explicit `Unsupported` event for forward-compatible notifications.
+- [x] Add a 4 MiB per-line bound and redact credential-shaped fields from debug output.
+- [x] Add `script/verify_codex_schema.sh` that resolves the exact `codex` executable/version and compares required methods/fields with generated app-server schema output.
 - [ ] Run fixtures and schema validation, then commit: `Define the Codex app-server protocol boundary`.
 
 ## Task 2: Supervise one task-owned process group
