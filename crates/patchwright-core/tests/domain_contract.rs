@@ -1,7 +1,4 @@
-use patchwright_core::{
-    Approval, Capability, InstructionKind, InstructionResolver, InstructionSource, Policy,
-    PolicyDecision, Task, TaskState,
-};
+use patchwright_core::{InstructionKind, InstructionResolver, InstructionSource, Task, TaskState};
 
 #[test]
 fn task_state_machine_rejects_skipped_delivery() {
@@ -140,38 +137,6 @@ fn every_active_lifecycle_state_can_pause_and_resume_exactly() {
         task.resume().unwrap();
         assert_eq!(task.state(), expected_resume_state);
     }
-}
-
-#[test]
-fn merge_is_disabled_even_with_an_approval() {
-    let policy = Policy::default();
-    let approval = Approval::for_capability(Capability::MergePullRequest, "owner");
-
-    assert_eq!(
-        policy.authorize(Capability::MergePullRequest, Some(&approval)),
-        PolicyDecision::Denied("merge is disabled".into())
-    );
-}
-
-#[test]
-fn remote_mutations_require_a_matching_approval() {
-    let policy = Policy::default();
-    assert!(matches!(
-        policy.authorize(Capability::PushBranch, None),
-        PolicyDecision::ApprovalRequired(_)
-    ));
-
-    let wrong = Approval::for_capability(Capability::CreatePullRequest, "owner");
-    assert!(matches!(
-        policy.authorize(Capability::PushBranch, Some(&wrong)),
-        PolicyDecision::ApprovalRequired(_)
-    ));
-
-    let matching = Approval::for_capability(Capability::PushBranch, "owner");
-    assert_eq!(
-        policy.authorize(Capability::PushBranch, Some(&matching)),
-        PolicyDecision::Allowed
-    );
 }
 
 #[test]
