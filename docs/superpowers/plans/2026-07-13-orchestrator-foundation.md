@@ -95,13 +95,13 @@
 - Modify: `Sources/PatchwrightCore/GitHubModels.swift`
 - Modify: `Tests/PatchwrightCoreTests/ModelsTests.swift`
 
-- [ ] Add mock-server tests for repository `pushed_at`, default-branch commit SHA/date, open PR count, failing-check count, permissions, and installation ID.
-- [ ] Add PR fixture tests for created time, head commit time, review activity time, review decision, mergeability/conflict state, additions/deletions/files, base/head refs/SHAs, fork identity, and update time.
-- [ ] Run the focused source tests and capture decoding RED.
-- [ ] Extend `GitHubRepository` and `GitHubWorkItem` with serde aliases/defaults that retain backward readability.
-- [ ] Fetch missing default-branch commit and detailed PR fields with bounded concurrency; preserve a complete prior snapshot when enrichment fails.
-- [ ] Mirror the wire model in Swift using `Date` values decoded by the shared ISO-8601 decoder.
-- [ ] Run Rust and Swift focused tests and commit: `Ingest sortable repository and pull request metadata`.
+- [x] Add mock-server tests for repository `pushed_at`, default-branch commit SHA/date, open PR count, failing-check count, permissions, and installation ID.
+- [x] Add PR fixture tests for created time, head commit time, review activity time, review decision, mergeability/conflict state, additions/deletions/files, base/head refs/SHAs, fork identity, and update time.
+- [x] Run the focused source tests and capture decoding RED.
+- [x] Extend `GitHubRepository` and `GitHubWorkItem` with serde aliases/defaults that retain backward readability.
+- [x] Fetch missing default-branch commit and detailed PR fields with bounded concurrency; preserve a complete prior snapshot when enrichment fails.
+- [x] Mirror the wire model in Swift using `Date` values decoded by the shared ISO-8601 decoder.
+- [x] Run Rust and Swift focused tests and commit: `Ingest sortable repository and pull request metadata`.
 
 ## Task 6: Implement deterministic sort and filter policies
 
