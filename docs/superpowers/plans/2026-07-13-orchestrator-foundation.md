@@ -112,12 +112,12 @@
 - Add: `Sources/PatchwrightCore/WorkspaceSorting.swift`
 - Add: `Tests/PatchwrightCoreTests/WorkspaceSortingTests.swift`
 
-- [ ] Add table-driven Rust and Swift tests for all approved repository and PR sort modes, ascending/descending behavior, nil timestamps, unknown CI/review state, and exact final tie-breakers (`full_name`, then repository ID; PR number, then item ID).
-- [ ] Add filter tests for draft/open, author, assignee, label, review, CI, conflicts, age, queue state, and active Codex work; multiple active filters combine with AND semantics.
-- [ ] Observe RED in both languages.
-- [ ] Implement pure `RepositorySort`, `PullRequestSort`, `WorkspaceFilter`, and comparator functions. Define nil/unknown as last in either presentation direction rather than using epoch sentinels.
-- [ ] Add Codable Swift preferences for per-workspace sort/filter state; do not bind them to global process state in tests.
-- [ ] Run the focused parity fixtures in Rust and Swift and commit: `Add deterministic workspace sorting and filtering`.
+- [x] Add table-driven Rust and Swift tests for all approved repository and PR sort modes, ascending/descending behavior, nil timestamps, unknown CI/review state, and exact final tie-breakers (`full_name`, then repository ID; PR number, then item ID).
+- [x] Add filter tests for draft/open, author, assignee, label, review, CI, conflicts, age, queue state, and active Codex work; multiple active filters combine with AND semantics.
+- [x] Observe RED in both languages.
+- [x] Implement pure `RepositorySort`, `PullRequestSort`, `WorkspaceFilter`, and comparator functions. Define nil/unknown as last in either presentation direction rather than using epoch sentinels.
+- [x] Add Codable Swift preferences for per-workspace sort/filter state; do not bind them to global process state in tests.
+- [x] Run the focused parity fixtures in Rust and Swift and commit: `Add deterministic workspace sorting and filtering`.
 
 ## Task 7: Convert an issue or PR into a persisted task
 
