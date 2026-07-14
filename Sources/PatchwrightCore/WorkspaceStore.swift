@@ -19,6 +19,7 @@ public final class WorkspaceStore: ObservableObject {
     @Published public private(set) var githubWorkItems: [GitHubWorkItem] = []
     @Published public private(set) var selectedRepository: GitHubRepositorySnapshot?
     @Published public private(set) var githubSyncSummary: GitHubSyncSummary?
+    @Published public private(set) var githubSyncJob: GitHubSyncJob?
     @Published public private(set) var isSyncingGitHub = false
     @Published public private(set) var conversionPreview: ConversionPreview?
     @Published public private(set) var isConvertingGitHubItem = false
@@ -87,30 +88,52 @@ public final class WorkspaceStore: ObservableObject {
     }
 
     public func syncGitHub(repositoryLimit: Int = 100, resourceLimit: Int = 1_000) async {
+        guard !isSyncingGitHub else { return }
         let selectedRepositoryName = selectedRepository?.repository.fullName
         isSyncingGitHub = true
-        let poller = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
-                guard !Task.isCancelled else { return }
-                await self?.refreshGitHub()
-            }
-        }
-        defer {
-            poller.cancel()
-            isSyncingGitHub = false
-        }
+        defer { isSyncingGitHub = false }
         do {
-            githubSyncSummary = try await engine.call(
-                method: "github.sync",
+            var job = try await engine.call(
+                method: "github.sync.start",
                 params: ["repositoryLimit": String(repositoryLimit), "resourceLimit": String(resourceLimit)],
-                as: GitHubSyncSummary.self
+                as: GitHubSyncJob.self
             )
+            githubSyncJob = job
+            var refreshCounter = 0
+            while !job.state.isTerminal {
+                try await Task.sleep(for: .milliseconds(350))
+                job = try await engine.call(
+                    method: "github.sync.status",
+                    params: ["jobId": job.id.uuidString],
+                    as: GitHubSyncJob.self
+                )
+                githubSyncJob = job
+                refreshCounter += 1
+                if refreshCounter.isMultiple(of: 6) { await refreshGitHub() }
+            }
+            if job.state == .failed || job.state == .interrupted {
+                githubError = job.summary
+                return
+            }
+            if job.state == .cancelled { githubError = nil }
             await refreshGitHub()
             if let selectedRepositoryName,
                let repository = repositories.first(where: { $0.fullName == selectedRepositoryName }) {
                 await selectRepository(repository)
             }
+        } catch {
+            githubError = error.localizedDescription
+        }
+    }
+
+    public func cancelGitHubSync() async {
+        guard let job = githubSyncJob, !job.state.isTerminal else { return }
+        do {
+            githubSyncJob = try await engine.call(
+                method: "github.sync.cancel",
+                params: ["jobId": job.id.uuidString],
+                as: GitHubSyncJob.self
+            )
         } catch {
             githubError = error.localizedDescription
         }
