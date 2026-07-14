@@ -1,5 +1,6 @@
 mod contract;
 mod domain;
+mod github_actions;
 mod instructions;
 mod policy;
 mod sorting;
@@ -14,6 +15,10 @@ pub use contract::{
 pub use domain::{
     Evidence, Finding, FindingSeverity, Task, TaskEvent, TaskId, TaskInterruption, TaskState,
     ValidationError,
+};
+pub use github_actions::{
+    GitHubAction, GitHubActionError, GitHubActionPreview, InlineReviewComment, MergeMethod,
+    RemoteIdentity, RemotePrecondition, ReviewEvent,
 };
 pub use instructions::{
     EffectiveInstructions, InstructionConflict, InstructionKind, InstructionResolver,
