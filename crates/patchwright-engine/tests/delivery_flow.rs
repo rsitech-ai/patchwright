@@ -1,8 +1,9 @@
 use chrono::{TimeZone, Utc};
 use patchwright_core::{
-    Capability, CredentialHealth, GitHubAction, GitHubActionPreview, InstructionDigest,
-    RemoteIdentity, RemotePrecondition, RepositoryBinding, RepositoryBindingDraft,
-    RepositoryPermissionSnapshot, RiskClass, Task, TaskContract, TaskContractDraft, TaskSource,
+    ApprovalClass, Capability, CredentialHealth, GitHubAction, GitHubActionPreview,
+    InstructionDigest, MergeMethod, RemoteIdentity, RemotePrecondition, RepositoryBinding,
+    RepositoryBindingDraft, RepositoryPermissionSnapshot, RiskClass, Task, TaskContract,
+    TaskContractDraft, TaskSource,
 };
 use patchwright_engine::{
     DeliveryError, EventStore, approve_delivery, authorize_execution, preview_delivery,
@@ -106,6 +107,53 @@ fn remote_identity_and_sha_mismatches_fail_before_approval() {
     .unwrap();
     assert_eq!(
         preview_delivery(&store, task.id, wrong_sha),
+        Err(DeliveryError::PreconditionMismatch)
+    );
+}
+
+#[test]
+fn merge_uses_a_separate_merge_class_and_exact_head_sha() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = EventStore::open(&directory.path().join("engine.sqlite3")).unwrap();
+    let mut task = fixture(&store);
+    let original = store.task_contract(task.id).unwrap().unwrap();
+    let contract = TaskContract::try_from(TaskContractDraft {
+        task_id: task.id,
+        source: TaskSource::LocalRequest,
+        repository_binding_id: original.repository_binding_id(),
+        goal: original.goal().into(),
+        acceptance_criteria: original.acceptance_criteria().to_vec(),
+        base_sha: Some("a".repeat(40)),
+        head_sha: Some("b".repeat(40)),
+        instruction_digests: original.instruction_digests().to_vec(),
+        verification_commands: Vec::new(),
+        required_capabilities: vec![Capability::MergePullRequest],
+        risk: RiskClass::High,
+        sensitive_paths: Vec::new(),
+        dependencies: Vec::new(),
+    })
+    .unwrap();
+    store.save_task_contract(&contract).unwrap();
+    task.contract_version = contract.version();
+    let action = GitHubActionPreview::new(
+        RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
+        GitHubAction::merge_pull_request(7, &"b".repeat(40), MergeMethod::Squash).unwrap(),
+        RemotePrecondition::new(Some(&"b".repeat(40)), Some(&"a".repeat(40)), 4).unwrap(),
+    )
+    .unwrap();
+    let preview = preview_delivery(&store, task.id, action).unwrap();
+    let approval = approve_delivery(&store, &preview, "owner").unwrap();
+    assert_eq!(approval.class(), ApprovalClass::Merge);
+    assert_eq!(approval.capability(), Capability::MergePullRequest);
+
+    let changed = GitHubActionPreview::new(
+        RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
+        GitHubAction::merge_pull_request(7, &"c".repeat(40), MergeMethod::Squash).unwrap(),
+        RemotePrecondition::new(Some(&"c".repeat(40)), Some(&"a".repeat(40)), 5).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        preview_delivery(&store, task.id, changed),
         Err(DeliveryError::PreconditionMismatch)
     );
 }
