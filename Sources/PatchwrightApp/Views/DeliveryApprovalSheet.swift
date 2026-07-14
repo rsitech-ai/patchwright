@@ -23,6 +23,10 @@ struct DeliveryApprovalSheet: View {
                         if let branch = preview.action.action.branch ?? preview.action.action.head {
                             LabeledContent("Branch", value: branch)
                         }
+                        if let threadID = preview.action.action.threadId {
+                            LabeledContent("Review thread", value: threadID)
+                                .textSelection(.enabled)
+                        }
                         if let deliveryHead = preview.action.action.headSha {
                             LabeledContent("Delivery commit", value: short(deliveryHead))
                         }
@@ -100,6 +104,7 @@ struct DeliveryApprovalSheet: View {
         case "closePullRequest": "Close this pull request without merging it."
         case "updatePullRequestBranch": "Request GitHub to update the pull request branch at the captured head SHA."
         case "readyPullRequest": "Mark this draft pull request ready for review only if its remote head still matches the captured SHA."
+        case "resolveReviewThread": "Resolve only the selected review thread after GitHub confirms it belongs to this pull request and captured head SHA."
         case "checkRun": "Publish the exact Patchwright check-run status for this commit."
         case "mergePullRequest": "\((action.method ?? "merge").capitalized) the exact approved head SHA into the default branch."
         default: "Execute this exact approval-bound GitHub action."

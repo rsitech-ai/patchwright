@@ -228,6 +228,7 @@ fn capabilities_for(kind: WorkItemKind) -> Vec<Capability> {
             Capability::PushBranch,
             Capability::PostComment,
             Capability::PostReview,
+            Capability::ResolveThread,
             Capability::CreateCheckRun,
             Capability::UpdatePullRequestBranch,
             Capability::ReadyPullRequest,

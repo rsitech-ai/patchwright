@@ -33,6 +33,23 @@
 6. Exercise queue sorting/WIP gates, failure/retry states, app relaunch recovery, and final completed state.
 7. Re-run focused/full tests, real Codex smoke, disposable GitHub E2E, native interaction/log checks, and security/secret scans; update the audit with the weakest truthful readiness label.
 
+## Final Closure Slice
+
+1. Ingest GraphQL pull-request review threads with their opaque node IDs, exact PR identity, resolved/outdated state, and viewer resolution authority. Keep thread IDs as untrusted opaque values and never infer them from REST comment IDs.
+2. Add a typed `resolveReviewThread` action with exact PR/head preconditions, delivery approval, stable idempotency, scoped `pull_requests:write` permission, server-side ownership revalidation, and GraphQL mutation result verification.
+3. Render unresolved threads in the task Delivery workbench and expose only a preview action; reuse the existing approval sheet and execute boundary.
+4. Add a read-only `task.reconcileGitHub` RPC. Re-fetch the task's exact issue or PR through the installation token, require matching repository/number/head identity, and atomically advance only remotely closed/merged tasks through the remaining legal lifecycle states.
+5. Reconcile the two pre-fix sandbox tasks, relaunch the app, and verify they move from Active Tasks to Completed with durable timeline evidence.
+6. Create one disposable open sandbox PR with an unresolved inline thread, ingest it, resolve it through Patchwright's preview/approval/execute path, and re-ingest to prove `isResolved=true`.
+7. Repeat full verification, real Codex smoke, staged runtime/UI inspection, remote GitHub readback, release readiness, secret scan, commit, and branch push. Do not merge Patchwright PR #1.
+
+## Final Closure Decisions
+
+- Review-thread discovery uses GitHub GraphQL because REST review comments do not expose the `PullRequestReviewThread` node ID required by `resolveReviewThread`.
+- Reconciliation is a read-only remote verification followed by a local durable transition. It never performs a GitHub write and cannot accept an operator-supplied final state.
+- A merged PR must retain the task's captured head SHA; a closed-but-unmerged PR is not treated as completed unless the task explicitly executed an approved close action.
+- Historical records are reconciled by the same production RPC used after ambiguous outcomes, not by direct SQLite edits.
+
 ## Rollback
 
 - Keep all live mutations confined to test objects in `patchwright-e2e-sandbox`. Preserve local task/evidence state for diagnosis. Revert cohesive source/test commits in reverse order; never guess at remote rollback or force-push a shared branch.
@@ -43,4 +60,6 @@
 - 2026-07-14: Live sandbox issue #3 became a typed task and exact worktree commit `078ee96c`; Patchwright pushed the task branch and created PR #5 through App-token delivery.
 - 2026-07-14: PR #5 became a second typed task. Embedded Codex persisted 430 review events, Patchwright posted an exact-head review, and separately approved merge delivery produced sandbox main commit `0dd94eec` while closing issue #3.
 - 2026-07-14: Global sync cancellation reached durable `cancelled/acknowledged` state after 15 repositories. Failed-delivery retry, ready-for-review, visible turn-completion refresh, and atomic merge-to-Completed reconciliation were added with regressions.
-- 2026-07-14: Full verify, engine smoke, real Codex smoke, staged runtime, canonical bundle metadata validation, strict code-sign verification, native workbench inspection, and remote GitHub reconciliation passed. Apple distribution remains blocked by missing Developer ID/notary/clean-machine credentials.
+- 2026-07-14: Full verify, engine smoke, real Codex smoke, staged runtime, canonical bundle metadata validation, strict code-sign verification, native workbench inspection, and remote GitHub reconciliation passed. A Developer ID identity is installed; Apple distribution remains blocked by the missing `notarytool` Keychain profile and clean-machine evidence.
+- 2026-07-14: GraphQL review-thread ingestion and exact typed resolution passed on sandbox PR #6. GitHub rejected installation identity for resolution, so the approved action now narrowly falls back to the non-persisted signed-in user token; a second App-token snapshot proved only the intended thread resolved.
+- 2026-07-14: Read-only `task.reconcileGitHub` verified issue #3 closed-completed and PR #5 merged at the captured head, then moved both pre-fix task records to Completed through atomic lifecycle events rather than direct database edits.

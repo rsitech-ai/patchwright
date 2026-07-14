@@ -35,6 +35,7 @@ public final class WorkspaceStore: ObservableObject {
     @Published public private(set) var taskLifecycleBusyTaskIDs: Set<UUID> = []
     @Published public private(set) var taskLifecycleError: String?
     @Published public private(set) var worktreeByTask: [UUID: WorktreeInspection] = [:]
+    @Published public private(set) var repositorySnapshotByTask: [UUID: GitHubRepositorySnapshot] = [:]
     @Published public private(set) var deliveryPreviews: [UUID: DeliveryPreview] = [:]
     @Published public private(set) var deliveryApprovals: [UUID: DeliveryApproval] = [:]
     @Published public private(set) var deliveryExecutions: [UUID: DeliveryExecution] = [:]
@@ -117,6 +118,35 @@ public final class WorkspaceStore: ObservableObject {
             worktreeByTask[taskID] = try await engine.inspectTaskWorktree(taskID: taskID)
         } catch {
             worktreeByTask[taskID] = nil
+        }
+    }
+
+    public func refreshTaskRepository(task: EngineeringTask) async {
+        let fullName: String
+        switch task.source {
+        case .githubIssue(let source): fullName = source.repositoryFullName
+        case .githubPullRequest(let source): fullName = source.repositoryFullName
+        default: return
+        }
+        do {
+            repositorySnapshotByTask[task.id] = try await engine.githubRepositorySnapshot(fullName: fullName)
+        } catch {
+            taskLifecycleError = error.localizedDescription
+        }
+    }
+
+    public func reconcileTaskWithGitHub(_ task: EngineeringTask) async {
+        guard !taskLifecycleBusyTaskIDs.contains(task.id) else { return }
+        taskLifecycleBusyTaskIDs.insert(task.id)
+        defer { taskLifecycleBusyTaskIDs.remove(task.id) }
+        do {
+            let reconciled = try await engine.reconcileTaskWithGitHub(taskID: task.id)
+            replaceTask(reconciled)
+            taskLifecycleError = nil
+            await refreshTaskTimeline(taskID: task.id)
+            await refreshTaskRepository(task: reconciled)
+        } catch {
+            taskLifecycleError = error.localizedDescription
         }
     }
 

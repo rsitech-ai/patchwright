@@ -155,6 +155,7 @@ async fn dispatch(request: Request, state: &ServerState) -> Value {
         "task.readyForDelivery" => task_ready_for_delivery(request.id, &request.params, store),
         "task.previewFromGitHub" => preview_task_from_github(request.id, &request.params, store),
         "task.createFromGitHub" => create_task_from_github(request.id, &request.params, store),
+        "task.reconcileGitHub" => task_reconcile_github(request.id, &request.params, store).await,
         "repository.bind" => bind_repository(request.id, &request.params, store),
         "github.status" => github_status(request.id, store),
         "github.repositories" => github_repositories(request.id, store),
@@ -727,9 +728,34 @@ async fn execute_github_action(
             ..Default::default()
         });
     }
-    GitHubMutationClient::new(&api_url, token.expose_for_authorization_header())?
+    let result = GitHubMutationClient::new(&api_url, token.expose_for_authorization_header())?
         .execute(owner, repository, preview.action.action())
-        .await
+        .await;
+    if matches!(
+        (&result, preview.action.action()),
+        (
+            Err(MutationError::ReviewThreadNotResolvable),
+            GitHubAction::ResolveReviewThread { .. }
+        )
+    ) {
+        let user_token = GhCliCredentialBroker::new(github_cli_path())
+            .token()
+            .map_err(|_| MutationError::ReviewThreadNotResolvable)?;
+        return GitHubMutationClient::new(&api_url, user_token.expose_for_authorization_header())?
+            .execute(owner, repository, preview.action.action())
+            .await;
+    }
+    result
+}
+
+fn github_cli_path() -> String {
+    std::env::var("PATCHWRIGHT_GH_PATH").unwrap_or_else(|_| {
+        if std::path::Path::new("/opt/homebrew/bin/gh").is_file() {
+            "/opt/homebrew/bin/gh".into()
+        } else {
+            "gh".into()
+        }
+    })
 }
 
 #[derive(Deserialize)]
@@ -1923,13 +1949,7 @@ async fn cancellable<T>(
 }
 
 fn github_source_from_environment() -> Result<GitHubSource> {
-    let gh_path = std::env::var("PATCHWRIGHT_GH_PATH").unwrap_or_else(|_| {
-        if std::path::Path::new("/opt/homebrew/bin/gh").is_file() {
-            "/opt/homebrew/bin/gh".into()
-        } else {
-            "gh".into()
-        }
-    });
+    let gh_path = github_cli_path();
     let api_url = std::env::var("PATCHWRIGHT_GITHUB_API_URL")
         .unwrap_or_else(|_| "https://api.github.com".into());
     let token = GhCliCredentialBroker::new(gh_path).token()?;
@@ -2062,13 +2082,7 @@ async fn sync_github(id: Value, params: &Value, store: &Mutex<EventStore>) -> Va
         .and_then(|value| value.parse().ok())
         .unwrap_or(1000)
         .clamp(1, 1000);
-    let gh_path = std::env::var("PATCHWRIGHT_GH_PATH").unwrap_or_else(|_| {
-        if std::path::Path::new("/opt/homebrew/bin/gh").is_file() {
-            "/opt/homebrew/bin/gh".into()
-        } else {
-            "gh".into()
-        }
-    });
+    let gh_path = github_cli_path();
     let api_url = std::env::var("PATCHWRIGHT_GITHUB_API_URL")
         .unwrap_or_else(|_| "https://api.github.com".into());
     let token = match GhCliCredentialBroker::new(gh_path).token() {
@@ -2186,6 +2200,97 @@ async fn sync_github_repository(id: Value, params: &Value, store: &Mutex<EventSt
         return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
     }
     rpc_result(id, json!(snapshot))
+}
+
+async fn task_reconcile_github(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let task_id = match required_task_id(params) {
+        Ok(task_id) => task_id,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let (full_name, repository_id, installation_id) = {
+        let store = store.lock().expect("event store lock poisoned");
+        let task = match store.load_task(task_id) {
+            Ok(Some(task)) => task,
+            Ok(None) => return rpc_error(id, -32040, "task is missing", None),
+            Err(error) => {
+                return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+            }
+        };
+        let Some(full_name) = task.source.repository_full_name().map(ToOwned::to_owned) else {
+            return rpc_error(id, -32045, "task is not backed by GitHub", None);
+        };
+        let Some(repository_id) = task.source.repository_id() else {
+            return rpc_error(id, -32045, "task is not backed by GitHub", None);
+        };
+        let Some(binding_id) = task.repository_binding_id else {
+            return rpc_error(id, -32033, "task repository binding is missing", None);
+        };
+        let binding = match store.repository_binding(binding_id) {
+            Ok(Some(binding)) => binding,
+            Ok(None) => return rpc_error(id, -32033, "task repository binding is missing", None),
+            Err(error) => {
+                return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+            }
+        };
+        if binding.github_repository_id() != repository_id || binding.full_name() != full_name {
+            return rpc_error(id, -32045, "task repository identity changed", None);
+        }
+        (full_name, repository_id, binding.installation_id())
+    };
+    let (source, _) =
+        match github_app_source_for_repository(&full_name, repository_id, Some(installation_id))
+            .await
+        {
+            Ok(source) => source,
+            Err(error) => {
+                return rpc_error(
+                    id,
+                    -32010,
+                    "GitHub App repository authentication unavailable",
+                    Some(error.to_string()),
+                );
+            }
+        };
+    let mut repository = match source.repository(&full_name).await {
+        Ok(repository) if repository.id == repository_id => repository,
+        Ok(_) => return rpc_error(id, -32014, "GitHub repository identity mismatch", None),
+        Err(error) => {
+            return rpc_error(
+                id,
+                -32013,
+                "GitHub repository lookup failed",
+                Some(error.to_string()),
+            );
+        }
+    };
+    repository.installation_id = Some(installation_id);
+    let snapshot = match source.repository_snapshot(&repository, 1_000).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return rpc_error(
+                id,
+                -32015,
+                "GitHub task reconciliation refresh failed",
+                Some(error.to_string()),
+            );
+        }
+    };
+    let result = {
+        let store = store.lock().expect("event store lock poisoned");
+        if let Err(error) = store.replace_github_snapshot(&snapshot) {
+            return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+        }
+        crate::reconcile_completed_task_from_snapshot(&store, task_id, &snapshot)
+    };
+    match result {
+        Ok(task) => rpc_result(id, json!(task)),
+        Err(error) => rpc_error(
+            id,
+            -32046,
+            "GitHub does not confirm this exact task is complete",
+            Some(error.to_string()),
+        ),
+    }
 }
 
 struct RepositorySyncParameters {

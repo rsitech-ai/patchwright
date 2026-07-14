@@ -103,6 +103,91 @@ impl GitHubMutationClient {
                 )
                 .await
             }
+            GitHubAction::ResolveReviewThread {
+                pull_request_number,
+                thread_id,
+                expected_head_sha,
+            } => {
+                let pull = self
+                    .request_value(
+                        Method::GET,
+                        &format!("{prefix}/pulls/{pull_request_number}"),
+                        None,
+                    )
+                    .await?;
+                if pull.pointer("/head/sha").and_then(Value::as_str)
+                    != Some(expected_head_sha.as_str())
+                {
+                    return Err(MutationError::StaleRemoteHead);
+                }
+                let identity = self
+                    .request_value(
+                        Method::POST,
+                        "graphql",
+                        Some(&json!({
+                            "query":"query ReviewThreadIdentity($threadId: ID!) { node(id: $threadId) { ... on PullRequestReviewThread { id isResolved viewerCanResolve pullRequest { number headRefOid repository { nameWithOwner } } } } }",
+                            "variables":{"threadId":thread_id}
+                        })),
+                    )
+                    .await?;
+                if identity.get("errors").is_some() {
+                    return Err(MutationError::GraphQlRejected);
+                }
+                let thread = identity
+                    .pointer("/data/node")
+                    .ok_or(MutationError::InvalidResponse)?;
+                let repository_full_name = format!("{owner}/{repository}");
+                if thread.get("id").and_then(Value::as_str) != Some(thread_id)
+                    || thread.pointer("/pullRequest/number").and_then(Value::as_u64)
+                        != Some(*pull_request_number)
+                    || thread
+                        .pointer("/pullRequest/headRefOid")
+                        .and_then(Value::as_str)
+                        != Some(expected_head_sha)
+                    || thread
+                        .pointer("/pullRequest/repository/nameWithOwner")
+                        .and_then(Value::as_str)
+                        != Some(repository_full_name.as_str())
+                {
+                    return Err(MutationError::ReviewThreadMismatch);
+                }
+                if thread.get("isResolved").and_then(Value::as_bool) == Some(true) {
+                    return Ok(MutationResult {
+                        node_id: Some(thread_id.clone()),
+                        resolved: Some(true),
+                        ..MutationResult::default()
+                    });
+                }
+                if thread.get("viewerCanResolve").and_then(Value::as_bool) != Some(true) {
+                    return Err(MutationError::ReviewThreadNotResolvable);
+                }
+                let response = self
+                    .request_value(
+                        Method::POST,
+                        "graphql",
+                        Some(&json!({
+                            "query":"mutation ResolveReviewThread($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } } }",
+                            "variables":{"threadId":thread_id}
+                        })),
+                    )
+                    .await?;
+                if response.get("errors").is_some() {
+                    return Err(MutationError::GraphQlRejected);
+                }
+                let resolved = response
+                    .pointer("/data/resolveReviewThread/thread")
+                    .ok_or(MutationError::InvalidResponse)?;
+                if resolved.get("id").and_then(Value::as_str) != Some(thread_id)
+                    || resolved.get("isResolved").and_then(Value::as_bool) != Some(true)
+                {
+                    return Err(MutationError::InvalidResponse);
+                }
+                Ok(MutationResult {
+                    node_id: Some(thread_id.clone()),
+                    resolved: Some(true),
+                    ..MutationResult::default()
+                })
+            }
             GitHubAction::CheckRun {
                 name,
                 head_sha,
@@ -188,6 +273,8 @@ impl GitHubMutationClient {
                         .map(ToOwned::to_owned),
                     sha: None,
                     merged: None,
+                    node_id: None,
+                    resolved: None,
                 })
             }
             GitHubAction::ClosePullRequest {
@@ -306,6 +393,11 @@ fn decode_value(value: &Value) -> MutationResult {
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
         merged: value.get("merged").and_then(Value::as_bool),
+        node_id: value
+            .get("node_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        resolved: value.get("isResolved").and_then(Value::as_bool),
     }
 }
 
@@ -346,6 +438,8 @@ pub struct MutationResult {
     pub html_url: Option<String>,
     pub sha: Option<String>,
     pub merged: Option<bool>,
+    pub node_id: Option<String>,
+    pub resolved: Option<bool>,
 }
 
 #[derive(Debug, Error)]
@@ -364,6 +458,10 @@ pub enum MutationError {
     MergeQueueRequired,
     #[error("pull request head changed before the approved mutation")]
     StaleRemoteHead,
+    #[error("review thread identity does not match the approved pull request")]
+    ReviewThreadMismatch,
+    #[error("GitHub App is not allowed to resolve this review thread")]
+    ReviewThreadNotResolvable,
     #[error("GitHub GraphQL mutation was rejected")]
     GraphQlRejected,
     #[error("GitHub mutation transport ended ambiguously; reconcile before retrying")]
