@@ -315,6 +315,26 @@ impl GitHubSource {
         self.paginated("/user/repos?affiliation=owner,collaborator,organization_member&sort=updated&direction=desc&per_page=100", limit).await
     }
 
+    pub async fn repository(&self, full_name: &str) -> Result<GitHubRepository> {
+        let (owner, name) = full_name
+            .split_once('/')
+            .context("repository full name lacks owner")?;
+        if owner.is_empty() || name.is_empty() || name.contains('/') {
+            bail!("repository full name is invalid");
+        }
+        let repository: GitHubRepository = self
+            .get(&format!(
+                "/repos/{}/{}",
+                encode_path_segment(owner),
+                encode_path_segment(name)
+            ))
+            .await?;
+        if repository.full_name != full_name {
+            bail!("GitHub returned a different repository identity");
+        }
+        Ok(repository)
+    }
+
     pub async fn repository_snapshot(
         &self,
         repository: &GitHubRepository,

@@ -11,7 +11,7 @@ Audit refreshed: 2026-07-14 on the current `feat/andrzej_agent_sota_lab` source.
 | Codex | **integration-ready** | `./script/smoke_codex.sh` passed against signed-in `codex-cli 0.144.2`; the latest disposable lifecycle persisted 40 events with zero outstanding approvals. |
 | Native UI | **runtime-verified** | Release build launched. Queue selection, structured right panel, twelve workflow presets, CI Rescue selection, and GitHub App Settings were exercised through accessibility. |
 | GitHub App authentication | **integration-ready** | Production App ID `4294269` (`patchwright-s1korrrr`) has the audited permissions, owner-only metadata and protected-key files, and passed a live authenticated `/app` identity check. |
-| GitHub delivery/merge | **blocked:external** | Local typed action, approval, relay, mutation, queue, merge, monitoring, and restart tests pass. No repository installation or disposable remote mutation run exists. |
+| GitHub delivery/merge | **integration-ready** | Private sandbox issue [#3](https://github.com/s1korrrr/patchwright-e2e-sandbox/issues/3) completed App-token ingestion and typed conversion; Patchwright then created, checked, commented on, reviewed, and separately approval-gated the exact-SHA squash merge of PR [#4](https://github.com/s1korrrr/patchwright-e2e-sandbox/pull/4). Owner-only evidence: `/Users/s1kor/.patchwright/evidence/github-app-e2e-20260714T104059Z.json`. |
 | Bundle | **bundle-valid** | `/Users/s1kor/.patchwright/release-work/Patchwright-0.1.0-1.OfYOYD/Patchwright.app` passed structural validation. |
 | Developer ID / Hardened Runtime | **blocked:external** | No `Developer ID Application` identity is installed; the local bundle is not a distribution signature. |
 | Notarization / Gatekeeper | **blocked:external** | No Keychain notary profile or accepted/stapled DMG exists. |
@@ -30,6 +30,6 @@ Audit refreshed: 2026-07-14 on the current `feat/andrzej_agent_sota_lab` source.
 
 ## Remaining owner-controlled actions
 
-The next browser action is installation of the authenticated App on one disposable repository. That grants persistent repository access and requires immediate confirmation at the action boundary. The production `s1korrrr/patchwright` repository remains explicitly forbidden by the remote smoke gate.
+The GitHub App is installed only on the disposable private sandbox, and the full authorized delivery/merge gate is complete. The production `s1korrrr/patchwright` repository remains explicitly forbidden by the remote smoke gate.
 
 Developer ID completion requires the owner to obtain/install the certificate, create a `notarytool` Keychain profile, and provide a clean macOS 26 machine or VM. The repository scripts can then perform signing, notarization, stapling, Gatekeeper verification, DMG verification, and the clean-machine probe without receiving raw Apple credentials.

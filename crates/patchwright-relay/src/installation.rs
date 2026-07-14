@@ -15,6 +15,18 @@ pub struct InstallationPermissions(BTreeMap<String, String>);
 
 impl InstallationPermissions {
     #[must_use]
+    pub fn ingestion() -> Self {
+        Self(BTreeMap::from([
+            ("actions".into(), "read".into()),
+            ("checks".into(), "read".into()),
+            ("contents".into(), "read".into()),
+            ("issues".into(), "read".into()),
+            ("metadata".into(), "read".into()),
+            ("pull_requests".into(), "read".into()),
+        ]))
+    }
+
+    #[must_use]
     pub fn delivery() -> Self {
         Self(BTreeMap::from([
             ("checks".into(), "write".into()),
