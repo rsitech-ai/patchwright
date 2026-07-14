@@ -52,6 +52,10 @@ cargo run -p patchwright-relay -- --address 127.0.0.1:8787
 
 The relay binds to loopback by default. Production HTTPS termination, GitHub App installation, private keys, and installation-token brokering are operator configuration and are never committed.
 
+## Direct macOS distribution
+
+`script/build_and_run.sh` is the ad-hoc local-development path. Direct distribution uses `script/release.sh`, which refuses dirty source and refuses Apple Development, Apple Distribution, or ad-hoc signing identities. See `docs/release-readiness.md` and `docs/clean-machine-test-plan.md` for the Developer ID, notarization, Gatekeeper, and clean-machine gates.
+
 ## Safety
 
 Merge is disabled in code. GitHub writes, network access, dependency installation, and workflow changes require action-specific approval. Set `PATCHWRIGHT_AUTOMATION_DISABLED=1` to fail closed for every mutating capability while retaining read-only inspection.
