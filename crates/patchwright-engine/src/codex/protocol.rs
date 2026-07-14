@@ -196,7 +196,9 @@ impl ProtocolDecoder {
         let value: Value = serde_json::from_slice(line)
             .map_err(|error| ProtocolError::MalformedJson(error.to_string()))?;
         let object = value.as_object().ok_or(ProtocolError::NotAnObject)?;
-        if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        if object.get("jsonrpc").is_some()
+            && object.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+        {
             return Err(ProtocolError::UnsupportedJsonRpcVersion);
         }
 

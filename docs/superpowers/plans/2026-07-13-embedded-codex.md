@@ -125,12 +125,12 @@
 
 **Files:**
 - Add: `script/smoke_codex.sh`
-- Add: `docs/audits/2026-07-13-embedded-codex.md`
+- Add: `docs/audits/2026-07-14-embedded-codex.md`
 - Modify: `script/verify.sh`
 
-- [ ] Create a disposable local Git repository containing a deterministic one-file task and verification command; never use Patchwright's own worktree for the smoke mutation.
-- [ ] Verify installed Codex version/schema, account state, process isolation, new thread, one turn, streamed event persistence, runtime approval path if requested, file result, task interrupt, engine restart, and thread resume.
-- [ ] Run the fake-server suite, complete Rust/Swift verification, real smoke, staged app interaction, relaunch, and secret/log scan.
-- [ ] Record exact process/thread/turn IDs only in local evidence if they are not secrets; sanitize command output and repository content.
-- [ ] Assign `integration-ready: Codex` only if the real disposable smoke passes; otherwise name the exact local/account blocker.
-- [ ] Commit: `Verify embedded Codex end to end`.
+- [x] Create a disposable local Git repository containing a deterministic one-file task and verification command; never use Patchwright's own worktree for the smoke mutation.
+- [x] Verify installed Codex version/schema, account state, process isolation, new thread, one turn, streamed event persistence, runtime approval path if requested, file result, task interrupt, engine restart, and thread resume.
+- [x] Run the fake-server suite, complete Rust/Swift verification, real smoke, staged app interaction, relaunch, and secret/log scan.
+- [x] Record exact process/thread/turn IDs only in local evidence if they are not secrets; sanitize command output and repository content.
+- [x] Assign `integration-ready: Codex` only if the real disposable smoke passes; otherwise name the exact local/account blocker.
+- [x] Commit: `Verify embedded Codex end to end`.
