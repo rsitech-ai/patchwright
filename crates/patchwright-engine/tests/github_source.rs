@@ -59,6 +59,48 @@ async fn pagination_never_forwards_a_token_to_a_cross_origin_link() {
 }
 
 #[tokio::test]
+async fn installation_token_can_fetch_one_exact_repository_without_account_discovery() {
+    let app = Router::new().route(
+        "/repos/{owner}/{repo}",
+        get(
+            |Path((owner, repo)): Path<(String, String)>, headers: HeaderMap| async move {
+                assert_eq!(owner, "octocat");
+                assert_eq!(repo, "fixture");
+                assert_eq!(
+                    headers.get("authorization").unwrap(),
+                    "Bearer installation-token"
+                );
+                Json(json!({
+                    "id": 123,
+                    "full_name": "octocat/fixture",
+                    "description": null,
+                    "private": true,
+                    "archived": false,
+                    "default_branch": "main",
+                    "html_url": "https://github.com/octocat/fixture",
+                    "updated_at": "2026-07-14T09:00:00Z",
+                    "pushed_at": "2026-07-14T08:00:00Z",
+                    "open_issues_count": 1,
+                    "permissions": {"admin": false, "maintain": true, "push": true, "triage": true, "pull": true}
+                }))
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let source = GitHubSource::new(
+        format!("http://{address}"),
+        GitHubToken::new("installation-token"),
+    )
+    .unwrap();
+    let repository = source.repository("octocat/fixture").await.unwrap();
+    assert_eq!(repository.id, 123);
+    assert_eq!(repository.full_name, "octocat/fixture");
+}
+
+#[tokio::test]
 async fn authenticated_source_paginates_and_separates_issues_from_pull_requests() {
     let observed_authorization = Arc::new(Mutex::new(Vec::new()));
     let auth = Arc::clone(&observed_authorization);
