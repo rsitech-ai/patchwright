@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{EventStore, TaskCheckpoint};
+use crate::{CancellationState, EventStore, Job, JobId, JobKind, JobState, TaskCheckpoint};
 
 use super::process::{CodexProcess, CodexProcessError, CodexProcessFactory, CodexProcessState};
 use super::protocol::{
@@ -103,6 +103,8 @@ struct ActiveCodex {
     next_request_id: i64,
     client_message_ids: HashSet<String>,
     active_turn_id: Option<String>,
+    execution_job_id: JobId,
+    interrupt_sent: bool,
 }
 
 impl CodexService {
@@ -151,9 +153,13 @@ impl CodexService {
         }
         let (mut task, persisted_session, instructions) = {
             let store = lock_store(store)?;
-            let task = store
+            let mut task = store
                 .load_task(task_id)?
                 .ok_or(CodexServiceError::TaskNotFound)?;
+            if task.state == TaskState::Paused {
+                task.resume().map_err(|_| CodexServiceError::InvalidTaskState(task.state))?;
+                store.save_task(&task, "Codex task resumed")?;
+            }
             if !matches!(task.state, TaskState::Preparing | TaskState::Implementing) {
                 return Err(CodexServiceError::InvalidTaskState(task.state));
             }
@@ -195,6 +201,14 @@ impl CodexService {
             lock_store(store)?.enter_implementing_with_codex(&task, &checkpoint, &record)?;
         }
         let status = status_from_session(&record, record.status == CodexSessionStatus::Ready);
+        let job = Job::new(JobKind::TaskExecution, Some(task_id), "Codex task execution queued")?;
+        {
+            let store = lock_store(store)?;
+            store.create_job(&job)?;
+            if !store.transition_job(job.id(), JobState::Queued, JobState::Running, CancellationState::NotRequested, "Codex task execution running", None)? {
+                return Err(CodexServiceError::JobTransition);
+            }
+        }
         self.active.insert(
             task_id,
             ActiveCodex {
@@ -204,6 +218,8 @@ impl CodexService {
                 next_request_id: 4,
                 client_message_ids: HashSet::new(),
                 active_turn_id: None,
+                execution_job_id: job.id(),
+                interrupt_sent: false,
             },
         );
         Ok(status)
@@ -350,12 +366,32 @@ impl CodexService {
         if limit == 0 || limit > MAX_EVENT_PAGE {
             return Err(CodexServiceError::InvalidEventLimit);
         }
-        if let Some(active) = self.active.get_mut(&task_id) {
-            pump_available(active, store).await?;
+        let pump_result = if let Some(active) = self.active.get_mut(&task_id) {
+            pump_available(active, store).await
+        } else { Ok(()) };
+        if let Err(error) = pump_result {
+            self.record_crash(task_id, store).await?;
+            return Err(error);
         }
         let mut events = lock_store(store)?.codex_events(task_id, after)?;
         events.truncate(limit);
         Ok(events)
+    }
+
+    async fn record_crash(&mut self, task_id: TaskId, store: &Mutex<EventStore>) -> Result<(), CodexServiceError> {
+        let Some(mut active) = self.active.remove(&task_id) else { return Ok(()) };
+        active.session.status = CodexSessionStatus::Failed;
+        append_event(store, &mut active.session, CodexEventDraft::status("error", "Codex app-server exited unexpectedly"))?;
+        let _ = active.process.terminate().await;
+        let mut task = lock_store(store)?.load_task(task_id)?.ok_or(CodexServiceError::TaskNotFound)?;
+        if !matches!(task.state, TaskState::Failed | TaskState::Cancelled | TaskState::Completed) {
+            task.interrupt(TaskState::Failed, "Codex app-server exited unexpectedly; worktree and evidence retained")
+                .map_err(|_| CodexServiceError::InvalidTaskState(task.state))?;
+            let checkpoint = TaskCheckpoint::new(task_id, TaskState::Failed, "Codex app-server crash recorded")?;
+            lock_store(store)?.save_task_with_checkpoint(&task, "Codex app-server crash recorded", &checkpoint)?;
+        }
+        let _ = lock_store(store)?.transition_job(active.execution_job_id, JobState::Running, JobState::Failed, CancellationState::NotRequested, "Codex app-server exited unexpectedly", None)?;
+        Ok(())
     }
 
     pub async fn approvals(&mut self, task_id: TaskId, store: &Mutex<EventStore>) -> Result<Vec<CodexRuntimeApproval>, CodexServiceError> {
@@ -386,6 +422,36 @@ impl CodexService {
             active.process.terminate().await?;
         }
         Ok(())
+    }
+
+    pub async fn interrupt(&mut self, task_id: TaskId, cancel: bool, store: &Mutex<EventStore>) -> Result<CodexRuntimeStatus, CodexServiceError> {
+        let mut active = self.active.remove(&task_id).ok_or(CodexServiceError::ProcessNotActive)?;
+        {
+            let store = lock_store(store)?;
+            if !store.transition_job(active.execution_job_id, JobState::Running, JobState::Cancelling, CancellationState::Requested, if cancel { "Codex task cancellation requested" } else { "Codex task pause requested" }, None)? {
+                return Err(CodexServiceError::JobTransition);
+            }
+        }
+        let completed_before_cancel = if let (Some(thread_id), Some(turn_id)) = (active.session.thread_id.clone(), active.active_turn_id.clone()) {
+            if active.interrupt_sent { false } else {
+                active.interrupt_sent = true;
+                let result = tokio::time::timeout(Duration::from_millis(750), request(&mut active, ClientMethod::TurnInterrupt, json!({"threadId":thread_id,"turnId":turn_id}), store)).await;
+                matches!(result, Ok(Ok(_))) && active.active_turn_id.is_none()
+            }
+        } else { false };
+        active.process.terminate().await?;
+        let mut task = lock_store(store)?.load_task(task_id)?.ok_or(CodexServiceError::TaskNotFound)?;
+        if completed_before_cancel {
+            lock_store(store)?.transition_job(active.execution_job_id, JobState::Cancelling, JobState::Succeeded, CancellationState::Acknowledged, "Codex turn completed during cancellation", None)?;
+        } else {
+            let next = if cancel { TaskState::Cancelled } else { TaskState::Paused };
+            task.interrupt(next, if cancel { "Cancelled by operator; worktree and evidence retained" } else { "Paused by operator; worktree and evidence retained" })
+                .map_err(|_| CodexServiceError::InvalidTaskState(task.state))?;
+            let checkpoint = TaskCheckpoint::new(task_id, next, if cancel { "Codex task cancelled" } else { "Codex task paused" })?;
+            lock_store(store)?.save_task_with_checkpoint(&task, if cancel { "Codex task cancelled" } else { "Codex task paused" }, &checkpoint)?;
+            if !lock_store(store)?.transition_job(active.execution_job_id, JobState::Cancelling, JobState::Cancelled, CancellationState::Acknowledged, if cancel { "Codex task cancelled" } else { "Codex task paused" }, None)? { return Err(CodexServiceError::JobTransition); }
+        }
+        self.status(task_id, store)
     }
 }
 
@@ -431,6 +497,8 @@ pub enum CodexServiceError {
     ApprovalNotFound,
     #[error("Codex runtime approval is expired or no longer bound to the active turn")]
     ApprovalInvalid,
+    #[error("durable Codex job compare-and-set transition failed")]
+    JobTransition,
 }
 
 async fn request(

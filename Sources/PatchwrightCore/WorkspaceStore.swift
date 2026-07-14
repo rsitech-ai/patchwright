@@ -193,6 +193,17 @@ public final class WorkspaceStore: ObservableObject {
         } catch { codexError = error.localizedDescription }
     }
 
+    public func interruptCodex(taskID: UUID, cancel: Bool) async {
+        guard !codexBusyTaskIDs.contains(taskID) else { return }
+        codexBusyTaskIDs.insert(taskID)
+        defer { codexBusyTaskIDs.remove(taskID) }
+        do {
+            codexStatuses[taskID] = try await engine.interruptCodex(taskID: taskID, cancel: cancel)
+            codexError = nil
+            await refreshTasks()
+        } catch { codexError = error.localizedDescription }
+    }
+
     public func startCodex(taskID: UUID) async {
         guard !codexBusyTaskIDs.contains(taskID) else { return }
         codexBusyTaskIDs.insert(taskID)
