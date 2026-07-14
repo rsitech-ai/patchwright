@@ -24,6 +24,66 @@ public protocol EngineServing: Sendable {
 }
 
 public extension EngineServing {
+    func codexStatus(taskID: UUID) async throws -> CodexRuntimeStatus {
+        try await call(
+            method: "codex.status",
+            params: ["taskId": taskID.uuidString],
+            as: CodexRuntimeStatus.self
+        )
+    }
+
+    func startCodex(taskID: UUID) async throws -> CodexRuntimeStatus {
+        try await call(
+            method: "codex.start",
+            params: ["taskId": taskID.uuidString],
+            as: CodexRuntimeStatus.self
+        )
+    }
+
+    func codexEvents(taskID: UUID, after cursor: UInt64, limit: Int = 100) async throws -> [CodexEvent] {
+        try await call(
+            method: "codex.events",
+            params: [
+                "taskId": taskID.uuidString,
+                "after": String(cursor),
+                "limit": String(limit),
+            ],
+            as: [CodexEvent].self
+        )
+    }
+
+    func startCodexTurn(
+        taskID: UUID,
+        clientMessageID: UUID,
+        input: String
+    ) async throws -> CodexTurnReceipt {
+        try await call(
+            method: "codex.turn.start",
+            params: [
+                "taskId": taskID.uuidString,
+                "clientMessageId": clientMessageID.uuidString,
+                "input": input,
+            ],
+            as: CodexTurnReceipt.self
+        )
+    }
+
+    func steerCodexTurn(
+        taskID: UUID,
+        clientMessageID: UUID,
+        input: String
+    ) async throws -> CodexTurnReceipt {
+        try await call(
+            method: "codex.turn.steer",
+            params: [
+                "taskId": taskID.uuidString,
+                "clientMessageId": clientMessageID.uuidString,
+                "input": input,
+            ],
+            as: CodexTurnReceipt.self
+        )
+    }
+
     func previewTaskFromGitHub(_ item: GitHubWorkItem) async throws -> ConversionPreview {
         try await call(
             method: "task.previewFromGitHub",

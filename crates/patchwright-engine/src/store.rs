@@ -1,7 +1,7 @@
 use crate::{
     CancellationState, GitHubAccount, GitHubRepository, GitHubRepositorySnapshot, Job,
     JobCheckpoint, JobId, JobState, TaskCheckpoint,
-    codex::session::{CodexEventRecord, CodexSessionRecord, CodexSessionStatus},
+    codex::session::{CodexEventDraft, CodexEventRecord, CodexSessionRecord, CodexSessionStatus},
     jobs::validate_summary,
 };
 use anyhow::{Context, Result, bail};
@@ -119,8 +119,29 @@ impl EventStore {
         kind: &str,
         summary: &str,
     ) -> Result<()> {
-        let kind = validate_codex_event_kind(kind)?;
-        let summary = validate_summary(summary.to_owned())?;
+        self.append_codex_event(session, CodexEventDraft::status(kind, summary))
+    }
+
+    pub fn append_codex_event(
+        &self,
+        session: &mut CodexSessionRecord,
+        draft: CodexEventDraft,
+    ) -> Result<()> {
+        let kind = validate_codex_event_kind(&draft.kind)?;
+        let summary = validate_summary(draft.summary)?;
+        let content = draft
+            .content
+            .map(validate_codex_event_content)
+            .transpose()?;
+        for (value, field) in [
+            (draft.thread_id.as_deref(), "thread id"),
+            (draft.turn_id.as_deref(), "turn id"),
+            (draft.item_id.as_deref(), "item id"),
+        ] {
+            if let Some(value) = value {
+                validate_codex_identity(value, field)?;
+            }
+        }
         let transaction = self.connection.unchecked_transaction()?;
         let next_sequence: u64 = transaction.query_row(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM codex_events WHERE task_id = ?1",
@@ -137,6 +158,10 @@ impl EventStore {
             sequence: next_sequence,
             kind: kind.clone(),
             summary: summary.clone(),
+            thread_id: draft.thread_id,
+            turn_id: draft.turn_id,
+            item_id: draft.item_id,
+            content,
             occurred_at,
         };
         upsert_codex_session(&transaction, &next_session)?;
@@ -880,6 +905,22 @@ fn validate_codex_event_kind(value: &str) -> Result<String> {
         "invalid Codex event kind"
     );
     Ok(value.to_owned())
+}
+
+fn validate_codex_identity(value: &str, field: &'static str) -> Result<()> {
+    anyhow::ensure!(
+        !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control),
+        "invalid Codex {field}"
+    );
+    Ok(())
+}
+
+fn validate_codex_event_content(value: String) -> Result<String> {
+    anyhow::ensure!(
+        value.len() <= 64 * 1024 && !value.contains('\0'),
+        "invalid Codex event content"
+    );
+    Ok(value)
 }
 
 fn upsert_codex_session(
