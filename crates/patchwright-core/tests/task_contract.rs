@@ -42,6 +42,7 @@ fn task_sources_retain_immutable_issue_and_pull_request_identity() {
         snapshot_at: snapshot_time(),
     })
     .unwrap();
+    assert_eq!(serde_json::to_value(&issue).unwrap()["kind"], "githubIssue");
     assert_eq!(issue.repository_id(), Some(42));
     assert_eq!(issue.item_number(), Some(17));
     assert_eq!(

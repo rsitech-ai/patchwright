@@ -9,6 +9,7 @@ struct TaskDetailView: View {
     @State private var deliveryApprovalPresented = false
     @State private var mergeApprovalPresented = false
     @State private var mergeMethod = GitHubMergeMethod.squash
+    @State private var reviewEvent = GitHubReviewEvent.comment
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,6 +31,13 @@ struct TaskDetailView: View {
         }
         .sheet(isPresented: $mergeApprovalPresented) {
             DeliveryApprovalSheet(store: store, task: task)
+        }
+        .task(id: task.id) {
+            while !Task.isCancelled {
+                await store.refreshTaskTimeline(taskID: task.id)
+                await store.refreshTaskWorktree(taskID: task.id)
+                try? await Task.sleep(for: .seconds(2))
+            }
         }
     }
 
@@ -70,8 +78,8 @@ struct TaskDetailView: View {
                         switch TaskWorkbenchTab(rawValue: tabRaw) ?? .overview {
                         case .overview: overview
                         case .codex: EmptyView()
-                        case .changes: placeholder("Changes", "Worktree file changes and diffs will appear here.", "doc.badge.gearshape")
-                        case .verification: placeholder("Verification", "Commands, checks, findings, and evidence will appear here.", "checkmark.shield")
+                        case .changes: changesPanel
+                        case .verification: verificationPanel
                         case .delivery: deliveryPanel
                         case .merge: mergePanel
                         }
@@ -89,7 +97,14 @@ struct TaskDetailView: View {
                 LabeledContent("State", value: task.state.displayName)
                 LabeledContent("Updated") { TimestampText(date: task.updatedAt) }
                 LabeledContent("Contract", value: task.contractVersion.map { "Version \($0)" } ?? "Pending")
+                lifecycleControls
+                if let error = store.taskLifecycleError {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
             }
+            detailCard("Progress") { lifecycleTimeline }
             detailCard("Source") {
                 sourceSummary
             }
@@ -103,40 +118,246 @@ struct TaskDetailView: View {
         }
     }
 
-    private var deliveryPanel: some View {
-        detailCard("Approval-bound GitHub comment") {
-            Text("Prepare one exact comment for the ingested issue or pull request. Previewing does not approve or execute it.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            TextEditor(text: $deliveryBody)
-                .font(.body)
-                .frame(minHeight: 140)
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
-            HStack {
-                if let execution = store.deliveryExecutions[task.id] {
-                    Label(execution.state.capitalized, systemImage: "checkmark.seal")
-                        .foregroundStyle(.green)
-                } else if store.deliveryPreviews[task.id] != nil {
-                    Label("Preview ready", systemImage: "doc.text.magnifyingglass")
+    @ViewBuilder private var lifecycleControls: some View {
+        let busy = store.taskLifecycleBusyTaskIDs.contains(task.id)
+        HStack {
+            if busy { ProgressView().controlSize(.small) }
+            Spacer()
+            if task.state == .discovered {
+                Button("Assess & Plan", systemImage: "list.bullet.clipboard") {
+                    Task { await store.planTask(taskID: task.id) }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(busy)
+            } else if task.state == .awaitingPreparationApproval {
+                Button("Approve & Prepare Worktree", systemImage: "checkmark.shield.fill") {
+                    Task { await store.prepareTask(taskID: task.id) }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(busy)
+                .help("Create an isolated task branch at the captured source SHA")
+            } else if [.preparing, .implementing].contains(task.state) {
+                Label("Worktree ready", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            }
+        }
+    }
+
+    private var lifecycleTimeline: some View {
+        let events = store.taskTimelineByTask[task.id] ?? [task]
+        return VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(events.enumerated()), id: \.offset) { index, event in
+                HStack(alignment: .firstTextBaseline, spacing: 9) {
+                    Image(systemName: index == events.indices.last ? "circle.inset.filled" : "checkmark.circle.fill")
+                        .foregroundStyle(index == events.indices.last ? Color.accentColor : .green)
+                    Text(event.state.displayName).font(.callout.weight(.medium))
+                    Spacer()
+                    TimestampText(date: event.updatedAt)
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
-                Spacer()
-                Button("Preview Exact Comment", systemImage: "eye") {
-                    Task {
-                        await store.previewCommentDelivery(task: task, body: deliveryBody)
-                        if store.deliveryPreviews[task.id] != nil { deliveryApprovalPresented = true }
+            }
+        }
+    }
+
+    private var deliveryPanel: some View {
+        Group {
+            detailCard("Task branch") {
+                Text("Pushes use an ephemeral GitHub App credential and can only target the isolated task branch. The default branch is changed only by an exact-SHA merge.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let worktree = store.worktreeByTask[task.id] {
+                    LabeledContent("Branch", value: worktree.branch)
+                    LabeledContent("Head", value: String(worktree.headSHA.prefix(12)))
+                    LabeledContent("Working tree", value: worktree.dirty ? "Uncommitted changes" : "Clean")
+                    HStack {
+                        Spacer()
+                        Button("Preview Push Branch", systemImage: "arrow.up.circle") {
+                            preview(
+                                GitHubActionPayload(
+                                    kind: "pushIntent",
+                                    branch: worktree.branch,
+                                    headSha: worktree.headSHA
+                                )
+                            )
+                        }
+                        .disabled(worktree.dirty || store.deliveryBusyTaskIDs.contains(task.id))
+                    }
+                } else {
+                    Label("Prepare the worktree before pushing a task branch.", systemImage: "info.circle")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            detailCard("Comment or review") {
+                Text("Every write is previewed, approved, and executed as a separate exact action.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                TextEditor(text: $deliveryBody)
+                    .font(.body)
+                    .frame(minHeight: 120)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+                if case .githubPullRequest = task.source {
+                    Picker("Review", selection: $reviewEvent) {
+                        ForEach(GitHubReviewEvent.allCases) { event in Text(event.label).tag(event) }
+                    }
+                    .pickerStyle(.segmented)
+                }
+                HStack {
+                    if let execution = store.deliveryExecutions[task.id] {
+                        Label(execution.state.capitalized, systemImage: "checkmark.seal")
+                            .foregroundStyle(.green)
+                    }
+                    Spacer()
+                    Button("Preview Comment", systemImage: "bubble.left") {
+                        Task {
+                            await store.previewCommentDelivery(task: task, body: deliveryBody)
+                            if store.deliveryPreviews[task.id] != nil { deliveryApprovalPresented = true }
+                        }
+                    }
+                    .disabled(deliveryTextIsEmpty || store.deliveryBusyTaskIDs.contains(task.id))
+                    if case .githubPullRequest(let source) = task.source {
+                        Button("Preview Review", systemImage: "checkmark.bubble") {
+                            preview(
+                                GitHubActionPayload(
+                                    kind: "review",
+                                    body: deliveryBody,
+                                    pullRequestNumber: source.number,
+                                    event: reviewEvent.rawValue,
+                                    inlineComments: []
+                                )
+                            )
+                        }
+                        .disabled(deliveryTextIsEmpty || store.deliveryBusyTaskIDs.contains(task.id))
                     }
                 }
-                .disabled(
-                    deliveryBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || store.deliveryBusyTaskIDs.contains(task.id)
-                )
             }
+            deliveryActions
             if let error = store.deliveryError {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.red)
             }
+        }
+    }
+
+    @ViewBuilder private var deliveryActions: some View {
+        if case .githubIssue(let source) = task.source {
+            detailCard("Resolve issue") {
+                Text("Open a draft pull request from the pushed task branch, or close the issue as completed after its outcome is delivered.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Spacer()
+                    if let worktree = store.worktreeByTask[task.id],
+                       let repository = store.repositories.first(where: { $0.id == source.repositoryID }) {
+                        Button("Preview Draft PR", systemImage: "arrow.triangle.pull") {
+                            preview(
+                                GitHubActionPayload(
+                                    kind: "draftPullRequest",
+                                    body: deliveryTextIsEmpty ? "Resolves #\(source.number)" : deliveryBody,
+                                    title: task.title,
+                                    head: worktree.branch,
+                                    base: repository.defaultBranch
+                                )
+                            )
+                        }
+                    }
+                    Button("Preview Close Issue", systemImage: "checkmark.circle") {
+                        preview(GitHubActionPayload(kind: "closeIssue", issueNumber: source.number))
+                    }
+                }
+            }
+        } else if case .githubPullRequest(let source) = task.source {
+            detailCard("Pull request operations") {
+                Text("Update or close the pull request as exact approval-bound actions. Merge remains in the separate Merge tab.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Spacer()
+                    Button("Preview Update Branch", systemImage: "arrow.triangle.2.circlepath") {
+                        preview(
+                            GitHubActionPayload(
+                                kind: "updatePullRequestBranch",
+                                pullRequestNumber: source.number,
+                                expectedHeadSha: source.headSHA
+                            )
+                        )
+                    }
+                    Button("Preview Ready for Review", systemImage: "person.crop.circle.badge.checkmark") {
+                        preview(
+                            GitHubActionPayload(
+                                kind: "readyPullRequest",
+                                pullRequestNumber: source.number,
+                                expectedHeadSha: source.headSHA
+                            )
+                        )
+                    }
+                    Button("Preview Close PR", systemImage: "xmark.circle") {
+                        preview(
+                            GitHubActionPayload(
+                                kind: "closePullRequest",
+                                pullRequestNumber: source.number
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private var changesPanel: some View {
+        Group {
+            if let worktree = store.worktreeByTask[task.id] {
+                detailCard("Worktree") {
+                    LabeledContent("Path", value: worktree.root)
+                    LabeledContent("Branch", value: worktree.branch)
+                    LabeledContent("HEAD", value: worktree.headSHA)
+                    LabeledContent("Status", value: worktree.dirty ? "Uncommitted changes" : "Clean")
+                }
+            } else {
+                placeholder("No Worktree Yet", "Approve preparation to create the isolated task branch.", "doc.badge.gearshape")
+            }
+        }
+    }
+
+    private var verificationPanel: some View {
+        detailCard("Delivery readiness") {
+            Text("Patchwright requires a clean committed worktree before exposing approval-bound GitHub delivery.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let worktree = store.worktreeByTask[task.id] {
+                LabeledContent("Branch", value: worktree.branch)
+                LabeledContent("Commit", value: String(worktree.headSHA.prefix(12)))
+                LabeledContent("Worktree", value: worktree.dirty ? "Dirty" : "Clean")
+                HStack {
+                    Spacer()
+                    Button("Complete Verification & Review", systemImage: "checkmark.shield.fill") {
+                        Task { await store.readyTaskForDelivery(taskID: task.id) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(
+                        worktree.dirty
+                            || store.taskLifecycleBusyTaskIDs.contains(task.id)
+                            || task.state == .awaitingDeliveryApproval
+                    )
+                }
+            } else {
+                Label("No prepared worktree is available.", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.secondary)
+            }
+            if task.state == .awaitingDeliveryApproval {
+                Label("Ready for exact GitHub delivery approval", systemImage: "checkmark.seal.fill")
+                    .foregroundStyle(.green)
+            }
+        }
+    }
+
+    private var deliveryTextIsEmpty: Bool {
+        deliveryBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func preview(_ action: GitHubActionPayload) {
+        Task {
+            await store.previewDelivery(task: task, action: action)
+            if store.deliveryPreviews[task.id] != nil { deliveryApprovalPresented = true }
         }
     }
 

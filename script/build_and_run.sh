@@ -27,13 +27,7 @@ cp "$ROOT_DIR/target/release/patchwright-engine" "$APP_BUNDLE/Contents/Helpers/p
 cp "$ROOT_DIR/target/release/patchwright-relay" "$APP_BUNDLE/Contents/Helpers/patchwright-relay"
 chmod +x "$APP_MACOS/$APP_NAME"
 chmod +x "$APP_BUNDLE/Contents/Helpers/patchwright-engine" "$APP_BUNDLE/Contents/Helpers/patchwright-relay"
-/usr/libexec/PlistBuddy -c "Clear dict" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string $APP_NAME" "$APP_BUNDLE/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $BUNDLE_ID" "$APP_BUNDLE/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Add :CFBundleName string $APP_NAME" "$APP_BUNDLE/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string APPL" "$APP_BUNDLE/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string 26.0" "$APP_BUNDLE/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Add :NSPrincipalClass string NSApplication" "$APP_BUNDLE/Contents/Info.plist"
+cp "$ROOT_DIR/Packaging/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 clean_bundle_metadata() {
   /usr/bin/xattr -cr "$APP_BUNDLE"
   # File Provider can retain these root attributes even after `xattr -cr`.
@@ -42,6 +36,7 @@ clean_bundle_metadata() {
   /usr/bin/xattr -d 'com.apple.fileprovider.fpfs#P' "$APP_BUNDLE" 2>/dev/null || true
 }
 clean_bundle_metadata
+"$ROOT_DIR/script/validate_bundle.sh" "$APP_BUNDLE"
 /usr/bin/codesign --force --deep --sign - "$APP_BUNDLE"
 /usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
 if [[ -e "$DIST_APP_BUNDLE" && ! -L "$DIST_APP_BUNDLE" ]]; then

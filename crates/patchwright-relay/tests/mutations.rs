@@ -27,8 +27,12 @@ async fn capture_request(
         .0
         .lock()
         .unwrap()
-        .push((method, format!("/{path}"), body.clone()));
-    let response = if path.ends_with("/merge") {
+        .push((method.clone(), format!("/{path}"), body.clone()));
+    let response = if method == Method::GET && path.ends_with("/pulls/4") {
+        json!({"id":91,"node_id":"PR_node","number":4,"html_url":"https://example.invalid/pull/4","draft":true,"head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}})
+    } else if path == "graphql" {
+        json!({"data":{"markPullRequestReadyForReview":{"pullRequest":{"databaseId":91,"number":4,"url":"https://example.invalid/pull/4","isDraft":false}}}})
+    } else if path.ends_with("/merge") {
         json!({"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","merged":true,"message":"merged"})
     } else if path.ends_with("/pulls") {
         json!({"number":17,"html_url":"https://example.invalid/pull/17"})
@@ -69,7 +73,9 @@ async fn emits_exact_branch_comment_review_check_draft_and_merge_requests() {
         GitHubAction::check_run("Patchwright", sha, "completed", Some("success")).unwrap(),
         GitHubAction::draft_pull_request("title", "feat/test", "main", "body").unwrap(),
         GitHubAction::update_pull_request_branch(4, sha).unwrap(),
+        GitHubAction::ready_pull_request(4, sha).unwrap(),
         GitHubAction::close_pull_request(4).unwrap(),
+        GitHubAction::close_issue(5).unwrap(),
         GitHubAction::merge_pull_request(4, sha, MergeMethod::Squash).unwrap(),
     ];
     for action in actions {
@@ -102,9 +108,28 @@ async fn emits_exact_branch_comment_review_check_draft_and_merge_requests() {
     assert_eq!(requests[3].2["conclusion"], "success");
     assert_eq!(requests[4].2["draft"], true);
     assert_eq!(requests[5].2, json!({"expected_head_sha":sha}));
-    assert_eq!(requests[6].2, json!({"state":"closed"}));
     assert_eq!(
-        requests[7],
+        requests[6],
+        (
+            Method::GET,
+            "/repos/octo/fixture/pulls/4".into(),
+            Value::Null
+        )
+    );
+    assert_eq!(requests[7].0, Method::POST);
+    assert_eq!(requests[7].1, "/graphql");
+    assert_eq!(requests[7].2["variables"]["pullRequestId"], "PR_node");
+    assert_eq!(requests[8].2, json!({"state":"closed"}));
+    assert_eq!(
+        requests[9],
+        (
+            Method::PATCH,
+            "/repos/octo/fixture/issues/5".into(),
+            json!({"state":"closed","state_reason":"completed"})
+        )
+    );
+    assert_eq!(
+        requests[10],
         (
             Method::PUT,
             "/repos/octo/fixture/pulls/4/merge".into(),

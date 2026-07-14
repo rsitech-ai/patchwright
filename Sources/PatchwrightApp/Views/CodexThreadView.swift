@@ -56,10 +56,18 @@ struct CodexThreadView: View {
                     .help("Cancel this task, stop its Codex process group, and retain the worktree and evidence")
             }
             if status?.canStart == true || status == nil {
-                Button("Start Codex", systemImage: "play.fill") {
-                    Task { await store.startCodex(taskID: task.id) }
+                if task.state == .awaitingPreparationApproval {
+                    Button("Approve & Prepare", systemImage: "checkmark.shield.fill") {
+                        Task { await store.prepareTask(taskID: task.id) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isBusy || store.taskLifecycleBusyTaskIDs.contains(task.id))
+                } else {
+                    Button("Start Codex", systemImage: "play.fill") {
+                        Task { await store.startCodex(taskID: task.id) }
+                    }
+                    .disabled(isBusy || ![.preparing, .paused].contains(task.state))
                 }
-                .disabled(isBusy || ![.preparing, .paused].contains(task.state))
             }
         }
         .padding(.horizontal, 16)

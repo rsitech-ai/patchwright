@@ -140,6 +140,56 @@ impl GitHubMutationClient {
                 )
                 .await
             }
+            GitHubAction::ReadyPullRequest {
+                pull_request_number,
+                expected_head_sha,
+            } => {
+                let pull = self
+                    .request_value(
+                        Method::GET,
+                        &format!("{prefix}/pulls/{pull_request_number}"),
+                        None,
+                    )
+                    .await?;
+                if pull.pointer("/head/sha").and_then(Value::as_str)
+                    != Some(expected_head_sha.as_str())
+                {
+                    return Err(MutationError::StaleRemoteHead);
+                }
+                if pull.get("draft").and_then(Value::as_bool) == Some(false) {
+                    return Ok(decode_value(&pull));
+                }
+                let pull_request_id = pull
+                    .get("node_id")
+                    .and_then(Value::as_str)
+                    .ok_or(MutationError::InvalidResponse)?;
+                let response = self
+                    .request_value(
+                        Method::POST,
+                        "graphql",
+                        Some(&json!({
+                            "query":"mutation MarkReady($pullRequestId: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $pullRequestId}) { pullRequest { databaseId number url isDraft } } }",
+                            "variables":{"pullRequestId":pull_request_id}
+                        })),
+                    )
+                    .await?;
+                if response.get("errors").is_some() {
+                    return Err(MutationError::GraphQlRejected);
+                }
+                let ready = response
+                    .pointer("/data/markPullRequestReadyForReview/pullRequest")
+                    .ok_or(MutationError::InvalidResponse)?;
+                Ok(MutationResult {
+                    id: ready.get("databaseId").and_then(Value::as_u64),
+                    number: ready.get("number").and_then(Value::as_u64),
+                    html_url: ready
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    sha: None,
+                    merged: None,
+                })
+            }
             GitHubAction::ClosePullRequest {
                 pull_request_number,
             } => {
@@ -147,6 +197,14 @@ impl GitHubMutationClient {
                     Method::PATCH,
                     &format!("{prefix}/pulls/{pull_request_number}"),
                     json!({"state":"closed"}),
+                )
+                .await
+            }
+            GitHubAction::CloseIssue { issue_number } => {
+                self.request(
+                    Method::PATCH,
+                    &format!("{prefix}/issues/{issue_number}"),
+                    json!({"state":"closed","state_reason":"completed"}),
                 )
                 .await
             }
@@ -172,17 +230,30 @@ impl GitHubMutationClient {
         path: &str,
         body: Value,
     ) -> Result<MutationResult, MutationError> {
+        let value = self.request_value(method, path, Some(&body)).await?;
+        Ok(decode_value(&value))
+    }
+
+    async fn request_value(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, MutationError> {
         let url = self
             .base_url
             .join(path)
             .map_err(|_| MutationError::InvalidTarget)?;
-        let response = self
+        let mut request = self
             .client
             .request(method, url)
             .bearer_auth(self.token.expose_for_authorization_header())
             .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", API_VERSION)
-            .json(&body)
+            .header("X-GitHub-Api-Version", API_VERSION);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request
             .send()
             .await
             .map_err(|_| MutationError::AmbiguousTransport)?;
@@ -204,7 +275,10 @@ impl GitHubMutationClient {
                 request_id,
             });
         }
-        decode_result(response).await
+        response
+            .json()
+            .await
+            .map_err(|_| MutationError::InvalidResponse)
     }
 }
 
@@ -219,12 +293,8 @@ impl fmt::Debug for GitHubMutationClient {
     }
 }
 
-async fn decode_result(response: reqwest::Response) -> Result<MutationResult, MutationError> {
-    let value: Value = response
-        .json()
-        .await
-        .map_err(|_| MutationError::InvalidResponse)?;
-    Ok(MutationResult {
+fn decode_value(value: &Value) -> MutationResult {
+    MutationResult {
         id: value.get("id").and_then(Value::as_u64),
         number: value.get("number").and_then(Value::as_u64),
         html_url: value
@@ -236,7 +306,7 @@ async fn decode_result(response: reqwest::Response) -> Result<MutationResult, Mu
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
         merged: value.get("merged").and_then(Value::as_bool),
-    })
+    }
 }
 
 const fn review_event(event: ReviewEvent) -> &'static str {
@@ -286,8 +356,16 @@ pub enum MutationError {
     MissingToken,
     #[error("Git push requires the ephemeral credential-helper transport")]
     GitTransportRequired,
+    #[error("ephemeral Git transport failed")]
+    GitTransportFailed,
+    #[error("direct pushes to the default branch are prohibited")]
+    DefaultBranchPushProhibited,
     #[error("repository requires native merge-queue handoff")]
     MergeQueueRequired,
+    #[error("pull request head changed before the approved mutation")]
+    StaleRemoteHead,
+    #[error("GitHub GraphQL mutation was rejected")]
+    GraphQlRejected,
     #[error("GitHub mutation transport ended ambiguously; reconcile before retrying")]
     AmbiguousTransport,
     #[error("GitHub rejected mutation with status {status}")]
