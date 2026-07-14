@@ -45,6 +45,7 @@ fn item(number: u64, kind: WorkItemKind) -> GitHubWorkItem {
         }
         .into(),
         state: "open".into(),
+        state_reason: None,
         body: Some("Untrusted GitHub body".into()),
         author: "octocat".into(),
         html_url: format!(
@@ -58,6 +59,8 @@ fn item(number: u64, kind: WorkItemKind) -> GitHubWorkItem {
         base_sha: pull_request.then(|| BASE_SHA.into()),
         head_ref: pull_request.then(|| "repair-ci".into()),
         head_sha: pull_request.then(|| HEAD_SHA.into()),
+        merged: pull_request.then_some(false),
+        merge_commit_sha: None,
         created_at: Some("2026-07-13T08:00:00Z".into()),
         head_committed_at: pull_request.then(|| "2026-07-13T11:00:00Z".into()),
         latest_review_at: None,
@@ -167,6 +170,7 @@ fn issue_and_pull_request_convert_to_typed_tasks_with_exact_source_identity() {
             Capability::PushBranch,
             Capability::PostComment,
             Capability::PostReview,
+            Capability::ResolveThread,
             Capability::CreateCheckRun,
             Capability::UpdatePullRequestBranch,
             Capability::ReadyPullRequest,

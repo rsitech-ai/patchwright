@@ -1,13 +1,14 @@
 use chrono::{TimeZone, Utc};
 use patchwright_core::{
     ApprovalClass, Capability, CredentialHealth, GitHubAction, GitHubActionPreview,
-    InstructionDigest, MergeMethod, RemoteIdentity, RemotePrecondition, RepositoryBinding,
-    RepositoryBindingDraft, RepositoryPermissionSnapshot, RiskClass, Task, TaskContract,
-    TaskContractDraft, TaskSource,
+    GitHubPullRequestSourceInput, InstructionDigest, MergeMethod, RemoteIdentity,
+    RemotePrecondition, RepositoryBinding, RepositoryBindingDraft, RepositoryPermissionSnapshot,
+    RiskClass, Task, TaskContract, TaskContractDraft, TaskSource,
 };
 use patchwright_engine::{
-    DeliveryError, EventStore, approve_delivery, authorize_execution, complete_successful_delivery,
-    preview_delivery,
+    DeliveryError, EventStore, GitHubRepository, GitHubRepositoryPermissions,
+    GitHubRepositorySnapshot, GitHubWorkItem, WorkItemKind, approve_delivery, authorize_execution,
+    complete_successful_delivery, preview_delivery, reconcile_completed_task_from_snapshot,
 };
 
 fn fixture(store: &EventStore) -> Task {
@@ -252,4 +253,154 @@ fn successful_merge_atomically_completes_delivery_and_task_lifecycle() {
     let timeline = store.timeline(task.id).unwrap();
     assert!(timeline.iter().any(|event| event.contains("deliver")));
     assert!(timeline.iter().any(|event| event.contains("completed")));
+}
+
+fn completed_pull_snapshot(head_sha: &str, merged: bool) -> GitHubRepositorySnapshot {
+    GitHubRepositorySnapshot {
+        repository: GitHubRepository {
+            id: 42,
+            full_name: "octocat/hello".into(),
+            description: None,
+            private: true,
+            archived: false,
+            default_branch: "main".into(),
+            html_url: "https://github.com/octocat/hello".into(),
+            updated_at: "2026-07-14T12:00:00Z".into(),
+            pushed_at: Some("2026-07-14T12:00:00Z".into()),
+            open_issues_count: 0,
+            open_pull_request_count: 0,
+            failing_check_count: 0,
+            default_branch_sha: Some("c".repeat(40)),
+            default_branch_committed_at: Some("2026-07-14T12:00:00Z".into()),
+            installation_id: Some(84),
+            permissions: GitHubRepositoryPermissions::default(),
+        },
+        work_items: vec![GitHubWorkItem {
+            id: 7,
+            repository_full_name: "octocat/hello".into(),
+            number: 7,
+            kind: WorkItemKind::PullRequest,
+            title: "Repair CI".into(),
+            state: "closed".into(),
+            state_reason: None,
+            body: None,
+            author: "octocat".into(),
+            html_url: "https://github.com/octocat/hello/pull/7".into(),
+            draft: false,
+            comments_count: 0,
+            base_ref: Some("main".into()),
+            base_sha: Some("a".repeat(40)),
+            head_ref: Some("repair-ci".into()),
+            head_sha: Some(head_sha.into()),
+            merged: Some(merged),
+            merge_commit_sha: merged.then(|| "c".repeat(40)),
+            created_at: None,
+            head_committed_at: None,
+            latest_review_at: None,
+            updated_at: "2026-07-14T12:00:00Z".into(),
+            review_decision: Some("approved".into()),
+            ci_health: Some("passing".into()),
+            mergeable: Some(false),
+            mergeable_state: Some("unknown".into()),
+            rebaseable: Some(false),
+            has_conflicts: Some(false),
+            head_repository_full_name: Some("octocat/hello".into()),
+            head_repository_fork: false,
+            maintainer_can_modify: true,
+            additions: 1,
+            deletions: 0,
+            changed_files: 1,
+            labels: vec![],
+            assignees: vec![],
+            milestone: None,
+        }],
+        discussions: vec![],
+        checks: vec![],
+        workflow_runs: vec![],
+    }
+}
+
+#[test]
+fn fresh_exact_merged_pull_reconciles_a_pre_fix_task_to_completed() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = EventStore::open(&directory.path().join("engine.sqlite3")).unwrap();
+    let mut task = fixture(&store);
+    task.source = TaskSource::github_pull_request(GitHubPullRequestSourceInput {
+        repository_id: 42,
+        repository_full_name: "octocat/hello".into(),
+        number: 7,
+        html_url: "https://github.com/octocat/hello/pull/7".into(),
+        snapshot_at: Utc.with_ymd_and_hms(2026, 7, 14, 11, 0, 0).unwrap(),
+        base_ref: "main".into(),
+        base_sha: "a".repeat(40),
+        head_ref: "repair-ci".into(),
+        head_sha: "b".repeat(40),
+    })
+    .unwrap();
+    for state in [
+        patchwright_core::TaskState::Assessing,
+        patchwright_core::TaskState::Planned,
+        patchwright_core::TaskState::AwaitingPreparationApproval,
+        patchwright_core::TaskState::Preparing,
+        patchwright_core::TaskState::Implementing,
+        patchwright_core::TaskState::Verifying,
+        patchwright_core::TaskState::Reviewing,
+        patchwright_core::TaskState::AwaitingDeliveryApproval,
+    ] {
+        task.transition(state).unwrap();
+    }
+    store
+        .save_task(&task, "legacy task awaiting delivery")
+        .unwrap();
+
+    let completed = reconcile_completed_task_from_snapshot(
+        &store,
+        task.id,
+        &completed_pull_snapshot(&"b".repeat(40), true),
+    )
+    .unwrap();
+    assert_eq!(completed.state, patchwright_core::TaskState::Completed);
+    assert_eq!(
+        store.load_task(task.id).unwrap().unwrap().state,
+        completed.state
+    );
+}
+
+#[test]
+fn reconciliation_rejects_unmerged_or_changed_head_pull_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = EventStore::open(&directory.path().join("engine.sqlite3")).unwrap();
+    let mut task = fixture(&store);
+    task.source = TaskSource::github_pull_request(GitHubPullRequestSourceInput {
+        repository_id: 42,
+        repository_full_name: "octocat/hello".into(),
+        number: 7,
+        html_url: "https://github.com/octocat/hello/pull/7".into(),
+        snapshot_at: Utc::now(),
+        base_ref: "main".into(),
+        base_sha: "a".repeat(40),
+        head_ref: "repair-ci".into(),
+        head_sha: "b".repeat(40),
+    })
+    .unwrap();
+    store
+        .save_task(&task, "GitHub task source captured")
+        .unwrap();
+
+    assert_eq!(
+        reconcile_completed_task_from_snapshot(
+            &store,
+            task.id,
+            &completed_pull_snapshot(&"b".repeat(40), false),
+        ),
+        Err(DeliveryError::RemoteNotCompleted)
+    );
+    assert_eq!(
+        reconcile_completed_task_from_snapshot(
+            &store,
+            task.id,
+            &completed_pull_snapshot(&"d".repeat(40), true),
+        ),
+        Err(DeliveryError::PreconditionMismatch)
+    );
 }
