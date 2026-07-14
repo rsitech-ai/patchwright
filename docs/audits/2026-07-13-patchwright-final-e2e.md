@@ -8,9 +8,10 @@ Audit refreshed: 2026-07-14 on the current `feat/andrzej_agent_sota_lab` source.
 | --- | --- | --- |
 | Repo | **repo-ready** | `./script/verify.sh` passed, including full Rust workspace, Swift tests, migration/restart/cancellation suites, release contract, Clippy warnings-as-errors, and Swift release warnings-as-errors. |
 | Local smoke | **ready** | `./script/smoke.sh` passed. |
-| Codex | **integration-ready** | `./script/smoke_codex.sh` passed against signed-in `codex-cli 0.144.2`; the disposable lifecycle persisted 42 events with zero outstanding approvals. |
+| Codex | **integration-ready** | `./script/smoke_codex.sh` passed against signed-in `codex-cli 0.144.2`; the latest disposable lifecycle persisted 40 events with zero outstanding approvals. |
 | Native UI | **runtime-verified** | Release build launched. Queue selection, structured right panel, twelve workflow presets, CI Rescue selection, and GitHub App Settings were exercised through accessibility. |
-| GitHub delivery/merge | **blocked:external** | Local typed action, approval, relay, mutation, queue, merge, monitoring, and restart tests pass. No production App configuration, Keychain key, installation, or disposable remote run exists. |
+| GitHub App authentication | **integration-ready** | Production App ID `4294269` (`patchwright-s1korrrr`) has the audited permissions, owner-only metadata and protected-key files, and passed a live authenticated `/app` identity check. |
+| GitHub delivery/merge | **blocked:external** | Local typed action, approval, relay, mutation, queue, merge, monitoring, and restart tests pass. No repository installation or disposable remote mutation run exists. |
 | Bundle | **bundle-valid** | `/Users/s1kor/.patchwright/release-work/Patchwright-0.1.0-1.OfYOYD/Patchwright.app` passed structural validation. |
 | Developer ID / Hardened Runtime | **blocked:external** | No `Developer ID Application` identity is installed; the local bundle is not a distribution signature. |
 | Notarization / Gatekeeper | **blocked:external** | No Keychain notary profile or accepted/stapled DMG exists. |
@@ -29,6 +30,6 @@ Audit refreshed: 2026-07-14 on the current `feat/andrzej_agent_sota_lab` source.
 
 ## Remaining owner-controlled actions
 
-The only next browser action is creation of the prepared GitHub App. Creating the App and its private key establishes persistent account access and must be confirmed immediately before submission. App installation on a disposable repository is a separate permission change and also needs immediate confirmation.
+The next browser action is installation of the authenticated App on one disposable repository. That grants persistent repository access and requires immediate confirmation at the action boundary. The production `s1korrrr/patchwright` repository remains explicitly forbidden by the remote smoke gate.
 
 Developer ID completion requires the owner to obtain/install the certificate, create a `notarytool` Keychain profile, and provide a clean macOS 26 machine or VM. The repository scripts can then perform signing, notarization, stapling, Gatekeeper verification, DMG verification, and the clean-machine probe without receiving raw Apple credentials.
