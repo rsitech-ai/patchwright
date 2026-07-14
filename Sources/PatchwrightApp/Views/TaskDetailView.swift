@@ -5,6 +5,8 @@ struct TaskDetailView: View {
     @ObservedObject var store: WorkspaceStore
     let task: EngineeringTask
     @SceneStorage("patchwright.taskWorkbenchTab") private var tabRaw = TaskWorkbenchTab.overview.rawValue
+    @State private var deliveryBody = ""
+    @State private var deliveryApprovalPresented = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -20,6 +22,9 @@ struct TaskDetailView: View {
             .padding(12)
             Divider()
             tabContent
+        }
+        .sheet(isPresented: $deliveryApprovalPresented) {
+            DeliveryApprovalSheet(store: store, task: task)
         }
     }
 
@@ -62,7 +67,7 @@ struct TaskDetailView: View {
                         case .codex: EmptyView()
                         case .changes: placeholder("Changes", "Worktree file changes and diffs will appear here.", "doc.badge.gearshape")
                         case .verification: placeholder("Verification", "Commands, checks, findings, and evidence will appear here.", "checkmark.shield")
-                        case .delivery: placeholder("Delivery", "Approval-bound branch, comment, review, check, and draft PR actions will appear here.", "paperplane")
+                        case .delivery: deliveryPanel
                         case .merge: placeholder("Merge", "Exact-SHA merge readiness and the separate merge approval will appear here.", "arrow.triangle.merge")
                         }
                     }
@@ -89,6 +94,43 @@ struct TaskDetailView: View {
                     systemImage: "list.bullet.clipboard",
                     description: Text("Expected behavior, commands, risks, sensitive paths, and rollback are fixed before preparation approval.")
                 )
+            }
+        }
+    }
+
+    private var deliveryPanel: some View {
+        detailCard("Approval-bound GitHub comment") {
+            Text("Prepare one exact comment for the ingested issue or pull request. Previewing does not approve or execute it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextEditor(text: $deliveryBody)
+                .font(.body)
+                .frame(minHeight: 140)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+            HStack {
+                if let execution = store.deliveryExecutions[task.id] {
+                    Label(execution.state.capitalized, systemImage: "checkmark.seal")
+                        .foregroundStyle(.green)
+                } else if store.deliveryPreviews[task.id] != nil {
+                    Label("Preview ready", systemImage: "doc.text.magnifyingglass")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Preview Exact Comment", systemImage: "eye") {
+                    Task {
+                        await store.previewCommentDelivery(task: task, body: deliveryBody)
+                        if store.deliveryPreviews[task.id] != nil { deliveryApprovalPresented = true }
+                    }
+                }
+                .disabled(
+                    deliveryBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || store.deliveryBusyTaskIDs.contains(task.id)
+                )
+            }
+            if let error = store.deliveryError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
             }
         }
     }

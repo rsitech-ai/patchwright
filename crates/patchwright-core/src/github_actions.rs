@@ -213,6 +213,42 @@ impl GitHubAction {
     pub const fn action_kind(&self) -> &'static str {
         self.capability().action_kind()
     }
+
+    #[must_use]
+    pub const fn pull_request_number(&self) -> Option<u64> {
+        match self {
+            Self::Review {
+                pull_request_number,
+                ..
+            }
+            | Self::UpdatePullRequestBranch {
+                pull_request_number,
+                ..
+            }
+            | Self::ClosePullRequest {
+                pull_request_number,
+            }
+            | Self::EnqueuePullRequest {
+                pull_request_number,
+                ..
+            }
+            | Self::MergePullRequest {
+                pull_request_number,
+                ..
+            } => Some(*pull_request_number),
+            Self::Comment { issue_number, .. } => Some(*issue_number),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn branch(&self) -> Option<&str> {
+        match self {
+            Self::CreateBranch { branch, .. } | Self::PushIntent { branch, .. } => Some(branch),
+            Self::DraftPullRequest { head, .. } => Some(head),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -323,6 +359,16 @@ impl RemotePrecondition {
     #[must_use]
     pub const fn snapshot_generation(&self) -> u64 {
         self.snapshot_generation
+    }
+
+    #[must_use]
+    pub fn expected_head_sha(&self) -> Option<&str> {
+        self.expected_head_sha.as_deref()
+    }
+
+    #[must_use]
+    pub fn expected_base_sha(&self) -> Option<&str> {
+        self.expected_base_sha.as_deref()
     }
 }
 

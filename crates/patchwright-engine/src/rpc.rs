@@ -1,19 +1,24 @@
 use crate::{
     CancellationState, ConversionError, ConversionRequest, EventStore, GhCliCredentialBroker,
     GitHubAccount, GitHubRepository, GitHubSource, GitHubSyncSummary, Job, JobId, JobKind,
-    JobState, TaskConversionService,
+    JobState, TaskConversionService, approve_delivery, authorize_execution,
     codex::{
         process::{CodexExecutable, CodexProcessConfig, CodexProcessFactory},
         service::{CodexRuntimeStatus, CodexService, CodexServiceError, CodexServiceState},
     },
+    preview_delivery,
 };
 use anyhow::{Context, Result, bail};
 use patchwright_core::{
-    CredentialHealth, QueueCandidate, RepositoryBinding, RepositoryBindingDraft,
-    RepositoryPermissionLevel, RepositoryPermissionSnapshot, Task, TaskId, WorkflowPreset,
-    assess_queue,
+    CredentialHealth, GitHubAction, GitHubActionPreview, QueueCandidate, RemoteIdentity,
+    RemotePrecondition, RepositoryBinding, RepositoryBindingDraft, RepositoryPermissionLevel,
+    RepositoryPermissionSnapshot, Task, TaskId, WorkflowPreset, assess_queue,
 };
-use serde::Deserialize;
+use patchwright_relay::{
+    AppAuthenticator, ConfiguredKeyProvider, GitHubAppConfiguration, GitHubMutationClient,
+    InstallationBroker, InstallationPermissions, KeyReference, MutationError,
+};
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
@@ -156,6 +161,10 @@ async fn dispatch(request: Request, state: &ServerState) -> Value {
         "github.sync.start" => github_sync_start(request.id, &request.params, state).await,
         "github.sync.status" => github_sync_status(request.id, &request.params, store),
         "github.sync.cancel" => github_sync_cancel(request.id, &request.params, state).await,
+        "delivery.preview" => delivery_preview(request.id, &request.params, store),
+        "delivery.approve" => delivery_approve(request.id, &request.params, store),
+        "delivery.execute" => delivery_execute(request.id, &request.params, store).await,
+        "delivery.status" => delivery_status(request.id, &request.params, store),
         "codex.status" => codex_status(request.id, &request.params, state).await,
         "codex.start" => codex_start(request.id, &request.params, state).await,
         "codex.events" => codex_events(request.id, &request.params, state).await,
@@ -271,6 +280,263 @@ fn dependency_labels(labels: &[String]) -> Vec<u64> {
                 .and_then(|value| value.parse().ok())
         })
         .collect()
+}
+
+fn delivery_preview(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let Some(task_id) = params
+        .get("taskId")
+        .and_then(Value::as_str)
+        .and_then(|value| TaskId::from_str(value).ok())
+    else {
+        return rpc_error(
+            id,
+            -32602,
+            "invalid parameters",
+            Some("taskId is required".into()),
+        );
+    };
+    let request: ActionPreviewRequest = match encoded_parameter(params, "actionPreview") {
+        Ok(request) => request,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let store = store.lock().expect("event store lock poisoned");
+    let contract = match store.task_contract(task_id) {
+        Ok(Some(contract)) => contract,
+        Ok(None) => {
+            return rpc_error(
+                id,
+                -32060,
+                "delivery preview failed",
+                Some("task contract is missing".into()),
+            );
+        }
+        Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    };
+    let precondition = match RemotePrecondition::new(
+        request.expected_head_sha.as_deref().or(contract.head_sha()),
+        request.expected_base_sha.as_deref().or(contract.base_sha()),
+        request.snapshot_generation,
+    ) {
+        Ok(precondition) => precondition,
+        Err(error) => return rpc_error(id, -32602, "invalid parameters", Some(error.to_string())),
+    };
+    let action = match GitHubActionPreview::new(request.remote, request.action, precondition) {
+        Ok(action) => action,
+        Err(error) => return rpc_error(id, -32602, "invalid parameters", Some(error.to_string())),
+    };
+    match preview_delivery(&store, task_id, action) {
+        Ok(preview) => rpc_result(id, json!(preview)),
+        Err(error) => rpc_error(
+            id,
+            -32060,
+            "delivery preview failed",
+            Some(error.to_string()),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ActionPreviewRequest {
+    remote: RemoteIdentity,
+    action: GitHubAction,
+    expected_head_sha: Option<String>,
+    expected_base_sha: Option<String>,
+    snapshot_generation: u64,
+}
+
+fn delivery_approve(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let preview = match encoded_parameter(params, "preview") {
+        Ok(preview) => preview,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let approved_by = params
+        .get("approvedBy")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match approve_delivery(
+        &store.lock().expect("event store lock poisoned"),
+        &preview,
+        approved_by,
+    ) {
+        Ok(approval) => rpc_result(id, json!(approval)),
+        Err(error) => rpc_error(
+            id,
+            -32061,
+            "delivery approval failed",
+            Some(error.to_string()),
+        ),
+    }
+}
+
+async fn delivery_execute(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let preview: crate::DeliveryPreview = match encoded_parameter(params, "preview") {
+        Ok(preview) => preview,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let Some(approval_id) = params
+        .get("approvalId")
+        .and_then(Value::as_str)
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+    else {
+        return rpc_error(
+            id,
+            -32602,
+            "invalid parameters",
+            Some("approvalId is required".into()),
+        );
+    };
+    let key = match authorize_execution(
+        &store.lock().expect("event store lock poisoned"),
+        &preview,
+        approval_id,
+    ) {
+        Ok(key) => key,
+        Err(error) => {
+            return rpc_error(
+                id,
+                -32062,
+                "delivery authorization failed",
+                Some(error.to_string()),
+            );
+        }
+    };
+    let result = execute_github_action(&preview).await;
+    match result {
+        Ok(result) => {
+            let encoded = serde_json::to_string(&json!({"state":"succeeded","result":result}))
+                .expect("mutation result serializes");
+            if let Err(error) = store
+                .lock()
+                .expect("event store lock poisoned")
+                .complete_delivery(&key, &encoded)
+            {
+                return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+            }
+            rpc_result(
+                id,
+                json!({"idempotencyKey":key,"state":"succeeded","result":result}),
+            )
+        }
+        Err(error @ MutationError::AmbiguousTransport) => rpc_error(
+            id,
+            -32063,
+            "delivery outcome is ambiguous",
+            Some(error.to_string()),
+        ),
+        Err(error) => {
+            let encoded =
+                serde_json::to_string(&json!({"state":"failed","error":error.to_string()}))
+                    .expect("failure result serializes");
+            let _ = store
+                .lock()
+                .expect("event store lock poisoned")
+                .complete_delivery(&key, &encoded);
+            rpc_error(id, -32064, "delivery failed", Some(error.to_string()))
+        }
+    }
+}
+
+fn delivery_status(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let key = params
+        .get("idempotencyKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return rpc_error(
+            id,
+            -32602,
+            "invalid parameters",
+            Some("idempotencyKey must be a SHA-256 value".into()),
+        );
+    }
+    match store
+        .lock()
+        .expect("event store lock poisoned")
+        .delivery_result(key)
+    {
+        Ok(Some(result)) => match serde_json::from_str::<Value>(&result) {
+            Ok(result) => rpc_result(
+                id,
+                json!({"idempotencyKey":key,"claimed":true,"result":result}),
+            ),
+            Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+        },
+        Ok(None) => match store
+            .lock()
+            .expect("event store lock poisoned")
+            .delivery_claimed(key)
+        {
+            Ok(claimed) => rpc_result(
+                id,
+                json!({"idempotencyKey":key,"claimed":claimed,"result":null}),
+            ),
+            Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+        },
+        Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    }
+}
+
+async fn execute_github_action(
+    preview: &crate::DeliveryPreview,
+) -> std::result::Result<patchwright_relay::MutationResult, MutationError> {
+    let app_id = required_environment("PATCHWRIGHT_GITHUB_APP_ID")
+        .and_then(|value| value.parse().ok())
+        .ok_or(MutationError::MissingToken)?;
+    let client_id = required_environment("PATCHWRIGHT_GITHUB_APP_CLIENT_ID")
+        .ok_or(MutationError::MissingToken)?;
+    let key_reference = required_environment("PATCHWRIGHT_GITHUB_APP_KEY_REFERENCE")
+        .and_then(|value| KeyReference::parse(&value).ok())
+        .ok_or(MutationError::MissingToken)?;
+    let api_url = std::env::var("PATCHWRIGHT_GITHUB_API_URL")
+        .unwrap_or_else(|_| "https://api.github.com".into());
+    let configuration =
+        GitHubAppConfiguration::new(app_id, client_id, key_reference, api_url.clone())
+            .map_err(|_| MutationError::MissingToken)?;
+    let authenticator = AppAuthenticator::new(configuration, ConfiguredKeyProvider)
+        .map_err(|_| MutationError::MissingToken)?;
+    let broker = InstallationBroker::new(authenticator, &api_url)
+        .map_err(|_| MutationError::MissingToken)?;
+    let full_name = preview.action.remote().repository_full_name();
+    let (owner, repository) = full_name
+        .split_once('/')
+        .ok_or(MutationError::InvalidTarget)?;
+    let token = broker
+        .token_for_repository(
+            owner,
+            repository,
+            preview.action.remote().repository_id(),
+            InstallationPermissions::delivery(),
+            chrono::Utc::now().timestamp(),
+        )
+        .await
+        .map_err(|_| MutationError::MissingToken)?;
+    if token.installation_id() != preview.action.remote().installation_id() {
+        return Err(MutationError::InvalidTarget);
+    }
+    GitHubMutationClient::new(&api_url, token.expose_for_authorization_header())?
+        .execute(owner, repository, preview.action.action())
+        .await
+}
+
+fn required_environment(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn encoded_parameter<T: DeserializeOwned>(
+    params: &Value,
+    key: &str,
+) -> std::result::Result<T, String> {
+    let value = params
+        .get(key)
+        .ok_or_else(|| format!("{key} is required"))?;
+    if let Some(encoded) = value.as_str() {
+        serde_json::from_str(encoded).map_err(|_| format!("{key} is invalid"))
+    } else {
+        serde_json::from_value(value.clone()).map_err(|_| format!("{key} is invalid"))
+    }
 }
 
 fn bind_repository(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {

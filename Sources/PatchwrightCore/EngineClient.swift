@@ -24,6 +24,30 @@ public protocol EngineServing: Sendable {
 }
 
 public extension EngineServing {
+    func previewDelivery(taskID: UUID, draft: GitHubActionPreviewDraft) async throws -> DeliveryPreview {
+        try await call(
+            method: "delivery.preview",
+            params: ["taskId": taskID.uuidString, "actionPreview": try encodeRPCParameter(draft)],
+            as: DeliveryPreview.self
+        )
+    }
+
+    func approveDelivery(_ preview: DeliveryPreview, approvedBy: String) async throws -> DeliveryApproval {
+        try await call(
+            method: "delivery.approve",
+            params: ["preview": try encodeRPCParameter(preview), "approvedBy": approvedBy],
+            as: DeliveryApproval.self
+        )
+    }
+
+    func executeDelivery(_ preview: DeliveryPreview, approvalID: UUID) async throws -> DeliveryExecution {
+        try await call(
+            method: "delivery.execute",
+            params: ["preview": try encodeRPCParameter(preview), "approvalId": approvalID.uuidString],
+            as: DeliveryExecution.self
+        )
+    }
+
     func codexStatus(taskID: UUID) async throws -> CodexRuntimeStatus {
         try await call(
             method: "codex.status",
@@ -137,6 +161,12 @@ public extension EngineServing {
             as: RepositoryBindingSummary.self
         )
     }
+}
+
+private func encodeRPCParameter<Value: Encodable>(_ value: Value) throws -> String {
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    return String(decoding: try encoder.encode(value), as: UTF8.self)
 }
 
 private func conversionParameters(for item: GitHubWorkItem) -> [String: String] {

@@ -7,8 +7,8 @@ mod mutations;
 mod webhook;
 
 pub use app_auth::{
-    AppAuthenticator, GitHubAppConfiguration, GitHubAppError, KeyReference, KeychainKeyProvider,
-    PrivateKeyProvider, ProtectedFileKeyProvider, SecretBytes, SecretString,
+    AppAuthenticator, ConfiguredKeyProvider, GitHubAppConfiguration, GitHubAppError, KeyReference,
+    KeychainKeyProvider, PrivateKeyProvider, ProtectedFileKeyProvider, SecretBytes, SecretString,
     import_private_key_to_keychain,
 };
 pub use github::{GitHubClient, GitHubError};
