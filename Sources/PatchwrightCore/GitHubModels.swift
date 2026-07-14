@@ -141,3 +141,25 @@ public struct GitHubSyncSummary: Codable, Equatable, Sendable {
     public let workflowRuns: Int
     public let failures: [String]
 }
+
+public enum GitHubSyncJobState: String, Codable, Sendable {
+    case queued, running, cancelling, cancelled, succeeded, failed, interrupted
+
+    public var isTerminal: Bool {
+        switch self {
+        case .cancelled, .succeeded, .failed, .interrupted: true
+        case .queued, .running, .cancelling: false
+        }
+    }
+}
+
+public struct GitHubSyncJob: Codable, Identifiable, Equatable, Sendable {
+    public let id: UUID
+    public let kind: String
+    public let state: GitHubSyncJobState
+    public let cancellation: String
+    public let summary: String
+    public let createdAt: Date
+    public let updatedAt: Date
+    public let generation: UInt64
+}
