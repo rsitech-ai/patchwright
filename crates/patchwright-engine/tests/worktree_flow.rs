@@ -1,5 +1,7 @@
 use patchwright_core::InstructionKind;
-use patchwright_engine::{CommandRunner, CommandSpec, RepositoryService, WorktreeService};
+use patchwright_engine::{
+    CommandRunner, CommandSpec, GitTransport, RepositoryService, WorktreeService,
+};
 use std::{fs, process::Command, time::Duration};
 
 fn git(repository: &std::path::Path, arguments: &[&str]) {
@@ -10,6 +12,82 @@ fn git(repository: &std::path::Path, arguments: &[&str]) {
         .status()
         .unwrap();
     assert!(status.success(), "git {arguments:?} failed");
+}
+
+fn git_output(repository: &std::path::Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {arguments:?} failed");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+#[test]
+fn ephemeral_transport_pushes_only_the_exact_checked_out_head() {
+    let fixture = tempfile::tempdir().unwrap();
+    let remote = fixture.path().join("remote.git");
+    let repository = fixture.path().join("repository");
+    fs::create_dir_all(&repository).unwrap();
+    git(
+        fixture.path(),
+        &["init", "--bare", remote.to_str().unwrap()],
+    );
+    git(
+        fixture.path(),
+        &["init", "-b", "main", repository.to_str().unwrap()],
+    );
+    fs::write(repository.join("README.md"), "transport\n").unwrap();
+    git(&repository, &["add", "README.md"]);
+    git(
+        &repository,
+        &[
+            "-c",
+            "user.name=Patchwright Test",
+            "-c",
+            "user.email=test@patchwright.local",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+    );
+    git(
+        &repository,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    let head = RepositoryService::inspect(&repository).unwrap().head_sha;
+
+    GitTransport::push_branch(
+        &repository,
+        "patchwright/test-task",
+        &head,
+        fixture.path().join("state").as_path(),
+        "fixture-token",
+    )
+    .unwrap();
+
+    let pushed = git_output(
+        fixture.path(),
+        &[
+            "--git-dir",
+            remote.to_str().unwrap(),
+            "rev-parse",
+            "refs/heads/patchwright/test-task",
+        ],
+    );
+    assert_eq!(pushed, head);
+    assert!(
+        GitTransport::push_branch(
+            &repository,
+            "patchwright/test-task",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            fixture.path().join("state").as_path(),
+            "fixture-token",
+        )
+        .is_err()
+    );
 }
 
 #[tokio::test]

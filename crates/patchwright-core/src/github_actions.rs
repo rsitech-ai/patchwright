@@ -73,9 +73,19 @@ pub enum GitHubAction {
         #[serde(alias = "expected_head_sha")]
         expected_head_sha: String,
     },
+    ReadyPullRequest {
+        #[serde(alias = "pull_request_number")]
+        pull_request_number: u64,
+        #[serde(alias = "expected_head_sha")]
+        expected_head_sha: String,
+    },
     ClosePullRequest {
         #[serde(alias = "pull_request_number")]
         pull_request_number: u64,
+    },
+    CloseIssue {
+        #[serde(alias = "issue_number")]
+        issue_number: u64,
     },
     EnqueuePullRequest {
         #[serde(alias = "pull_request_number")]
@@ -188,6 +198,22 @@ impl GitHubAction {
         })
     }
 
+    pub fn ready_pull_request(
+        pull_request_number: u64,
+        expected_head_sha: &str,
+    ) -> Result<Self, GitHubActionError> {
+        Ok(Self::ReadyPullRequest {
+            pull_request_number: validate_number(pull_request_number)?,
+            expected_head_sha: validate_sha(expected_head_sha)?,
+        })
+    }
+
+    pub fn close_issue(issue_number: u64) -> Result<Self, GitHubActionError> {
+        Ok(Self::CloseIssue {
+            issue_number: validate_number(issue_number)?,
+        })
+    }
+
     pub fn enqueue_pull_request(
         pull_request_number: u64,
         expected_head_sha: &str,
@@ -220,7 +246,9 @@ impl GitHubAction {
             Self::CheckRun { .. } => Capability::CreateCheckRun,
             Self::DraftPullRequest { .. } => Capability::CreatePullRequest,
             Self::UpdatePullRequestBranch { .. } => Capability::UpdatePullRequestBranch,
+            Self::ReadyPullRequest { .. } => Capability::ReadyPullRequest,
             Self::ClosePullRequest { .. } => Capability::ClosePullRequest,
+            Self::CloseIssue { .. } => Capability::CloseIssue,
             Self::EnqueuePullRequest { .. } => Capability::EnqueuePullRequest,
             Self::MergePullRequest { .. } => Capability::MergePullRequest,
         }
@@ -245,6 +273,10 @@ impl GitHubAction {
             | Self::ClosePullRequest {
                 pull_request_number,
             }
+            | Self::ReadyPullRequest {
+                pull_request_number,
+                ..
+            }
             | Self::EnqueuePullRequest {
                 pull_request_number,
                 ..
@@ -253,7 +285,9 @@ impl GitHubAction {
                 pull_request_number,
                 ..
             } => Some(*pull_request_number),
-            Self::Comment { issue_number, .. } => Some(*issue_number),
+            Self::Comment { issue_number, .. } | Self::CloseIssue { issue_number } => {
+                Some(*issue_number)
+            }
             _ => None,
         }
     }
@@ -461,10 +495,13 @@ const fn permissions_for(action: &GitHubAction) -> &'static [&'static str] {
         GitHubAction::CreateBranch { .. } | GitHubAction::PushIntent { .. } => {
             &["contents:write", "metadata:read"]
         }
-        GitHubAction::Comment { .. } => &["issues:write", "metadata:read"],
+        GitHubAction::Comment { .. } | GitHubAction::CloseIssue { .. } => {
+            &["issues:write", "metadata:read"]
+        }
         GitHubAction::Review { .. }
         | GitHubAction::DraftPullRequest { .. }
         | GitHubAction::UpdatePullRequestBranch { .. }
+        | GitHubAction::ReadyPullRequest { .. }
         | GitHubAction::ClosePullRequest { .. }
         | GitHubAction::EnqueuePullRequest { .. }
         | GitHubAction::MergePullRequest { .. } => &["pull_requests:write", "metadata:read"],

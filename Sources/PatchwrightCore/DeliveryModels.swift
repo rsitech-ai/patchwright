@@ -18,22 +18,92 @@ public struct GitHubActionPayload: Codable, Equatable, Sendable {
     public let pullRequestNumber: UInt64?
     public let expectedHeadSha: String?
     public let method: String?
-    public init(commentNumber: UInt64, body: String) {
-        kind = "comment"
-        issueNumber = commentNumber
+    public let branch: String?
+    public let fromSha: String?
+    public let headSha: String?
+    public let event: String?
+    public let inlineComments: [GitHubInlineReviewComment]?
+    public let name: String?
+    public let status: String?
+    public let conclusion: String?
+    public let title: String?
+    public let head: String?
+    public let base: String?
+
+    public init(
+        kind: String,
+        issueNumber: UInt64? = nil,
+        body: String? = nil,
+        pullRequestNumber: UInt64? = nil,
+        expectedHeadSha: String? = nil,
+        method: String? = nil,
+        branch: String? = nil,
+        fromSha: String? = nil,
+        headSha: String? = nil,
+        event: String? = nil,
+        inlineComments: [GitHubInlineReviewComment]? = nil,
+        name: String? = nil,
+        status: String? = nil,
+        conclusion: String? = nil,
+        title: String? = nil,
+        head: String? = nil,
+        base: String? = nil
+    ) {
+        self.kind = kind
+        self.issueNumber = issueNumber
         self.body = body
-        pullRequestNumber = nil
-        expectedHeadSha = nil
-        method = nil
-    }
-    public init(pullRequestNumber: UInt64, expectedHeadSha: String, method: GitHubMergeMethod) {
-        kind = "mergePullRequest"
-        issueNumber = nil
-        body = nil
         self.pullRequestNumber = pullRequestNumber
         self.expectedHeadSha = expectedHeadSha
-        self.method = method.rawValue
+        self.method = method
+        self.branch = branch
+        self.fromSha = fromSha
+        self.headSha = headSha
+        self.event = event
+        self.inlineComments = inlineComments
+        self.name = name
+        self.status = status
+        self.conclusion = conclusion
+        self.title = title
+        self.head = head
+        self.base = base
     }
+    public init(commentNumber: UInt64, body: String) {
+        self.init(kind: "comment", issueNumber: commentNumber, body: body)
+    }
+    public init(pullRequestNumber: UInt64, expectedHeadSha: String, method: GitHubMergeMethod) {
+        self.init(
+            kind: "mergePullRequest",
+            pullRequestNumber: pullRequestNumber,
+            expectedHeadSha: expectedHeadSha,
+            method: method.rawValue
+        )
+    }
+}
+
+public struct GitHubInlineReviewComment: Codable, Equatable, Sendable {
+    public let path: String
+    public let line: UInt64
+    public let body: String
+}
+
+public enum GitHubReviewEvent: String, Codable, CaseIterable, Identifiable, Sendable {
+    case approve, requestChanges, comment
+    public var id: String { rawValue }
+    public var label: String {
+        switch self {
+        case .approve: "Approve"
+        case .requestChanges: "Request changes"
+        case .comment: "Comment"
+        }
+    }
+}
+
+public struct WorktreeInspection: Codable, Equatable, Sendable {
+    public let root: String
+    public let branch: String
+    public let headSha: String
+    public let dirty: Bool
+    public var headSHA: String { headSha }
 }
 
 public enum GitHubMergeMethod: String, Codable, CaseIterable, Identifiable, Sendable {

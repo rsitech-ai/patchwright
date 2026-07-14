@@ -133,6 +133,16 @@ async fn starts_turns_persists_streamed_events_and_steers_the_active_turn() {
             .unwrap()
             .is_empty()
     );
+    assert_eq!(
+        store
+            .lock()
+            .unwrap()
+            .load_task(task.id)
+            .unwrap()
+            .unwrap()
+            .state,
+        TaskState::Verifying
+    );
 
     service.stop(task.id).await.unwrap();
 }

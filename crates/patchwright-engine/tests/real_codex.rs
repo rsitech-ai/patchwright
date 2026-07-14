@@ -133,29 +133,28 @@ async fn real_codex_disposable_repository_lifecycle() {
             .any(|event| event.kind == "textDelta" || event.kind == "itemCompleted")
     );
     assert!(events.iter().any(|event| event.kind == "turnCompleted"));
+    assert_eq!(
+        store
+            .lock()
+            .unwrap()
+            .load_task(task.id)
+            .unwrap()
+            .unwrap()
+            .state,
+        TaskState::Verifying
+    );
     eprintln!(
         "real Codex smoke: version={version}, approvals={approval_count}, persisted_events={}",
         events.len()
     );
 
-    service
-        .interrupt(task.id, false, &store)
-        .await
-        .expect("pause after completed turn");
     drop(service);
     drop(store);
     let reopened = Mutex::new(EventStore::open(&database).unwrap());
-    let mut restarted = CodexService::new(factory, version);
-    let resumed = restarted
-        .start(task.id, &reopened)
-        .await
-        .expect("resume real Codex thread");
-    assert_eq!(resumed.thread_id.as_deref(), Some(thread_id.as_str()));
-    assert_ne!(resumed.process_generation.unwrap(), original_generation);
-    restarted
-        .interrupt(task.id, true, &reopened)
-        .await
-        .expect("cancel resumed real task");
+    let restarted = CodexService::new(factory, version);
+    let recovered = restarted.status(task.id, &reopened).unwrap();
+    assert_eq!(recovered.thread_id.as_deref(), Some(thread_id.as_str()));
+    assert_eq!(recovered.process_generation.unwrap(), original_generation);
     assert_eq!(
         reopened
             .lock()
@@ -164,6 +163,6 @@ async fn real_codex_disposable_repository_lifecycle() {
             .unwrap()
             .unwrap()
             .state,
-        TaskState::Cancelled
+        TaskState::Verifying
     );
 }

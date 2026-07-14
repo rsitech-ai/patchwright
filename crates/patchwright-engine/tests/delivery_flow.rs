@@ -6,7 +6,8 @@ use patchwright_core::{
     TaskContractDraft, TaskSource,
 };
 use patchwright_engine::{
-    DeliveryError, EventStore, approve_delivery, authorize_execution, preview_delivery,
+    DeliveryError, EventStore, approve_delivery, authorize_execution, complete_successful_delivery,
+    preview_delivery,
 };
 
 fn fixture(store: &EventStore) -> Task {
@@ -66,6 +67,20 @@ fn exact_preview_approval_claim_is_single_use_and_stale_safe() {
     let approval = approve_delivery(&store, &preview, "owner").unwrap();
     let key = authorize_execution(&store, &preview, approval.id()).unwrap();
     assert_eq!(key, preview.action.idempotency_sha256());
+    assert_eq!(
+        authorize_execution(&store, &preview, approval.id()),
+        Err(DeliveryError::AlreadyClaimed)
+    );
+    store
+        .complete_delivery(&key, r#"{"state":"failed","error":"definitive rejection"}"#)
+        .unwrap();
+    assert_eq!(
+        authorize_execution(&store, &preview, approval.id()).unwrap(),
+        key
+    );
+    store
+        .complete_delivery(&key, r#"{"state":"succeeded","result":{}}"#)
+        .unwrap();
     assert_eq!(
         authorize_execution(&store, &preview, approval.id()),
         Err(DeliveryError::AlreadyClaimed)
@@ -175,4 +190,66 @@ fn merge_uses_a_separate_merge_class_and_exact_head_sha() {
         preview_delivery(&store, task.id, changed),
         Err(DeliveryError::PreconditionMismatch)
     );
+}
+
+#[test]
+fn successful_merge_atomically_completes_delivery_and_task_lifecycle() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = EventStore::open(&directory.path().join("engine.sqlite3")).unwrap();
+    let mut task = fixture(&store);
+    let original = store.task_contract(task.id).unwrap().unwrap();
+    let contract = TaskContract::try_from(TaskContractDraft {
+        task_id: task.id,
+        source: TaskSource::LocalRequest,
+        repository_binding_id: original.repository_binding_id(),
+        goal: original.goal().into(),
+        acceptance_criteria: original.acceptance_criteria().to_vec(),
+        base_sha: Some("a".repeat(40)),
+        head_sha: Some("b".repeat(40)),
+        instruction_digests: original.instruction_digests().to_vec(),
+        verification_commands: Vec::new(),
+        required_capabilities: vec![Capability::MergePullRequest],
+        risk: RiskClass::High,
+        sensitive_paths: Vec::new(),
+        dependencies: Vec::new(),
+    })
+    .unwrap();
+    store.save_task_contract(&contract).unwrap();
+    for state in [
+        patchwright_core::TaskState::Assessing,
+        patchwright_core::TaskState::Planned,
+        patchwright_core::TaskState::AwaitingPreparationApproval,
+        patchwright_core::TaskState::Preparing,
+        patchwright_core::TaskState::Implementing,
+        patchwright_core::TaskState::Verifying,
+        patchwright_core::TaskState::Reviewing,
+        patchwright_core::TaskState::AwaitingDeliveryApproval,
+    ] {
+        task.transition(state).unwrap();
+    }
+    store.save_task(&task, "ready for delivery").unwrap();
+    let action = GitHubActionPreview::new(
+        RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
+        GitHubAction::merge_pull_request(7, &"b".repeat(40), MergeMethod::Squash).unwrap(),
+        RemotePrecondition::new(Some(&"b".repeat(40)), Some(&"a".repeat(40)), 4).unwrap(),
+    )
+    .unwrap();
+    let preview = preview_delivery(&store, task.id, action).unwrap();
+    let approval = approve_delivery(&store, &preview, "owner").unwrap();
+    let key = authorize_execution(&store, &preview, approval.id()).unwrap();
+    let result = r#"{"state":"succeeded","result":{"merged":true,"sha":"cccccccccccccccccccccccccccccccccccccccc"}}"#;
+
+    complete_successful_delivery(&store, &preview, &key, result, true).unwrap();
+
+    assert_eq!(
+        store.load_task(task.id).unwrap().unwrap().state,
+        patchwright_core::TaskState::Completed
+    );
+    assert_eq!(
+        store.delivery_result(&key).unwrap().as_deref(),
+        Some(result)
+    );
+    let timeline = store.timeline(task.id).unwrap();
+    assert!(timeline.iter().any(|event| event.contains("deliver")));
+    assert!(timeline.iter().any(|event| event.contains("completed")));
 }

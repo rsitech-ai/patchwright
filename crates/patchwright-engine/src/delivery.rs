@@ -1,8 +1,8 @@
 use crate::EventStore;
 use chrono::{Duration, Utc};
 use patchwright_core::{
-    ActionFingerprint, ActionFingerprintDraft, Approval, ApprovalClass, GitHubActionPreview,
-    Policy, PolicyDecision, TaskId,
+    ActionFingerprint, ActionFingerprintDraft, Approval, ApprovalClass, Capability,
+    GitHubActionPreview, Policy, PolicyDecision, TaskId, TaskState,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -154,6 +154,72 @@ pub fn authorize_execution(
         return Err(DeliveryError::AlreadyClaimed);
     }
     Ok(key)
+}
+
+pub fn complete_successful_delivery(
+    store: &EventStore,
+    preview: &DeliveryPreview,
+    key: &str,
+    encoded_result: &str,
+    merged: bool,
+) -> Result<(), DeliveryError> {
+    if preview.action.action().capability() != Capability::MergePullRequest || !merged {
+        return store
+            .complete_delivery(key, encoded_result)
+            .map_err(persistence);
+    }
+
+    let mut task = store
+        .load_task(preview.task_id)
+        .map_err(persistence)?
+        .ok_or(DeliveryError::TaskMissing)?;
+    let lifecycle = [
+        (
+            TaskState::AwaitingDeliveryApproval,
+            TaskState::Delivering,
+            "Approved exact-SHA merge delivery started",
+        ),
+        (
+            TaskState::Delivering,
+            TaskState::Monitoring,
+            "GitHub accepted the merge delivery; reconciling remote state",
+        ),
+        (
+            TaskState::Monitoring,
+            TaskState::AwaitingMergeApproval,
+            "Remote merge preconditions reconciled",
+        ),
+        (
+            TaskState::AwaitingMergeApproval,
+            TaskState::Merging,
+            "Approved exact-SHA merge is being finalized",
+        ),
+        (
+            TaskState::Merging,
+            TaskState::Completed,
+            "GitHub confirmed the pull request merged",
+        ),
+    ];
+    let mut events = Vec::new();
+    if task.state != TaskState::Completed {
+        let start = lifecycle
+            .iter()
+            .position(|(state, _, _)| *state == task.state)
+            .ok_or_else(|| {
+                DeliveryError::Persistence(format!(
+                    "merged task cannot reconcile from {}",
+                    task.state
+                ))
+            })?;
+        for (_, next, summary) in &lifecycle[start..] {
+            task.transition(*next)
+                .map_err(|error| DeliveryError::Persistence(error.to_string()))?;
+            events.push((task.clone(), (*summary).to_owned()));
+        }
+    }
+    store
+        .complete_delivery_with_task_events(key, encoded_result, &events)
+        .map_err(persistence)
 }
 
 fn digest(input: &[u8]) -> String {
