@@ -1,6 +1,10 @@
 use crate::{
     ConversionError, ConversionRequest, EventStore, GhCliCredentialBroker, GitHubAccount,
     GitHubRepository, GitHubSource, GitHubSyncSummary, TaskConversionService,
+    codex::{
+        process::{CodexExecutable, CodexProcessConfig, CodexProcessFactory},
+        service::{CodexRuntimeStatus, CodexService, CodexServiceError, CodexServiceState},
+    },
 };
 use anyhow::{Context, Result, bail};
 use patchwright_core::{
@@ -19,6 +23,7 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
+    sync::Mutex as AsyncMutex,
 };
 
 #[derive(Deserialize)]
@@ -32,6 +37,59 @@ struct Request {
 }
 
 pub async fn serve(socket_path: &Path, database_path: &Path) -> Result<()> {
+    let listener = prepare_listener(socket_path).await?;
+    let codex = match CodexExecutable::discover(None).await {
+        Ok(executable) => {
+            let version = executable.version().to_owned();
+            Some(CodexService::new(
+                CodexProcessFactory::new(executable, CodexProcessConfig::default()),
+                version,
+            ))
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "embedded Codex is unavailable");
+            None
+        }
+    };
+    serve_with_state(listener, database_path, codex).await
+}
+
+pub async fn serve_with_codex(
+    socket_path: &Path,
+    database_path: &Path,
+    factory: CodexProcessFactory,
+    executable_version: String,
+) -> Result<()> {
+    let listener = prepare_listener(socket_path).await?;
+    serve_with_state(
+        listener,
+        database_path,
+        Some(CodexService::new(factory, executable_version)),
+    )
+    .await
+}
+
+async fn serve_with_state(
+    listener: UnixListener,
+    database_path: &Path,
+    codex: Option<CodexService>,
+) -> Result<()> {
+    let state = ServerState {
+        store: Arc::new(Mutex::new(EventStore::open(database_path)?)),
+        codex: Arc::new(AsyncMutex::new(codex)),
+    };
+    loop {
+        let (stream, _) = listener.accept().await.context("accept engine client")?;
+        let state = state.clone();
+        tokio::spawn(async move {
+            if let Err(error) = handle_connection(stream, state).await {
+                tracing::warn!(error = %error, "engine client disconnected with error");
+            }
+        });
+    }
+}
+
+async fn prepare_listener(socket_path: &Path) -> Result<UnixListener> {
     if socket_path.exists() {
         if !std::fs::symlink_metadata(socket_path)?
             .file_type()
@@ -47,25 +105,21 @@ pub async fn serve(socket_path: &Path, database_path: &Path) -> Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent).context("create socket directory")?;
     }
-    let listener = UnixListener::bind(socket_path).context("bind engine socket")?;
-    let store = Arc::new(Mutex::new(EventStore::open(database_path)?));
-    loop {
-        let (stream, _) = listener.accept().await.context("accept engine client")?;
-        let store = Arc::clone(&store);
-        tokio::spawn(async move {
-            if let Err(error) = handle_connection(stream, store).await {
-                tracing::warn!(error = %error, "engine client disconnected with error");
-            }
-        });
-    }
+    UnixListener::bind(socket_path).context("bind engine socket")
 }
 
-async fn handle_connection(stream: UnixStream, store: Arc<Mutex<EventStore>>) -> Result<()> {
+#[derive(Clone)]
+struct ServerState {
+    store: Arc<Mutex<EventStore>>,
+    codex: Arc<AsyncMutex<Option<CodexService>>>,
+}
+
+async fn handle_connection(stream: UnixStream, state: ServerState) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
     while let Some(line) = lines.next_line().await? {
         let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => dispatch(request, &store).await,
+            Ok(request) => dispatch(request, &state).await,
             Err(error) => rpc_error(Value::Null, -32700, "parse error", Some(error.to_string())),
         };
         writer.write_all(&serde_json::to_vec(&response)?).await?;
@@ -74,7 +128,8 @@ async fn handle_connection(stream: UnixStream, store: Arc<Mutex<EventStore>>) ->
     Ok(())
 }
 
-async fn dispatch(request: Request, store: &Mutex<EventStore>) -> Value {
+async fn dispatch(request: Request, state: &ServerState) -> Value {
+    let store = state.store.as_ref();
     match request.method.as_str() {
         "system.health" => rpc_result(
             request.id,
@@ -91,6 +146,11 @@ async fn dispatch(request: Request, store: &Mutex<EventStore>) -> Value {
         "github.queue" => github_queue(request.id, store),
         "github.repository" => github_repository(request.id, &request.params, store),
         "github.sync" => sync_github(request.id, &request.params, store).await,
+        "codex.status" => codex_status(request.id, &request.params, state).await,
+        "codex.start" => codex_start(request.id, &request.params, state).await,
+        "codex.events" => codex_events(request.id, &request.params, state).await,
+        "codex.turn.start" => codex_turn_start(request.id, &request.params, state).await,
+        "codex.turn.steer" => codex_turn_steer(request.id, &request.params, state).await,
         _ => rpc_error(request.id, -32601, "method not found", None),
     }
 }
@@ -434,6 +494,164 @@ fn github_repository(id: Value, params: &Value, store: &Mutex<EventStore>) -> Va
         Ok(snapshot) => rpc_result(id, json!(snapshot)),
         Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
     }
+}
+
+async fn codex_status(id: Value, params: &Value, state: &ServerState) -> Value {
+    let task_id = match codex_task_id(params) {
+        Ok(task_id) => task_id,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let codex = state.codex.lock().await;
+    let result = if let Some(service) = codex.as_ref() {
+        service.status(task_id, state.store.as_ref())
+    } else {
+        Ok(CodexRuntimeStatus {
+            task_id,
+            state: CodexServiceState::Unavailable,
+            process_generation: None,
+            account_state: None,
+            thread_id: None,
+            turn_id: None,
+            last_sequence: 0,
+            can_start: false,
+            can_send: false,
+            can_steer: false,
+        })
+    };
+    match result {
+        Ok(status) => rpc_result(id, json!(status)),
+        Err(error) => codex_rpc_error(id, error),
+    }
+}
+
+async fn codex_start(id: Value, params: &Value, state: &ServerState) -> Value {
+    let task_id = match codex_task_id(params) {
+        Ok(task_id) => task_id,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let mut codex = state.codex.lock().await;
+    let Some(service) = codex.as_mut() else {
+        return rpc_error(id, -32050, "Codex unavailable", None);
+    };
+    match service.start(task_id, state.store.as_ref()).await {
+        Ok(status) => rpc_result(id, json!(status)),
+        Err(error) => codex_rpc_error(id, error),
+    }
+}
+
+async fn codex_events(id: Value, params: &Value, state: &ServerState) -> Value {
+    let task_id = match codex_task_id(params) {
+        Ok(task_id) => task_id,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let after = params
+        .get("after")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let limit = params
+        .get("limit")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(100);
+    let mut codex = state.codex.lock().await;
+    let result = if let Some(service) = codex.as_mut() {
+        service
+            .events(task_id, after, limit, state.store.as_ref())
+            .await
+    } else if limit == 0 || limit > 500 {
+        Err(CodexServiceError::InvalidEventLimit)
+    } else {
+        state
+            .store
+            .lock()
+            .map_err(|_| CodexServiceError::StoreLock)
+            .and_then(|store| {
+                let mut events = store.codex_events(task_id, after)?;
+                events.truncate(limit);
+                Ok(events)
+            })
+    };
+    match result {
+        Ok(events) => rpc_result(id, json!(events)),
+        Err(error) => codex_rpc_error(id, error),
+    }
+}
+
+async fn codex_turn_start(id: Value, params: &Value, state: &ServerState) -> Value {
+    codex_turn_input(id, params, state, false).await
+}
+
+async fn codex_turn_steer(id: Value, params: &Value, state: &ServerState) -> Value {
+    codex_turn_input(id, params, state, true).await
+}
+
+async fn codex_turn_input(id: Value, params: &Value, state: &ServerState, steer: bool) -> Value {
+    let task_id = match codex_task_id(params) {
+        Ok(task_id) => task_id,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let Some(client_message_id) = required_string(params, "clientMessageId") else {
+        return rpc_error(
+            id,
+            -32602,
+            "invalid parameters",
+            Some("clientMessageId is required".into()),
+        );
+    };
+    let Some(input) = params
+        .get("input")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return rpc_error(
+            id,
+            -32602,
+            "invalid parameters",
+            Some("input is required".into()),
+        );
+    };
+    let mut codex = state.codex.lock().await;
+    let Some(service) = codex.as_mut() else {
+        return rpc_error(id, -32050, "Codex unavailable", None);
+    };
+    let result = if steer {
+        service
+            .steer_turn(task_id, &client_message_id, &input, state.store.as_ref())
+            .await
+    } else {
+        service
+            .start_turn(task_id, &client_message_id, &input, state.store.as_ref())
+            .await
+    };
+    match result {
+        Ok(receipt) => rpc_result(id, json!(receipt)),
+        Err(error) => codex_rpc_error(id, error),
+    }
+}
+
+fn codex_task_id(params: &Value) -> std::result::Result<TaskId, String> {
+    params
+        .get("taskId")
+        .and_then(Value::as_str)
+        .and_then(|value| TaskId::from_str(value).ok())
+        .ok_or_else(|| "taskId must be a UUID".to_owned())
+}
+
+fn codex_rpc_error(id: Value, error: CodexServiceError) -> Value {
+    let (code, message) = match error {
+        CodexServiceError::TaskNotFound => (-32040, "task not found"),
+        CodexServiceError::InvalidTaskState(_) => (-32041, "invalid task state"),
+        CodexServiceError::DuplicateClientMessageId => (-32042, "duplicate client message"),
+        CodexServiceError::ProcessNotActive
+        | CodexServiceError::SessionNotReady
+        | CodexServiceError::NoActiveTurn => (-32043, "Codex task is not ready"),
+        CodexServiceError::InvalidInput | CodexServiceError::InvalidEventLimit => {
+            (-32602, "invalid parameters")
+        }
+        _ => (-32051, "Codex operation failed"),
+    };
+    rpc_error(id, code, message, Some(error.to_string()))
 }
 
 async fn sync_github(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {

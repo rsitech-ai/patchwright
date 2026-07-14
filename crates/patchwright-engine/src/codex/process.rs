@@ -225,6 +225,11 @@ impl CodexProcess {
             .await
     }
 
+    pub async fn read_line_for(&mut self, duration: Duration) -> Result<String, CodexProcessError> {
+        self.read_line_with_timeout(duration, "poll Codex event")
+            .await
+    }
+
     pub async fn write_line(&mut self, line: &str) -> Result<(), CodexProcessError> {
         if line.as_bytes().contains(&b'\n') || line.len() > MAX_LINE_BYTES {
             return Err(CodexProcessError::InvalidProtocolLine);

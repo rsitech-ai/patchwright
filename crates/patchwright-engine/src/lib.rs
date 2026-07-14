@@ -23,6 +23,6 @@ pub use jobs::{
     CancellationState, Job, JobCheckpoint, JobError, JobId, JobKind, JobState, TaskCheckpoint,
 };
 pub use repository::{RepositoryInspection, RepositoryService};
-pub use rpc::serve;
+pub use rpc::{serve, serve_with_codex};
 pub use store::EventStore;
 pub use worktree::WorktreeService;

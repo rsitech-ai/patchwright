@@ -2,16 +2,17 @@ import PatchwrightCore
 import SwiftUI
 
 struct TaskDetailView: View {
+    @ObservedObject var store: WorkspaceStore
     let task: EngineeringTask
-    @State private var tab: TaskWorkbenchTab = .overview
+    @SceneStorage("patchwright.taskWorkbenchTab") private var tabRaw = TaskWorkbenchTab.overview.rawValue
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            Picker("Task workbench", selection: $tab) {
+            Picker("Task workbench", selection: $tabRaw) {
                 ForEach(TaskWorkbenchTab.allCases) { tab in
-                    Text(tab.title).tag(tab)
+                    Text(tab.title).tag(tab.rawValue)
                 }
             }
             .pickerStyle(.segmented)
@@ -50,19 +51,24 @@ struct TaskDetailView: View {
         case .blocked(let reason):
             ContentUnavailableView("Task Blocked", systemImage: "exclamationmark.octagon", description: Text(reason))
         case .ready:
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    switch tab {
-                    case .overview: overview
-                    case .codex: placeholder("Codex Thread", "The supervised embedded thread attaches when preparation starts.", "bubble.left.and.text.bubble.right")
-                    case .changes: placeholder("Changes", "Worktree file changes and diffs will appear here.", "doc.badge.gearshape")
-                    case .verification: placeholder("Verification", "Commands, checks, findings, and evidence will appear here.", "checkmark.shield")
-                    case .delivery: placeholder("Delivery", "Approval-bound branch, comment, review, check, and draft PR actions will appear here.", "paperplane")
-                    case .merge: placeholder("Merge", "Exact-SHA merge readiness and the separate merge approval will appear here.", "arrow.triangle.merge")
+            if TaskWorkbenchTab(rawValue: tabRaw) == .codex {
+                CodexThreadView(store: store, task: task)
+                    .frame(minHeight: 420)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        switch TaskWorkbenchTab(rawValue: tabRaw) ?? .overview {
+                        case .overview: overview
+                        case .codex: EmptyView()
+                        case .changes: placeholder("Changes", "Worktree file changes and diffs will appear here.", "doc.badge.gearshape")
+                        case .verification: placeholder("Verification", "Commands, checks, findings, and evidence will appear here.", "checkmark.shield")
+                        case .delivery: placeholder("Delivery", "Approval-bound branch, comment, review, check, and draft PR actions will appear here.", "paperplane")
+                        case .merge: placeholder("Merge", "Exact-SHA merge readiness and the separate merge approval will appear here.", "arrow.triangle.merge")
+                        }
                     }
+                    .padding(20)
+                    .frame(maxWidth: 860, alignment: .leading)
                 }
-                .padding(20)
-                .frame(maxWidth: 860, alignment: .leading)
             }
         }
     }

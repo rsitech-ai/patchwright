@@ -46,7 +46,7 @@ struct ContentView: View {
 
     @ViewBuilder private var detailContent: some View {
         if let task = store.selectedTask {
-            TaskDetailView(task: task)
+            TaskDetailView(store: store, task: task)
         } else if let snapshot = store.selectedRepository {
             GitHubRepositoryView(store: store, snapshot: snapshot, item: store.selectedWorkItem)
         } else {
@@ -62,7 +62,10 @@ struct ContentView: View {
         if let snapshot = store.selectedRepository, store.selectedTaskID == nil {
             GitHubInspector(snapshot: snapshot, status: store.githubStatus, summary: store.githubSyncSummary)
         } else {
-            EvidenceInspector(task: store.selectedTask)
+            EvidenceInspector(
+                task: store.selectedTask,
+                codexStatus: store.selectedTask.flatMap { store.codexStatus(for: $0.id) }
+            )
         }
     }
 
