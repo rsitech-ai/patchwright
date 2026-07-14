@@ -29,11 +29,17 @@ struct ContentView: View {
                     .help("Create a task from a local Git repository")
                 Button("Inspector", systemImage: "sidebar.trailing") { inspectorPresented.toggle() }
                     .help("Show evidence, approvals, instructions, and credential state")
-                Button("Sync GitHub", systemImage: "arrow.triangle.2.circlepath") {
-                    Task { await store.syncGitHub() }
+                if store.isSyncingGitHub {
+                    Button("Cancel GitHub Sync", systemImage: "xmark.circle", role: .destructive) {
+                        Task { await store.cancelGitHubSync() }
+                    }
+                    .help(store.githubSyncJob?.summary ?? "Cancel the active GitHub sync")
+                } else {
+                    Button("Sync GitHub", systemImage: "arrow.triangle.2.circlepath") {
+                        Task { await store.syncGitHub() }
+                    }
+                    .help("Refresh the local GitHub snapshot")
                 }
-                .disabled(store.isSyncingGitHub)
-                .help("Refresh the local GitHub snapshot")
             }
         }
         .sheet(item: $taskDraft) { draft in
