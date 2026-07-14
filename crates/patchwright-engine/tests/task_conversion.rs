@@ -1,6 +1,6 @@
 use patchwright_core::{
-    CredentialHealth, RepositoryBinding, RepositoryBindingDraft, RepositoryPermissionSnapshot,
-    TaskSource,
+    Capability, CredentialHealth, RepositoryBinding, RepositoryBindingDraft,
+    RepositoryPermissionSnapshot, TaskSource,
 };
 use patchwright_engine::{
     ConversionError, ConversionRequest, EventStore, GitHubRepository, GitHubRepositoryPermissions,
@@ -139,6 +139,16 @@ fn issue_and_pull_request_convert_to_typed_tasks_with_exact_source_identity() {
     let issue_contract = store.task_contract(issue.task.id).unwrap().unwrap();
     assert_eq!(issue_contract.source().item_number(), Some(7));
     assert_eq!(issue_contract.base_sha(), Some(BASE_SHA));
+    assert_eq!(
+        issue_contract.required_capabilities(),
+        &[
+            Capability::CreateBranch,
+            Capability::PushBranch,
+            Capability::CreatePullRequest,
+            Capability::PostComment,
+            Capability::CreateCheckRun,
+        ]
+    );
 
     let pull_request = service.create(request(8)).unwrap();
     assert!(matches!(
@@ -150,7 +160,19 @@ fn issue_and_pull_request_convert_to_typed_tasks_with_exact_source_identity() {
     let contract = store.task_contract(pull_request.task.id).unwrap().unwrap();
     assert_eq!(contract.base_sha(), Some(BASE_SHA));
     assert_eq!(contract.head_sha(), Some(HEAD_SHA));
-    assert!(contract.required_capabilities().is_empty());
+    assert_eq!(
+        contract.required_capabilities(),
+        &[
+            Capability::PushBranch,
+            Capability::PostComment,
+            Capability::PostReview,
+            Capability::CreateCheckRun,
+            Capability::UpdatePullRequestBranch,
+            Capability::ClosePullRequest,
+            Capability::EnqueuePullRequest,
+            Capability::MergePullRequest,
+        ]
+    );
 }
 
 #[test]
