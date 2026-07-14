@@ -231,6 +231,43 @@ public final class WorkspaceStore: ObservableObject {
         }
     }
 
+    public func previewMergeDelivery(task: EngineeringTask, method: GitHubMergeMethod) async {
+        guard !deliveryBusyTaskIDs.contains(task.id) else { return }
+        guard case .githubPullRequest(let source) = task.source else {
+            deliveryError = "Merge approval requires an ingested pull request task."
+            return
+        }
+        guard let installationID = repositories.first(where: { $0.id == source.repositoryID })?.installationID else {
+            deliveryError = "Install the Patchwright GitHub App for this repository before preparing merge."
+            return
+        }
+        deliveryBusyTaskIDs.insert(task.id)
+        defer { deliveryBusyTaskIDs.remove(task.id) }
+        do {
+            let draft = GitHubActionPreviewDraft(
+                remote: GitHubRemoteIdentity(
+                    repositoryId: source.repositoryID,
+                    installationId: installationID,
+                    repositoryFullName: source.repositoryFullName
+                ),
+                action: GitHubActionPayload(
+                    pullRequestNumber: source.number,
+                    expectedHeadSha: source.headSHA,
+                    method: method
+                ),
+                expectedHeadSha: source.headSHA,
+                expectedBaseSha: source.baseSHA,
+                snapshotGeneration: max(1, UInt64(source.snapshotAt.timeIntervalSince1970))
+            )
+            deliveryPreviews[task.id] = try await engine.previewDelivery(taskID: task.id, draft: draft)
+            deliveryApprovals[task.id] = nil
+            deliveryExecutions[task.id] = nil
+            deliveryError = nil
+        } catch {
+            deliveryError = error.localizedDescription
+        }
+    }
+
     public func approveDelivery(taskID: UUID) async {
         guard let preview = deliveryPreviews[taskID], !deliveryBusyTaskIDs.contains(taskID) else { return }
         deliveryBusyTaskIDs.insert(taskID)
