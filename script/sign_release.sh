@@ -5,10 +5,14 @@ APP_PATH="${1:?app path required}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 resolve_identity() {
-  local requested="${PATCHWRIGHT_DEVELOPER_ID:-}"
+  local requested=""
   local identities
+  if [[ "${PATCHWRIGHT_DEVELOPER_ID+x}" == x ]]; then
+    requested="$PATCHWRIGHT_DEVELOPER_ID"
+    [[ -n "$requested" ]] || return 1
+  fi
   identities="$(security find-identity -p codesigning -v 2>/dev/null | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p')"
-  if [[ -n "$requested" ]]; then
+  if [[ "${PATCHWRIGHT_DEVELOPER_ID+x}" == x ]]; then
     [[ "$requested" == Developer\ ID\ Application:* ]] || return 1
     [[ "$(printf '%s\n' "$identities" | grep -Fxc "$requested")" == 1 ]] || return 1
     printf '%s' "$requested"

@@ -23,7 +23,9 @@ pub enum Capability {
     ResolveThread,
     CreateCheckRun,
     UpdatePullRequestBranch,
+    ReadyPullRequest,
     ClosePullRequest,
+    CloseIssue,
     ModifyWorkflow,
     EnqueuePullRequest,
     MergePullRequest,
@@ -47,7 +49,9 @@ impl Capability {
             Self::ResolveThread => "resolveThread",
             Self::CreateCheckRun => "createCheckRun",
             Self::UpdatePullRequestBranch => "updatePullRequestBranch",
+            Self::ReadyPullRequest => "readyPullRequest",
             Self::ClosePullRequest => "closePullRequest",
+            Self::CloseIssue => "closeIssue",
             Self::ModifyWorkflow => "modifyWorkflow",
             Self::EnqueuePullRequest => "enqueuePullRequest",
             Self::MergePullRequest => "mergePullRequest",
@@ -395,7 +399,9 @@ const fn required_class(capability: Capability) -> ApprovalClass {
         | Capability::ResolveThread
         | Capability::CreateCheckRun
         | Capability::UpdatePullRequestBranch
-        | Capability::ClosePullRequest => ApprovalClass::GitHubDelivery,
+        | Capability::ReadyPullRequest
+        | Capability::ClosePullRequest
+        | Capability::CloseIssue => ApprovalClass::GitHubDelivery,
         Capability::AdministratorBypass => ApprovalClass::LocalCapability,
     }
 }
@@ -420,7 +426,9 @@ const fn class_supports(class: ApprovalClass, capability: Capability) -> bool {
                 | Capability::ResolveThread
                 | Capability::CreateCheckRun
                 | Capability::UpdatePullRequestBranch
+                | Capability::ReadyPullRequest
                 | Capability::ClosePullRequest
+                | Capability::CloseIssue
         ),
         ApprovalClass::Merge => matches!(
             capability,

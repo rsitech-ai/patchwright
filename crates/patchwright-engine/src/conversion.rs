@@ -222,6 +222,7 @@ fn capabilities_for(kind: WorkItemKind) -> Vec<Capability> {
             Capability::CreatePullRequest,
             Capability::PostComment,
             Capability::CreateCheckRun,
+            Capability::CloseIssue,
         ],
         WorkItemKind::PullRequest => vec![
             Capability::PushBranch,
@@ -229,6 +230,7 @@ fn capabilities_for(kind: WorkItemKind) -> Vec<Capability> {
             Capability::PostReview,
             Capability::CreateCheckRun,
             Capability::UpdatePullRequestBranch,
+            Capability::ReadyPullRequest,
             Capability::ClosePullRequest,
             Capability::EnqueuePullRequest,
             Capability::MergePullRequest,

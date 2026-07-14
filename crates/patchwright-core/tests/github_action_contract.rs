@@ -25,7 +25,9 @@ fn every_delivery_and_merge_action_has_stable_exact_identity() {
         GitHubAction::check_run("Patchwright", SHA_B, "completed", Some("success")).unwrap(),
         GitHubAction::draft_pull_request("Fix", "feat/fix", "main", "Body").unwrap(),
         GitHubAction::update_pull_request_branch(12, SHA_A).unwrap(),
+        GitHubAction::ready_pull_request(12, SHA_B).unwrap(),
         GitHubAction::close_pull_request(12).unwrap(),
+        GitHubAction::close_issue(13).unwrap(),
         GitHubAction::enqueue_pull_request(12, SHA_B).unwrap(),
         GitHubAction::merge_pull_request(12, SHA_B, MergeMethod::Squash).unwrap(),
     ];
@@ -49,6 +51,7 @@ fn action_contract_rejects_ambiguous_or_unsafe_boundaries() {
     assert!(GitHubAction::comment(0, "body").is_err());
     assert!(GitHubAction::comment(1, &"x".repeat(65_537)).is_err());
     assert!(GitHubAction::comment(1, "Authorization: Bearer ghs_secret").is_err());
+    assert!(GitHubAction::close_issue(0).is_err());
     assert!(GitHubAction::merge_pull_request(1, SHA_B, MergeMethod::Merge).is_ok());
     assert!(RemoteIdentity::new(0, 7, "octo/fixture").is_err());
     assert!(RemoteIdentity::new(1, 0, "octo/fixture").is_err());

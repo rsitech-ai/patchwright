@@ -13,11 +13,11 @@ use anyhow::{Context, Result, bail};
 use patchwright_core::{
     CredentialHealth, GitHubAction, GitHubActionPreview, QueueCandidate, RemoteIdentity,
     RemotePrecondition, RepositoryBinding, RepositoryBindingDraft, RepositoryPermissionLevel,
-    RepositoryPermissionSnapshot, Task, TaskId, WorkflowPreset, assess_queue,
+    RepositoryPermissionSnapshot, Task, TaskId, TaskState, WorkflowPreset, assess_queue,
 };
 use patchwright_relay::{
     AppAuthenticator, ConfiguredKeyProvider, GitHubAppConfiguration, GitHubMutationClient,
-    InstallationBroker, InstallationPermissions, KeyReference, MutationError,
+    InstallationBroker, InstallationPermissions, InstallationToken, KeyReference, MutationError,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -149,6 +149,10 @@ async fn dispatch(request: Request, state: &ServerState) -> Value {
         "task.create" => create_task(request.id, &request.params, store),
         "task.list" => list_tasks(request.id, store),
         "task.timeline" => task_timeline(request.id, &request.params, store),
+        "task.worktree" => task_worktree(request.id, &request.params, store),
+        "task.plan" => task_plan(request.id, &request.params, store),
+        "task.prepare" => task_prepare(request.id, &request.params, store).await,
+        "task.readyForDelivery" => task_ready_for_delivery(request.id, &request.params, store),
         "task.previewFromGitHub" => preview_task_from_github(request.id, &request.params, store),
         "task.createFromGitHub" => create_task_from_github(request.id, &request.params, store),
         "repository.bind" => bind_repository(request.id, &request.params, store),
@@ -410,16 +414,18 @@ async fn delivery_execute(id: Value, params: &Value, store: &Mutex<EventStore>) 
             );
         }
     };
-    let result = execute_github_action(&preview).await;
+    let result = execute_github_action(&preview, store).await;
     match result {
         Ok(result) => {
             let encoded = serde_json::to_string(&json!({"state":"succeeded","result":result}))
                 .expect("mutation result serializes");
-            if let Err(error) = store
-                .lock()
-                .expect("event store lock poisoned")
-                .complete_delivery(&key, &encoded)
-            {
+            if let Err(error) = crate::complete_successful_delivery(
+                &store.lock().expect("event store lock poisoned"),
+                &preview,
+                &key,
+                &encoded,
+                result.merged == Some(true),
+            ) {
                 return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
             }
             rpc_result(
@@ -651,6 +657,7 @@ fn monitor_id(params: &Value) -> Option<uuid::Uuid> {
 
 async fn execute_github_action(
     preview: &crate::DeliveryPreview,
+    store: &Mutex<EventStore>,
 ) -> std::result::Result<patchwright_relay::MutationResult, MutationError> {
     let runtime = github_app_runtime_configuration().ok_or(MutationError::MissingToken)?;
     let app_id = runtime.app_id;
@@ -681,6 +688,44 @@ async fn execute_github_action(
         .map_err(|_| MutationError::MissingToken)?;
     if token.installation_id() != preview.action.remote().installation_id() {
         return Err(MutationError::InvalidTarget);
+    }
+    if let GitHubAction::PushIntent { branch, head_sha } = preview.action.action() {
+        let (repository_path, state_root, default_branch) = {
+            let store = store
+                .lock()
+                .map_err(|_| MutationError::GitTransportFailed)?;
+            let task = store
+                .load_task(preview.task_id)
+                .map_err(|_| MutationError::GitTransportFailed)?
+                .ok_or(MutationError::InvalidTarget)?;
+            let binding_id = task
+                .repository_binding_id
+                .ok_or(MutationError::InvalidTarget)?;
+            let binding = store
+                .repository_binding(binding_id)
+                .map_err(|_| MutationError::GitTransportFailed)?
+                .ok_or(MutationError::InvalidTarget)?;
+            (
+                task.repository_path,
+                binding.state_root().to_owned(),
+                binding.default_branch().to_owned(),
+            )
+        };
+        if branch == &default_branch {
+            return Err(MutationError::DefaultBranchPushProhibited);
+        }
+        crate::GitTransport::push_branch(
+            Path::new(&repository_path),
+            branch,
+            head_sha,
+            Path::new(&state_root),
+            token.expose_for_authorization_header(),
+        )
+        .map_err(|_| MutationError::GitTransportFailed)?;
+        return Ok(patchwright_relay::MutationResult {
+            sha: Some(head_sha.clone()),
+            ..Default::default()
+        });
     }
     GitHubMutationClient::new(&api_url, token.expose_for_authorization_header())?
         .execute(owner, repository, preview.action.action())
@@ -1021,12 +1066,311 @@ fn task_timeline(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value 
             json!(
                 values
                     .into_iter()
-                    .filter_map(|value| serde_json::from_str::<Value>(&value).ok())
+                    .filter_map(|value| serde_json::from_str::<Task>(&value).ok())
                     .collect::<Vec<_>>()
             ),
         ),
         Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
     }
+}
+
+fn required_task_id(params: &Value) -> std::result::Result<TaskId, String> {
+    params
+        .get("taskId")
+        .and_then(Value::as_str)
+        .and_then(|value| TaskId::from_str(value).ok())
+        .ok_or_else(|| "taskId must be a UUID".to_owned())
+}
+
+fn task_worktree(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let task_id = match required_task_id(params) {
+        Ok(task_id) => task_id,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let task = match store
+        .lock()
+        .expect("event store lock poisoned")
+        .load_task(task_id)
+    {
+        Ok(Some(task)) => task,
+        Ok(None) => return rpc_error(id, -32040, "task is missing", None),
+        Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    };
+    match crate::RepositoryService::inspect(Path::new(&task.repository_path)) {
+        Ok(inspection) => rpc_result(id, json!(inspection)),
+        Err(error) => rpc_error(
+            id,
+            -32044,
+            "task worktree is unavailable",
+            Some(error.to_string()),
+        ),
+    }
+}
+
+fn task_plan(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let task_id = match required_task_id(params) {
+        Ok(task_id) => task_id,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let store = store.lock().expect("event store lock poisoned");
+    let mut task = match store.load_task(task_id) {
+        Ok(Some(task)) => task,
+        Ok(None) => return rpc_error(id, -32040, "task is missing", None),
+        Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    };
+    if task.state == TaskState::AwaitingPreparationApproval {
+        return rpc_result(id, json!(task));
+    }
+    if task.state != TaskState::Discovered {
+        return rpc_error(
+            id,
+            -32041,
+            "task cannot be planned from its current state",
+            Some(task.state.to_string()),
+        );
+    }
+    for (next, summary) in [
+        (TaskState::Assessing, "Task source and repository assessed"),
+        (TaskState::Planned, "Typed task contract planned"),
+        (
+            TaskState::AwaitingPreparationApproval,
+            "Task is awaiting preparation approval",
+        ),
+    ] {
+        if let Err(error) = task.transition(next) {
+            return rpc_error(id, -32041, "task planning failed", Some(error.to_string()));
+        }
+        if let Err(error) = store.save_task(&task, summary) {
+            return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+        }
+    }
+    rpc_result(id, json!(task))
+}
+
+#[allow(clippy::too_many_lines)]
+async fn task_prepare(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let task_id = match required_task_id(params) {
+        Ok(task_id) => task_id,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let (mut task, binding, contract) = {
+        let store = store.lock().expect("event store lock poisoned");
+        let task = match store.load_task(task_id) {
+            Ok(Some(task)) => task,
+            Ok(None) => return rpc_error(id, -32040, "task is missing", None),
+            Err(error) => {
+                return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+            }
+        };
+        if task.state == TaskState::Preparing {
+            return rpc_result(id, json!(task));
+        }
+        if task.state != TaskState::AwaitingPreparationApproval {
+            return rpc_error(
+                id,
+                -32042,
+                "task is not awaiting preparation approval",
+                Some(task.state.to_string()),
+            );
+        }
+        let Some(binding_id) = task.repository_binding_id else {
+            return rpc_error(id, -32042, "task repository binding is missing", None);
+        };
+        let binding = match store.repository_binding(binding_id) {
+            Ok(Some(binding)) => binding,
+            Ok(None) => return rpc_error(id, -32042, "task repository binding is missing", None),
+            Err(error) => {
+                return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+            }
+        };
+        let contract = match store.task_contract(task_id) {
+            Ok(Some(contract)) => contract,
+            Ok(None) => return rpc_error(id, -32042, "task contract is missing", None),
+            Err(error) => {
+                return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+            }
+        };
+        (task, binding, contract)
+    };
+    let Some(repository_path) = binding.managed_clone().or_else(|| binding.user_checkout()) else {
+        return rpc_error(id, -32043, "managed repository is unavailable", None);
+    };
+    let repository = Path::new(repository_path);
+    if !repository.is_dir() {
+        let token = match github_app_installation_token(
+            binding.full_name(),
+            binding.github_repository_id(),
+            InstallationPermissions::ingestion(),
+        )
+        .await
+        {
+            Ok(token) if token.installation_id() == binding.installation_id() => token,
+            Ok(_) => {
+                return rpc_error(
+                    id,
+                    -32043,
+                    "GitHub App installation identity mismatch",
+                    None,
+                );
+            }
+            Err(error) => {
+                return rpc_error(
+                    id,
+                    -32043,
+                    "managed repository authentication failed",
+                    Some(error.to_string()),
+                );
+            }
+        };
+        if let Err(error) = crate::GitTransport::clone_repository(
+            binding.clone_url(),
+            repository,
+            Path::new(binding.state_root()),
+            token.expose_for_authorization_header(),
+        ) {
+            return rpc_error(
+                id,
+                -32043,
+                "managed repository clone failed",
+                Some(error.to_string()),
+            );
+        }
+    }
+    let worktree = Path::new(binding.worktree_root()).join(task.id.to_string());
+    let branch = format!("patchwright/{}", task.id);
+    let start_sha = contract.head_sha().or_else(|| contract.base_sha());
+    if worktree.exists() {
+        match crate::RepositoryService::inspect(&worktree) {
+            Ok(inspection)
+                if inspection.branch == branch
+                    && start_sha.is_none_or(|expected| inspection.head_sha == expected) => {}
+            Ok(_) => {
+                return rpc_error(id, -32043, "existing task worktree does not match", None);
+            }
+            Err(error) => {
+                return rpc_error(
+                    id,
+                    -32043,
+                    "task worktree is invalid",
+                    Some(error.to_string()),
+                );
+            }
+        }
+    } else if let Err(error) =
+        crate::WorktreeService::prepare_at(repository, &worktree, &branch, start_sha)
+    {
+        return rpc_error(
+            id,
+            -32043,
+            "task worktree preparation failed",
+            Some(error.to_string()),
+        );
+    }
+    task.repository_path = worktree.to_string_lossy().into_owned();
+    if let Err(error) = task.transition(TaskState::Preparing) {
+        return rpc_error(
+            id,
+            -32042,
+            "task preparation failed",
+            Some(error.to_string()),
+        );
+    }
+    let checkpoint = match crate::TaskCheckpoint::new(
+        task.id,
+        task.state,
+        "Approved isolated worktree prepared at captured source SHA",
+    ) {
+        Ok(checkpoint) => checkpoint,
+        Err(error) => {
+            return rpc_error(
+                id,
+                -32042,
+                "task preparation failed",
+                Some(error.to_string()),
+            );
+        }
+    };
+    task.checkpoint_id = Some(checkpoint.id());
+    if let Err(error) = store
+        .lock()
+        .expect("event store lock poisoned")
+        .save_task_with_checkpoint(&task, "Task preparation approved", &checkpoint)
+    {
+        return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+    }
+    rpc_result(id, json!(task))
+}
+
+fn task_ready_for_delivery(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let task_id = match required_task_id(params) {
+        Ok(task_id) => task_id,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let store = store.lock().expect("event store lock poisoned");
+    let mut task = match store.load_task(task_id) {
+        Ok(Some(task)) => task,
+        Ok(None) => return rpc_error(id, -32040, "task is missing", None),
+        Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    };
+    if task.state == TaskState::AwaitingDeliveryApproval {
+        return rpc_result(id, json!(task));
+    }
+    if task.state == TaskState::Implementing {
+        if let Err(error) = task.transition(TaskState::Verifying) {
+            return rpc_error(id, -32045, "verification failed", Some(error.to_string()));
+        }
+        if let Err(error) = store.save_task(&task, "Implementation submitted for verification") {
+            return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+        }
+    }
+    if task.state != TaskState::Verifying {
+        return rpc_error(
+            id,
+            -32045,
+            "task is not ready for verification",
+            Some(task.state.to_string()),
+        );
+    }
+    let inspection = match crate::RepositoryService::inspect(Path::new(&task.repository_path)) {
+        Ok(inspection) => inspection,
+        Err(error) => return rpc_error(id, -32045, "verification failed", Some(error.to_string())),
+    };
+    if inspection.dirty {
+        return rpc_error(
+            id,
+            -32045,
+            "verification failed",
+            Some("task worktree has uncommitted changes".into()),
+        );
+    }
+    if let Err(error) = task.transition(TaskState::Reviewing) {
+        return rpc_error(id, -32045, "review failed", Some(error.to_string()));
+    }
+    if let Err(error) = store.save_task(&task, "Clean task worktree reviewed") {
+        return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+    }
+    if let Err(error) = task.transition(TaskState::AwaitingDeliveryApproval) {
+        return rpc_error(id, -32045, "delivery gate failed", Some(error.to_string()));
+    }
+    let checkpoint = match crate::TaskCheckpoint::new(
+        task.id,
+        task.state,
+        "Verified clean commit is awaiting exact GitHub delivery approval",
+    ) {
+        Ok(checkpoint) => checkpoint,
+        Err(error) => {
+            return rpc_error(id, -32045, "delivery gate failed", Some(error.to_string()));
+        }
+    };
+    task.checkpoint_id = Some(checkpoint.id());
+    if let Err(error) = store.save_task_with_checkpoint(
+        &task,
+        "Task is ready for approval-bound GitHub delivery",
+        &checkpoint,
+    ) {
+        return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+    }
+    rpc_result(id, json!(task))
 }
 
 fn github_status(id: Value, store: &Mutex<EventStore>) -> Value {
@@ -1783,38 +2127,29 @@ async fn sync_github(id: Value, params: &Value, store: &Mutex<EventStore>) -> Va
 }
 
 async fn sync_github_repository(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
-    let Some(full_name) = required_string(params, "fullName") else {
-        return rpc_error(
-            id,
-            -32602,
-            "invalid parameters",
-            Some("fullName is required".into()),
-        );
+    let request = match repository_sync_parameters(params) {
+        Ok(request) => request,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
     };
-    let repository_id = positive_u64(params, "repositoryId");
-    let installation_id = positive_u64(params, "installationId");
-    let (Some(repository_id), Some(installation_id)) = (repository_id, installation_id) else {
-        return rpc_error(
-            id,
-            -32602,
-            "invalid parameters",
-            Some("repositoryId and installationId must be positive integers".into()),
-        );
+    let (source, installation_id) = match github_app_source_for_repository(
+        &request.full_name,
+        request.repository_id,
+        request.expected_installation_id,
+    )
+    .await
+    {
+        Ok(source) => source,
+        Err(error) => {
+            return rpc_error(
+                id,
+                -32010,
+                "GitHub App repository authentication unavailable",
+                Some(error.to_string()),
+            );
+        }
     };
-    let source =
-        match github_app_source_for_repository(&full_name, repository_id, installation_id).await {
-            Ok(source) => source,
-            Err(error) => {
-                return rpc_error(
-                    id,
-                    -32010,
-                    "GitHub App repository authentication unavailable",
-                    Some(error.to_string()),
-                );
-            }
-        };
-    let repository = match source.repository(&full_name).await {
-        Ok(repository) if repository.id == repository_id => repository,
+    let mut repository = match source.repository(&request.full_name).await {
+        Ok(repository) if repository.id == request.repository_id => repository,
         Ok(_) => {
             return rpc_error(id, -32014, "GitHub repository identity mismatch", None);
         }
@@ -1827,6 +2162,7 @@ async fn sync_github_repository(id: Value, params: &Value, store: &Mutex<EventSt
             );
         }
     };
+    repository.installation_id = Some(installation_id);
     let resource_limit = bounded_limit(params, "resourceLimit", 1000, 1000);
     let snapshot = match source
         .repository_snapshot(&repository, resource_limit)
@@ -1852,11 +2188,64 @@ async fn sync_github_repository(id: Value, params: &Value, store: &Mutex<EventSt
     rpc_result(id, json!(snapshot))
 }
 
+struct RepositorySyncParameters {
+    full_name: String,
+    repository_id: u64,
+    expected_installation_id: Option<u64>,
+}
+
+fn repository_sync_parameters(
+    params: &Value,
+) -> std::result::Result<RepositorySyncParameters, String> {
+    let full_name =
+        required_string(params, "fullName").ok_or_else(|| "fullName is required".to_owned())?;
+    let repository_id = positive_u64(params, "repositoryId")
+        .ok_or_else(|| "repositoryId must be a positive integer".to_owned())?;
+    let expected_installation_id = if params.get("installationId").is_some() {
+        Some(
+            positive_u64(params, "installationId")
+                .ok_or_else(|| "installationId must be a positive integer".to_owned())?,
+        )
+    } else {
+        None
+    };
+    Ok(RepositorySyncParameters {
+        full_name,
+        repository_id,
+        expected_installation_id,
+    })
+}
+
 async fn github_app_source_for_repository(
     full_name: &str,
     repository_id: u64,
-    installation_id: u64,
-) -> Result<GitHubSource> {
+    expected_installation_id: Option<u64>,
+) -> Result<(GitHubSource, u64)> {
+    let token = github_app_installation_token(
+        full_name,
+        repository_id,
+        InstallationPermissions::ingestion(),
+    )
+    .await?;
+    let installation_id = token.installation_id();
+    if expected_installation_id.is_some_and(|expected| expected != installation_id) {
+        bail!("GitHub App installation identity mismatch");
+    }
+    let runtime = github_app_runtime_configuration()
+        .context("GitHub App runtime configuration is unavailable")?;
+    let source = GitHubSource::new(
+        &runtime.api_base_url,
+        GitHubToken::new(token.expose_for_authorization_header()),
+    )
+    .context("GitHub source is unavailable")?;
+    Ok((source, installation_id))
+}
+
+async fn github_app_installation_token(
+    full_name: &str,
+    repository_id: u64,
+    permissions: InstallationPermissions,
+) -> Result<InstallationToken> {
     let (owner, repository_name) = full_name
         .split_once('/')
         .context("repository full name lacks owner")?;
@@ -1883,19 +2272,12 @@ async fn github_app_source_for_repository(
             owner,
             repository_name,
             repository_id,
-            InstallationPermissions::ingestion(),
+            permissions,
             chrono::Utc::now().timestamp(),
         )
         .await
         .context("GitHub App installation token is unavailable")?;
-    if token.installation_id() != installation_id {
-        bail!("GitHub App installation identity mismatch");
-    }
-    GitHubSource::new(
-        &runtime.api_base_url,
-        GitHubToken::new(token.expose_for_authorization_header()),
-    )
-    .context("GitHub source is unavailable")
+    Ok(token)
 }
 
 async fn sync_repositories(
@@ -1980,7 +2362,8 @@ fn rpc_error(id: Value, code: i64, message: &str, detail: Option<String>) -> Val
 
 #[cfg(test)]
 mod tests {
-    use super::load_github_app_runtime_configuration;
+    use super::{load_github_app_runtime_configuration, repository_sync_parameters};
+    use serde_json::json;
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     #[test]
@@ -2009,5 +2392,33 @@ mod tests {
         let linked = directory.path().join("linked.json");
         symlink(&configuration, &linked).expect("create symlink");
         assert!(load_github_app_runtime_configuration(&linked).is_none());
+    }
+
+    #[test]
+    fn repository_sync_can_discover_or_verify_an_installation() {
+        let discovered = repository_sync_parameters(&json!({
+            "fullName": "acme/widget",
+            "repositoryId": "42"
+        }))
+        .expect("installation discovery should be supported");
+        assert_eq!(discovered.full_name, "acme/widget");
+        assert_eq!(discovered.repository_id, 42);
+        assert_eq!(discovered.expected_installation_id, None);
+
+        let verified = repository_sync_parameters(&json!({
+            "fullName": "acme/widget",
+            "repositoryId": "42",
+            "installationId": "99"
+        }))
+        .expect("known installation should remain verifiable");
+        assert_eq!(verified.expected_installation_id, Some(99));
+
+        assert!(
+            repository_sync_parameters(&json!({
+                "fullName": "acme/widget",
+                "repositoryId": "0"
+            }))
+            .is_err()
+        );
     }
 }

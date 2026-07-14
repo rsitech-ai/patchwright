@@ -17,7 +17,8 @@ pub use conversion::{
     ConversionError, ConversionOutcome, ConversionPreview, ConversionRequest, TaskConversionService,
 };
 pub use delivery::{
-    DeliveryError, DeliveryPreview, approve_delivery, authorize_execution, preview_delivery,
+    DeliveryError, DeliveryPreview, approve_delivery, authorize_execution,
+    complete_successful_delivery, preview_delivery,
 };
 pub use github::{
     GhCliCredentialBroker, GitHubAccount, GitHubCheckRun, GitHubDiscussion, GitHubPermission,
@@ -34,4 +35,4 @@ pub use monitoring::{
 pub use repository::{RepositoryInspection, RepositoryService};
 pub use rpc::{serve, serve_with_codex};
 pub use store::EventStore;
-pub use worktree::WorktreeService;
+pub use worktree::{GitTransport, WorktreeService};

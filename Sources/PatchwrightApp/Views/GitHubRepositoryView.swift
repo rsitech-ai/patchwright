@@ -162,21 +162,19 @@ struct GitHubRepositoryView: View {
             } else {
                 Text("Review the typed goal, source SHAs, and acceptance criteria before creating durable work.")
                     .foregroundStyle(.secondary)
-                if snapshot.repository.installationID != nil {
-                    HStack {
-                        Spacer(minLength: 0)
-                        Button("Preview Task") { Task { await store.previewTask(from: item) } }
-                            .buttonStyle(.borderedProminent)
-                            .help("Preview the task contract")
-                    }
+                HStack {
+                    Spacer(minLength: 0)
+                    Button("Preview Task") { Task { await store.previewTask(from: item) } }
+                        .buttonStyle(.borderedProminent)
+                        .help("Verify GitHub App access and preview the task contract")
                 }
             }
             if snapshot.repository.installationID == nil {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "exclamationmark.shield.fill").foregroundStyle(.orange)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("GitHub App installation required").font(.callout.weight(.semibold))
-                        Text("Patchwright cannot create a repository-bound task until this repository is available to its GitHub App installation.")
+                        Text("GitHub App access not verified yet").font(.callout.weight(.semibold))
+                        Text("Preview Task will verify this repository against your Patchwright GitHub App and refresh its installation identity.")
                             .font(.caption).foregroundStyle(.secondary)
                         if let url = URL(string: "https://github.com/settings/installations") { Link("Manage GitHub Apps", destination: url).font(.caption) }
                     }
