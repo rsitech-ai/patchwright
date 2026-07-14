@@ -4,6 +4,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
+Tests/PackagingTests/release_contract.sh
 cargo test -p patchwright-core --test sorting_contract
 cargo test -p patchwright-engine --test task_conversion
 cargo test -p patchwright-engine --test rpc_conversion
