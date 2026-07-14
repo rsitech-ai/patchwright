@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use patchwright_core::TaskId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::sync::Mutex;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -54,7 +55,39 @@ pub struct CodexEventRecord {
     pub sequence: u64,
     pub kind: String,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
     pub occurred_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodexEventDraft {
+    pub kind: String,
+    pub summary: String,
+    pub thread_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub item_id: Option<String>,
+    pub content: Option<String>,
+}
+
+impl CodexEventDraft {
+    #[must_use]
+    pub fn status(kind: impl Into<String>, summary: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            summary: summary.into(),
+            thread_id: None,
+            turn_id: None,
+            item_id: None,
+            content: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -71,7 +104,7 @@ impl CodexSession {
     pub async fn connect(
         task_id: TaskId,
         process: &mut CodexProcess,
-        store: &EventStore,
+        store: &Mutex<EventStore>,
         executable_version: &str,
         bootstrap: ThreadBootstrap,
     ) -> Result<Self, CodexSessionError> {
@@ -92,7 +125,12 @@ impl CodexSession {
             status: CodexSessionStatus::Starting,
             updated_at: Utc::now(),
         };
-        store.checkpoint_codex_session(&mut record, "processStarted", "Codex process started")?;
+        checkpoint_session(
+            store,
+            &mut record,
+            "processStarted",
+            "Codex process started",
+        )?;
 
         let mut decoder = ProtocolDecoder::default();
         let initialize = send_request(
@@ -115,7 +153,7 @@ impl CodexSession {
             .write_line(&serde_json::to_string(&InitializedNotification::default())?)
             .await?;
         record.status = CodexSessionStatus::Initialized;
-        store.checkpoint_codex_session(&mut record, "initialized", "Codex initialized")?;
+        checkpoint_session(store, &mut record, "initialized", "Codex initialized")?;
 
         let account = send_request(
             process,
@@ -126,13 +164,19 @@ impl CodexSession {
         )
         .await?;
         record.account_state = decode_account_state(&account);
-        store.checkpoint_codex_session(&mut record, "accountRead", "Codex account state read")?;
+        checkpoint_session(
+            store,
+            &mut record,
+            "accountRead",
+            "Codex account state read",
+        )?;
 
         let is_resume = matches!(bootstrap, ThreadBootstrap::Resume { .. });
         let thread = bootstrap_thread(process, &mut decoder, &bootstrap).await?;
         if thread.is_error && is_resume {
             record.status = CodexSessionStatus::StaleThreadNeedsConfirmation;
-            store.checkpoint_codex_session(
+            checkpoint_session(
+                store,
                 &mut record,
                 "threadStale",
                 "Saved Codex thread requires confirmation",
@@ -141,7 +185,8 @@ impl CodexSession {
         }
         if thread.is_error {
             record.status = CodexSessionStatus::Failed;
-            store.checkpoint_codex_session(
+            checkpoint_session(
+                store,
                 &mut record,
                 "threadFailed",
                 "Codex thread start failed",
@@ -158,7 +203,7 @@ impl CodexSession {
         record.thread_id = Some(thread_id.to_owned());
         record.status = CodexSessionStatus::Ready;
         process.mark_ready()?;
-        store.checkpoint_codex_session(&mut record, "threadReady", "Codex thread ready")?;
+        checkpoint_session(store, &mut record, "threadReady", "Codex thread ready")?;
         Ok(Self { record })
     }
 
@@ -224,6 +269,8 @@ pub enum CodexSessionError {
     Json(#[from] serde_json::Error),
     #[error("failed to persist Codex session: {0}")]
     Store(#[from] anyhow::Error),
+    #[error("Codex session store lock is poisoned")]
+    StoreLock,
     #[error("Codex response is missing required field {0}")]
     MissingResponseField(&'static str),
     #[error("Codex app-server rejected {0}")]
@@ -304,5 +351,18 @@ fn validate_metadata(
     if value.trim().is_empty() || value.len() > maximum || value.contains('\0') {
         return Err(CodexSessionError::InvalidMetadata(field));
     }
+    Ok(())
+}
+
+fn checkpoint_session(
+    store: &Mutex<EventStore>,
+    record: &mut CodexSessionRecord,
+    kind: &str,
+    summary: &str,
+) -> Result<(), CodexSessionError> {
+    store
+        .lock()
+        .map_err(|_| CodexSessionError::StoreLock)?
+        .checkpoint_codex_session(record, kind, summary)?;
     Ok(())
 }

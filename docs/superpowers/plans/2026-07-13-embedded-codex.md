@@ -77,13 +77,13 @@
 - Modify: `Sources/PatchwrightApp/Views/TaskDetailView.swift`
 - Add: `Tests/PatchwrightCoreTests/CodexPresentationTests.swift`
 
-- [ ] Add engine tests for `codex.status`, `codex.start`, `codex.events`, `codex.turn.start`, and `codex.turn.steer`, including pagination cursor, duplicate client message ID, invalid task state, and input bounds.
-- [ ] Add Swift tests for ordered text/reasoning/command/file-change/status events, streaming deltas, reconnect cursor, long content, unknown event, and send/steer disabled states.
-- [ ] Observe RED in Rust and Swift.
-- [ ] Implement a task-scoped event fan-in that normalizes app-server events and persists sequence numbers; Swift polls/cursors through the existing Unix socket until a later streaming transport is justified.
-- [ ] Build `CodexThreadView` with native selectable transcript, operator composer, streaming status, command/file-change cards, interruption/failure/recovery states, and exact task/thread/turn details in inspector.
-- [ ] Keep the task workbench mode stable across refresh with scene storage.
-- [ ] Run focused tests, strict Swift Release build, staged app launch, and commit: `Embed the Codex task thread`.
+- [x] Add engine tests for `codex.status`, `codex.start`, `codex.events`, `codex.turn.start`, and `codex.turn.steer`, including pagination cursor, duplicate client message ID, invalid task state, and input bounds.
+- [x] Add Swift tests for ordered text/reasoning/command/file-change/status events, streaming deltas, reconnect cursor, long content, unknown event, and send/steer disabled states.
+- [x] Observe RED in Rust and Swift.
+- [x] Implement a task-scoped event fan-in that normalizes app-server events and persists sequence numbers; Swift polls/cursors through the existing Unix socket until a later streaming transport is justified.
+- [x] Build `CodexThreadView` with native selectable transcript, operator composer, streaming status, command/file-change cards, interruption/failure/recovery states, and exact task/thread/turn details in inspector.
+- [x] Keep the task workbench mode stable across refresh with scene storage.
+- [x] Run focused tests, strict Swift Release build, staged app launch, and commit: `Embed the Codex task thread`.
 
 ## Task 5: Bridge Codex runtime approvals without conflating authority
 
