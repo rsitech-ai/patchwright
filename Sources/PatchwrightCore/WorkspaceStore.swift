@@ -25,6 +25,7 @@ public final class WorkspaceStore: ObservableObject {
     @Published public private(set) var conversionError: String?
     @Published public private(set) var codexStatuses: [UUID: CodexRuntimeStatus] = [:]
     @Published public private(set) var codexEventsByTask: [UUID: [CodexEvent]] = [:]
+    @Published public private(set) var codexApprovalsByTask: [UUID: [CodexRuntimeApproval]] = [:]
     @Published public private(set) var codexBusyTaskIDs: Set<UUID> = []
     @Published public private(set) var codexError: String?
     @Published public private(set) var presentationPreferences: WorkspacePresentationPreferences
@@ -167,6 +168,7 @@ public final class WorkspaceStore: ObservableObject {
             let status = try await engine.codexStatus(taskID: taskID)
             let cursor = codexEventsByTask[taskID]?.last?.sequence ?? 0
             let newEvents = try await engine.codexEvents(taskID: taskID, after: cursor)
+            codexApprovalsByTask[taskID] = try await engine.codexApprovals(taskID: taskID)
             if !newEvents.isEmpty {
                 let existing = codexEventsByTask[taskID] ?? []
                 let seen = Set(existing.map(\.sequence))
@@ -178,6 +180,17 @@ public final class WorkspaceStore: ObservableObject {
         } catch {
             codexError = error.localizedDescription
         }
+    }
+
+    public func resolveCodexApproval(_ approval: CodexRuntimeApproval, approve: Bool) async {
+        guard approval.state == .pending, !codexBusyTaskIDs.contains(approval.taskId) else { return }
+        codexBusyTaskIDs.insert(approval.taskId)
+        defer { codexBusyTaskIDs.remove(approval.taskId) }
+        do {
+            _ = try await engine.resolveCodexApproval(taskID: approval.taskId, approvalID: approval.id, processGeneration: approval.processGeneration, approve: approve)
+            codexError = nil
+            await refreshCodex(taskID: approval.taskId)
+        } catch { codexError = error.localizedDescription }
     }
 
     public func startCodex(taskID: UUID) async {
