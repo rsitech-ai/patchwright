@@ -113,13 +113,13 @@
 - Modify: `Sources/PatchwrightCore/WorkspaceStore.swift`
 - Modify: `Sources/PatchwrightApp/Views/CodexThreadView.swift`
 
-- [ ] Write fault tests for cancel before turn, during stream, during command, after app-server completion but before checkpoint, ignored interrupt, child crash, engine crash, and relaunch resume.
-- [ ] Assert `turn/interrupt` is sent once; new turns/commands/GitHub work are prevented; after timeout the owned process group is terminated; unrelated processes survive; worktree/evidence remain.
-- [ ] Observe RED.
-- [ ] Implement cancellation-token propagation, graceful timeout, TERM then KILL only for the recorded group, and compare-and-set terminal checkpoint.
-- [ ] Reconcile a completion received during cancellation before marking the task cancelled.
-- [ ] Add Pause/Cancel UI with explicit semantics and retained-worktree message.
-- [ ] Run fault matrix repeatedly and commit: `Cancel and recover Codex task execution`.
+- [x] Write fault tests for cancel before turn, during stream, during command, after app-server completion but before checkpoint, ignored interrupt, child crash, engine crash, and relaunch resume.
+- [x] Assert `turn/interrupt` is sent once; new turns/commands/GitHub work are prevented; after timeout the owned process group is terminated; unrelated processes survive; worktree/evidence remain.
+- [x] Observe RED.
+- [x] Implement cancellation-token propagation, graceful timeout, TERM then KILL only for the recorded group, and compare-and-set terminal checkpoint.
+- [x] Reconcile a completion received during cancellation before marking the task cancelled.
+- [x] Add Pause/Cancel UI with explicit semantics and retained-worktree message.
+- [x] Run fault matrix repeatedly and commit: `Cancel and recover Codex task execution`.
 
 ## Task 7: Real local Codex integration gate
 
