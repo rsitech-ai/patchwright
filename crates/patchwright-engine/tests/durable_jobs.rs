@@ -74,7 +74,7 @@ fn legacy_database_migrates_without_losing_existing_tasks() {
         .unwrap()
         .unwrap();
     assert_eq!(loaded.state, TaskState::AwaitingPreparationApproval);
-    assert_eq!(store.schema_versions().unwrap(), vec![1, 2, 3]);
+    assert_eq!(store.schema_versions().unwrap(), vec![1, 2, 3, 4]);
     drop(store);
 
     let connection = Connection::open(database).unwrap();
@@ -99,6 +99,8 @@ fn legacy_database_migrates_without_losing_existing_tasks() {
         "jobs",
         "job_events",
         "task_checkpoints",
+        "codex_sessions",
+        "codex_events",
     ] {
         let present: bool = connection
             .query_row(

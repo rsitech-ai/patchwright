@@ -57,12 +57,12 @@
 - Modify: `crates/patchwright-engine/src/store.rs`
 - Add: `crates/patchwright-engine/tests/codex_session.rs`
 
-- [ ] Write tests for initialize→initialized order, account signed-in/signed-out/unavailable states, new thread start, saved thread resume after engine restart, stale thread fallback requiring operator confirmation, and no task transition before ready.
-- [ ] Observe RED.
-- [ ] Add `codex_sessions` and `codex_events` tables keyed by task and process generation; persist protocol version, executable version, account state, thread ID, last turn ID, last sequence, and bounded status.
-- [ ] Implement `CodexSession` handshake and thread start/resume using task contract instructions and isolated worktree `cwd`.
-- [ ] Atomically checkpoint thread identity with the task event that enters implementing.
-- [ ] Run restart tests twice against the same database and commit: `Persist Codex task sessions`.
+- [x] Write tests for initialize→initialized order, account signed-in/signed-out/unavailable states, new thread start, saved thread resume after engine restart, stale thread fallback requiring operator confirmation, and no task transition before ready.
+- [x] Observe RED.
+- [x] Add `codex_sessions` and `codex_events` tables keyed by task and process generation; persist protocol version, executable version, account state, thread ID, last turn ID, last sequence, and bounded status.
+- [x] Implement `CodexSession` handshake and thread start/resume using task contract instructions and isolated worktree `cwd`.
+- [x] Atomically checkpoint thread identity with the task event that enters implementing.
+- [x] Run restart tests twice against the same database and commit: `Persist Codex task sessions`.
 
 ## Task 4: Stream turns and render a native thread
 
