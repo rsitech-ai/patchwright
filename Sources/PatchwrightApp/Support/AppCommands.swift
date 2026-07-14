@@ -7,9 +7,13 @@ struct PatchwrightCommands: Commands {
         CommandMenu("Task") {
             Button("Refresh Engine") { Task { await store.refreshHealth() } }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
-            Button("Sync GitHub") { Task { await store.syncGitHub() } }
+            Button(store.isSyncingGitHub ? "Cancel GitHub Sync" : "Sync GitHub") {
+                Task {
+                    if store.isSyncingGitHub { await store.cancelGitHubSync() }
+                    else { await store.syncGitHub() }
+                }
+            }
                 .keyboardShortcut("g", modifiers: [.command, .shift])
-                .disabled(store.isSyncingGitHub)
         }
     }
 }
