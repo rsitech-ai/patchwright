@@ -3,6 +3,84 @@ use patchwright_engine::codex::protocol::{
     MAX_LINE_BYTES, ProtocolDecoder, ProtocolError, RequestId,
 };
 use serde_json::json;
+use std::fs;
+use std::path::Path;
+
+fn fixture_lines(name: &str) -> Vec<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/codex")
+        .join(name);
+    fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn sanitized_fixtures_cover_the_pinned_client_and_server_lifecycle() {
+    let client_lines = fixture_lines("client-lifecycle.jsonl");
+    let methods = client_lines
+        .iter()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter_map(|message| {
+            if message.get("id").is_some() {
+                Some(
+                    serde_json::from_value::<ClientRequest>(message)
+                        .unwrap()
+                        .method,
+                )
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        methods,
+        vec![
+            ClientMethod::Initialize,
+            ClientMethod::AccountRead,
+            ClientMethod::ThreadStart,
+            ClientMethod::ThreadResume,
+            ClientMethod::TurnStart,
+            ClientMethod::TurnSteer,
+            ClientMethod::TurnInterrupt,
+        ]
+    );
+
+    let mut decoder = ProtocolDecoder::default();
+    for id in 1..=4 {
+        decoder.register_request(RequestId::Number(id)).unwrap();
+    }
+    let incoming = fixture_lines("server-lifecycle.jsonl")
+        .iter()
+        .map(|line| decoder.decode_line(line.as_bytes()).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        incoming
+            .iter()
+            .filter(|message| matches!(message, IncomingMessage::Response(_)))
+            .count(),
+        4
+    );
+    assert_eq!(
+        incoming
+            .iter()
+            .filter(|message| matches!(message, IncomingMessage::ServerRequest(_)))
+            .count(),
+        3
+    );
+    assert!(incoming.iter().any(|message| matches!(
+        message,
+        IncomingMessage::Event(CodexEvent::TurnCompleted { .. })
+    )));
+    assert!(
+        incoming
+            .iter()
+            .any(|message| matches!(message, IncomingMessage::Event(CodexEvent::Error { .. })))
+    );
+}
 
 #[test]
 fn decodes_validated_responses_notifications_and_unsupported_events() {
