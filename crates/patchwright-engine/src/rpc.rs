@@ -9,8 +9,9 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use patchwright_core::{
-    CredentialHealth, RepositoryBinding, RepositoryBindingDraft, RepositoryPermissionLevel,
-    RepositoryPermissionSnapshot, Task, TaskId,
+    CredentialHealth, QueueCandidate, RepositoryBinding, RepositoryBindingDraft,
+    RepositoryPermissionLevel, RepositoryPermissionSnapshot, Task, TaskId, WorkflowPreset,
+    assess_queue,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -148,6 +149,8 @@ async fn dispatch(request: Request, state: &ServerState) -> Value {
         "github.status" => github_status(request.id, store),
         "github.repositories" => github_repositories(request.id, store),
         "github.queue" => github_queue(request.id, store),
+        "github.queue.assess" => github_queue_assess(request.id, &request.params, store),
+        "github.queue.decisions" => github_queue_decisions(request.id, store),
         "github.repository" => github_repository(request.id, &request.params, store),
         "github.sync" => sync_github(request.id, &request.params, store).await,
         "github.sync.start" => github_sync_start(request.id, &request.params, state).await,
@@ -184,6 +187,90 @@ fn github_queue(id: Value, store: &Mutex<EventStore>) -> Value {
         Ok(items) => rpc_result(id, json!(items)),
         Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
     }
+}
+
+fn github_queue_decisions(id: Value, store: &Mutex<EventStore>) -> Value {
+    match store
+        .lock()
+        .expect("event store lock poisoned")
+        .queue_decisions()
+    {
+        Ok(decisions) => rpc_result(id, json!(decisions)),
+        Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    }
+}
+
+fn github_queue_assess(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let preset_value = params
+        .get("preset")
+        .and_then(Value::as_str)
+        .unwrap_or("quickWins");
+    let Ok(preset) = serde_json::from_value::<WorkflowPreset>(Value::String(preset_value.into()))
+    else {
+        return rpc_error(
+            id,
+            -32602,
+            "invalid parameters",
+            Some("preset is not a supported workflow".into()),
+        );
+    };
+    let store = store.lock().expect("event store lock poisoned");
+    let work_items = match store.github_work_items() {
+        Ok(items) => items,
+        Err(error) => {
+            return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+        }
+    };
+    let candidates: Vec<QueueCandidate> = work_items
+        .into_iter()
+        .filter(|item| item.kind == crate::WorkItemKind::PullRequest && item.state == "open")
+        .filter_map(|item| {
+            let updated_at = chrono::DateTime::parse_from_rfc3339(&item.updated_at)
+                .ok()?
+                .with_timezone(&chrono::Utc);
+            Some(QueueCandidate {
+                repository_full_name: item.repository_full_name,
+                number: item.number,
+                title: item.title,
+                draft: item.draft,
+                ci_health: item.ci_health,
+                review_decision: item.review_decision,
+                has_conflicts: item.has_conflicts,
+                updated_at,
+                dependency_numbers: dependency_labels(&item.labels),
+                labels: item.labels,
+                changed_paths: Vec::new(),
+                manual_priority: None,
+                pinned: false,
+            })
+        })
+        .collect();
+    let decisions = match assess_queue(&candidates, preset, chrono::Utc::now()) {
+        Ok(decisions) => decisions,
+        Err(error) => {
+            return rpc_error(
+                id,
+                -32030,
+                "queue assessment failed",
+                Some(error.to_string()),
+            );
+        }
+    };
+    if let Err(error) = store.replace_queue_decisions(&decisions) {
+        return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+    }
+    rpc_result(id, json!(decisions))
+}
+
+fn dependency_labels(labels: &[String]) -> Vec<u64> {
+    labels
+        .iter()
+        .filter_map(|label| {
+            label
+                .strip_prefix("depends-on:#")
+                .and_then(|value| value.parse().ok())
+        })
+        .collect()
 }
 
 fn bind_repository(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
