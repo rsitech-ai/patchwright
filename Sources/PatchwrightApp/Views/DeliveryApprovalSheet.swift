@@ -16,7 +16,10 @@ struct DeliveryApprovalSheet: View {
                 if let preview {
                     Section("Exact GitHub write") {
                         LabeledContent("Target", value: preview.action.remote.repositoryFullName)
-                        LabeledContent("Item", value: "#\(preview.action.action.issueNumber ?? 0)")
+                        LabeledContent(
+                            "Item",
+                            value: "#\(preview.action.action.issueNumber ?? preview.action.action.pullRequestNumber ?? 0)"
+                        )
                         LabeledContent("Action", value: preview.fingerprint.actionKind)
                         LabeledContent("Head", value: short(preview.fingerprint.headSha))
                         LabeledContent("Base", value: short(preview.fingerprint.baseSha))
@@ -24,8 +27,11 @@ struct DeliveryApprovalSheet: View {
                         LabeledContent("Payload", value: String(preview.action.payloadSha256.prefix(12)))
                         LabeledContent("Permissions", value: preview.action.requiredPermissions.joined(separator: ", "))
                     }
-                    Section("Remote content") {
-                        Text(preview.action.action.body ?? "No body")
+                    Section(preview.action.action.kind == "mergePullRequest" ? "Merge operation" : "Remote content") {
+                        Text(
+                            preview.action.action.body
+                                ?? "\((preview.action.action.method ?? "merge").capitalized) the exact approved head SHA."
+                        )
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -57,16 +63,20 @@ struct DeliveryApprovalSheet: View {
                 }
             }
             .formStyle(.grouped)
-            .navigationTitle("Approve GitHub Delivery")
+            .navigationTitle(preview?.action.action.kind == "mergePullRequest" ? "Approve Pull Request Merge" : "Approve GitHub Delivery")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     if execution == nil {
                         if approval == nil {
-                            Button("Approve Comment") { Task { await store.approveDelivery(taskID: task.id) } }
+                            Button(preview?.action.action.kind == "mergePullRequest" ? "Approve Merge" : "Approve Comment") {
+                                Task { await store.approveDelivery(taskID: task.id) }
+                            }
                                 .disabled(preview == nil || store.deliveryBusyTaskIDs.contains(task.id))
                         } else {
-                            Button("Execute Approved Comment") { Task { await store.executeDelivery(taskID: task.id) } }
+                            Button(preview?.action.action.kind == "mergePullRequest" ? "Execute Approved Merge" : "Execute Approved Comment") {
+                                Task { await store.executeDelivery(taskID: task.id) }
+                            }
                                 .disabled(store.deliveryBusyTaskIDs.contains(task.id))
                         }
                     }
