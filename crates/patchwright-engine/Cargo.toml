@@ -9,6 +9,7 @@ license.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
+nix.workspace = true
 patchwright-core.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
