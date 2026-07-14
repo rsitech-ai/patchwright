@@ -480,16 +480,12 @@ fn delivery_status(id: Value, params: &Value, store: &Mutex<EventStore>) -> Valu
 async fn execute_github_action(
     preview: &crate::DeliveryPreview,
 ) -> std::result::Result<patchwright_relay::MutationResult, MutationError> {
-    let app_id = required_environment("PATCHWRIGHT_GITHUB_APP_ID")
-        .and_then(|value| value.parse().ok())
-        .ok_or(MutationError::MissingToken)?;
-    let client_id = required_environment("PATCHWRIGHT_GITHUB_APP_CLIENT_ID")
-        .ok_or(MutationError::MissingToken)?;
-    let key_reference = required_environment("PATCHWRIGHT_GITHUB_APP_KEY_REFERENCE")
-        .and_then(|value| KeyReference::parse(&value).ok())
-        .ok_or(MutationError::MissingToken)?;
-    let api_url = std::env::var("PATCHWRIGHT_GITHUB_API_URL")
-        .unwrap_or_else(|_| "https://api.github.com".into());
+    let runtime = github_app_runtime_configuration().ok_or(MutationError::MissingToken)?;
+    let app_id = runtime.app_id;
+    let client_id = runtime.client_id;
+    let key_reference =
+        KeyReference::parse(&runtime.key_reference).map_err(|_| MutationError::MissingToken)?;
+    let api_url = runtime.api_base_url;
     let configuration =
         GitHubAppConfiguration::new(app_id, client_id, key_reference, api_url.clone())
             .map_err(|_| MutationError::MissingToken)?;
@@ -519,10 +515,52 @@ async fn execute_github_action(
         .await
 }
 
-fn required_environment(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubAppRuntimeConfiguration {
+    app_id: u64,
+    client_id: String,
+    key_reference: String,
+    #[serde(default = "default_github_api_url")]
+    api_base_url: String,
+}
+
+fn github_app_runtime_configuration() -> Option<GitHubAppRuntimeConfiguration> {
+    let environment = (
+        std::env::var("PATCHWRIGHT_GITHUB_APP_ID").ok(),
+        std::env::var("PATCHWRIGHT_GITHUB_APP_CLIENT_ID").ok(),
+        std::env::var("PATCHWRIGHT_GITHUB_APP_KEY_REFERENCE").ok(),
+    );
+    if let (Some(app_id), Some(client_id), Some(key_reference)) = environment {
+        return Some(GitHubAppRuntimeConfiguration {
+            app_id: app_id.parse().ok()?,
+            client_id,
+            key_reference,
+            api_base_url: std::env::var("PATCHWRIGHT_GITHUB_API_URL")
+                .unwrap_or_else(|_| default_github_api_url()),
+        });
+    }
+    let home = std::env::var_os("HOME")?;
+    let path = std::path::PathBuf::from(home).join(".patchwright/github-app.json");
+    load_github_app_runtime_configuration(&path)
+}
+
+fn load_github_app_runtime_configuration(
+    path: &std::path::Path,
+) -> Option<GitHubAppRuntimeConfiguration> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.file_type().is_symlink() || metadata.permissions().mode() & 0o077 != 0 {
+            return None;
+        }
+    }
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+fn default_github_api_url() -> String {
+    "https://api.github.com".into()
 }
 
 fn encoded_parameter<T: DeserializeOwned>(
@@ -1639,4 +1677,38 @@ fn rpc_result(id: Value, result: Value) -> Value {
 
 fn rpc_error(id: Value, code: i64, message: &str, detail: Option<String>) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message,"data":detail}})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_github_app_runtime_configuration;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn github_app_file_requires_owner_only_regular_file() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let configuration = directory.path().join("github-app.json");
+        std::fs::write(
+            &configuration,
+            r#"{"appId":123,"clientId":"client","keyReference":"keychain:service/account"}"#,
+        )
+        .expect("write configuration");
+        std::fs::set_permissions(&configuration, std::fs::Permissions::from_mode(0o600))
+            .expect("secure permissions");
+
+        let loaded = load_github_app_runtime_configuration(&configuration)
+            .expect("secure configuration should load");
+        assert_eq!(loaded.app_id, 123);
+        assert_eq!(loaded.api_base_url, "https://api.github.com");
+
+        std::fs::set_permissions(&configuration, std::fs::Permissions::from_mode(0o644))
+            .expect("permissive permissions");
+        assert!(load_github_app_runtime_configuration(&configuration).is_none());
+
+        std::fs::set_permissions(&configuration, std::fs::Permissions::from_mode(0o600))
+            .expect("restore secure permissions");
+        let linked = directory.path().join("linked.json");
+        symlink(&configuration, &linked).expect("create symlink");
+        assert!(load_github_app_runtime_configuration(&linked).is_none());
+    }
 }
