@@ -291,7 +291,6 @@ impl CodexProcess {
                     })?
             };
         let _ = status;
-        self.signal_group(Signal::SIGKILL)?;
         self.group_active = false;
         self.finish_stderr_capture().await;
         self.state = CodexProcessState::Exited;
