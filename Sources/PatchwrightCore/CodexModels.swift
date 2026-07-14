@@ -138,6 +138,44 @@ public struct CodexTurnReceipt: Codable, Equatable, Sendable {
     public var turnID: String { turnId }
 }
 
+public enum CodexApprovalKind: String, Codable, Sendable { case command, fileChange }
+public enum CodexApprovalState: String, Codable, Sendable { case pending, approved, declined, expired, invalidated }
+
+public struct CodexRuntimeApproval: Codable, Equatable, Identifiable, Sendable {
+    public let id: UUID
+    public let taskId: UUID
+    public let `class`: String
+    public let requestId: JSONRequestID
+    public let processGeneration: UUID
+    public let threadId: String
+    public let turnId: String
+    public let itemId: String
+    public let kind: CodexApprovalKind
+    public let reason: String?
+    public let command: String?
+    public let cwd: String?
+    public let grantRoot: String?
+    public let state: CodexApprovalState
+    public let createdAt: Date
+    public let expiresAt: Date
+    public let decidedAt: Date?
+}
+
+public enum JSONRequestID: Codable, Equatable, Sendable {
+    case number(Int64), string(String)
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let value = try? container.decode(Int64.self) { self = .number(value) }
+        else { self = .string(try container.decode(String.self)) }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self { case .number(let value): try container.encode(value); case .string(let value): try container.encode(value) }
+    }
+}
+
 public enum CodexTranscriptItemKind: Equatable, Hashable, Sendable {
     case operatorMessage, agentMessage, reasoning, command, fileChange, status
     case unknown(String)

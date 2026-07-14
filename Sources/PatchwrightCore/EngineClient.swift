@@ -84,6 +84,18 @@ public extension EngineServing {
         )
     }
 
+    func codexApprovals(taskID: UUID) async throws -> [CodexRuntimeApproval] {
+        try await call(method: "codex.approvals", params: ["taskId": taskID.uuidString], as: [CodexRuntimeApproval].self)
+    }
+
+    func resolveCodexApproval(taskID: UUID, approvalID: UUID, processGeneration: UUID, approve: Bool) async throws -> CodexRuntimeApproval {
+        try await call(
+            method: "codex.approval.resolve",
+            params: ["taskId": taskID.uuidString, "approvalId": approvalID.uuidString, "processGeneration": processGeneration.uuidString, "approve": String(approve)],
+            as: CodexRuntimeApproval.self
+        )
+    }
+
     func previewTaskFromGitHub(_ item: GitHubWorkItem) async throws -> ConversionPreview {
         try await call(
             method: "task.previewFromGitHub",

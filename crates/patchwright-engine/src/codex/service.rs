@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use patchwright_core::{TaskId, TaskState};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -57,6 +58,36 @@ pub struct CodexTurnReceipt {
     pub thread_id: String,
     pub turn_id: String,
     pub client_message_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CodexApprovalKind { Command, FileChange }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CodexApprovalState { Pending, Approved, Declined, Expired, Invalidated }
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRuntimeApproval {
+    pub id: Uuid,
+    pub task_id: TaskId,
+    pub class: patchwright_core::ApprovalClass,
+    pub request_id: RequestId,
+    pub process_generation: Uuid,
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub kind: CodexApprovalKind,
+    pub reason: Option<String>,
+    pub command: Option<String>,
+    pub cwd: Option<String>,
+    pub grant_root: Option<String>,
+    pub state: CodexApprovalState,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub decided_at: Option<DateTime<Utc>>,
 }
 
 pub struct CodexService {
@@ -327,6 +358,29 @@ impl CodexService {
         Ok(events)
     }
 
+    pub async fn approvals(&mut self, task_id: TaskId, store: &Mutex<EventStore>) -> Result<Vec<CodexRuntimeApproval>, CodexServiceError> {
+        if let Some(active) = self.active.get_mut(&task_id) { pump_available(active, store).await?; }
+        Ok(lock_store(store)?.codex_runtime_approvals(task_id)?)
+    }
+
+    pub async fn resolve_approval(&mut self, task_id: TaskId, approval_id: Uuid, process_generation: Uuid, approve: bool, store: &Mutex<EventStore>) -> Result<CodexRuntimeApproval, CodexServiceError> {
+        let active = self.active.get_mut(&task_id).ok_or(CodexServiceError::ProcessNotActive)?;
+        let mut approval = lock_store(store)?.codex_runtime_approval(approval_id)?.ok_or(CodexServiceError::ApprovalNotFound)?;
+        if approval.state != CodexApprovalState::Pending { return Ok(approval); }
+        if approval.process_generation != process_generation || active.session.process_generation != process_generation || active.active_turn_id.as_deref() != Some(&approval.turn_id) || Utc::now() >= approval.expires_at {
+            approval.state = if Utc::now() >= approval.expires_at { CodexApprovalState::Expired } else { CodexApprovalState::Invalidated };
+            lock_store(store)?.save_codex_runtime_approval(&approval)?;
+            return Err(CodexServiceError::ApprovalInvalid);
+        }
+        let response = json!({"jsonrpc":"2.0", "id":approval.request_id, "result":{"decision": if approve {"accept"} else {"decline"}}});
+        active.process.write_line(&serde_json::to_string(&response)?).await?;
+        approval.state = if approve { CodexApprovalState::Approved } else { CodexApprovalState::Declined };
+        approval.decided_at = Some(Utc::now());
+        lock_store(store)?.save_codex_runtime_approval(&approval)?;
+        append_event(store, &mut active.session, CodexEventDraft { kind:"approvalResolved".into(), summary: if approve {"Codex runtime request approved once".into()} else {"Codex runtime request declined".into()}, thread_id:Some(approval.thread_id.clone()), turn_id:Some(approval.turn_id.clone()), item_id:Some(approval.item_id.clone()), content:None })?;
+        Ok(approval)
+    }
+
     pub async fn stop(&mut self, task_id: TaskId) -> Result<(), CodexServiceError> {
         if let Some(mut active) = self.active.remove(&task_id) {
             active.process.terminate().await?;
@@ -373,6 +427,10 @@ pub enum CodexServiceError {
     TurnMismatch,
     #[error("Codex rejected the request")]
     RequestRejected,
+    #[error("Codex runtime approval was not found")]
+    ApprovalNotFound,
+    #[error("Codex runtime approval is expired or no longer bound to the active turn")]
+    ApprovalInvalid,
 }
 
 async fn request(
@@ -438,7 +496,21 @@ fn persist_incoming(
             active.active_turn_id = None;
         }
     }
+    if let IncomingMessage::ServerRequest(request) = message {
+        if let Some(approval) = normalize_approval(active, request)? {
+            lock_store(store)?.save_codex_runtime_approval(&approval)?;
+        }
+    }
     Ok(())
+}
+
+fn normalize_approval(active: &ActiveCodex, request: &super::protocol::ServerRequestEnvelope) -> Result<Option<CodexRuntimeApproval>, CodexServiceError> {
+    use super::protocol::ServerRequestKind;
+    let kind = match request.kind { ServerRequestKind::CommandApproval => CodexApprovalKind::Command, ServerRequestKind::FileChangeApproval => CodexApprovalKind::FileChange, _ => return Ok(None) };
+    let p = &request.params;
+    let required = |name| p.get(name).and_then(Value::as_str).map(str::to_owned).ok_or(CodexServiceError::MissingResponseField("approval identity"));
+    let now = Utc::now();
+    Ok(Some(CodexRuntimeApproval { id:Uuid::new_v4(), task_id:active.session.task_id, class:patchwright_core::ApprovalClass::CodexRuntime, request_id:request.id.clone(), process_generation:active.session.process_generation, thread_id:required("threadId")?, turn_id:required("turnId")?, item_id:required("itemId")?, kind, reason:string_field(p,"reason").map(bounded_content), command:string_field(p,"command").map(bounded_content), cwd:string_field(p,"cwd").map(bounded_content), grant_root:string_field(p,"grantRoot").map(bounded_content), state:CodexApprovalState::Pending, created_at:now, expires_at:now + ChronoDuration::minutes(10), decided_at:None }))
 }
 
 fn normalize_event(raw: &Value) -> Option<CodexEventDraft> {
