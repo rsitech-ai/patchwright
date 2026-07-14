@@ -154,6 +154,18 @@ impl PrivateKeyProvider for KeychainKeyProvider {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConfiguredKeyProvider;
+
+impl PrivateKeyProvider for ConfiguredKeyProvider {
+    fn load(&self, reference: &KeyReference) -> Result<SecretBytes, GitHubAppError> {
+        match reference {
+            KeyReference::ProtectedFile { .. } => ProtectedFileKeyProvider.load(reference),
+            KeyReference::Keychain { .. } => KeychainKeyProvider.load(reference),
+        }
+    }
+}
+
 pub fn import_private_key_to_keychain(
     service: &str,
     account: &str,

@@ -547,6 +547,16 @@ impl EventStore {
             .context("load delivery result")
     }
 
+    pub fn delivery_claimed(&self, key: &str) -> Result<bool> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM deliveries WHERE key = ?1)",
+                [key],
+                |row| row.get(0),
+            )
+            .context("load delivery claim")
+    }
+
     pub fn create_job(&self, job: &Job) -> Result<()> {
         let checkpoint_payload = job
             .checkpoint
