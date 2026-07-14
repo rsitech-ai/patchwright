@@ -1,0 +1,8 @@
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"Patchwright","title":"Patchwright","version":"0.1.0"},"capabilities":null}}
+{"jsonrpc":"2.0","method":"initialized"}
+{"jsonrpc":"2.0","id":2,"method":"account/read","params":{"refreshToken":false}}
+{"jsonrpc":"2.0","id":3,"method":"thread/start","params":{"cwd":"/tmp/patchwright-worktree","baseInstructions":"Implement the typed Patchwright task contract.","approvalPolicy":"on-request","sandbox":"workspace-write"}}
+{"jsonrpc":"2.0","id":4,"method":"thread/resume","params":{"threadId":"019f0000-0000-7000-8000-000000000001","cwd":"/tmp/patchwright-worktree"}}
+{"jsonrpc":"2.0","id":5,"method":"turn/start","params":{"threadId":"019f0000-0000-7000-8000-000000000001","clientUserMessageId":"patchwright-message-1","input":[{"type":"text","text":"Implement the approved task slice.","text_elements":[]}]}}
+{"jsonrpc":"2.0","id":6,"method":"turn/steer","params":{"threadId":"019f0000-0000-7000-8000-000000000001","expectedTurnId":"019f0000-0000-7000-8000-000000000002","clientUserMessageId":"patchwright-message-2","input":[{"type":"text","text":"Also preserve the existing regression test.","text_elements":[]}]}}
+{"jsonrpc":"2.0","id":7,"method":"turn/interrupt","params":{"threadId":"019f0000-0000-7000-8000-000000000001","turnId":"019f0000-0000-7000-8000-000000000002"}}
