@@ -1,6 +1,8 @@
 use crate::{
     CancellationState, GitHubAccount, GitHubRepository, GitHubRepositorySnapshot, Job,
-    JobCheckpoint, JobId, JobState, TaskCheckpoint, jobs::validate_summary,
+    JobCheckpoint, JobId, JobState, TaskCheckpoint,
+    codex::session::{CodexEventRecord, CodexSessionRecord, CodexSessionStatus},
+    jobs::validate_summary,
 };
 use anyhow::{Context, Result, bail};
 use patchwright_core::{
@@ -109,6 +111,159 @@ impl EventStore {
         let rows = statement.query_map([task_id.to_string()], |row| row.get::<_, String>(0))?;
         rows.map(|row| decode_json_row(row, "task checkpoint"))
             .collect::<Result<Vec<_>>>()
+    }
+
+    pub fn checkpoint_codex_session(
+        &self,
+        session: &mut CodexSessionRecord,
+        kind: &str,
+        summary: &str,
+    ) -> Result<()> {
+        let kind = validate_codex_event_kind(kind)?;
+        let summary = validate_summary(summary.to_owned())?;
+        let transaction = self.connection.unchecked_transaction()?;
+        let next_sequence: u64 = transaction.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM codex_events WHERE task_id = ?1",
+            [session.task_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let occurred_at = chrono::Utc::now();
+        let mut next_session = session.clone();
+        next_session.last_sequence = next_sequence;
+        next_session.updated_at = occurred_at;
+        let event = CodexEventRecord {
+            task_id: session.task_id,
+            process_generation: session.process_generation,
+            sequence: next_sequence,
+            kind: kind.clone(),
+            summary: summary.clone(),
+            occurred_at,
+        };
+        upsert_codex_session(&transaction, &next_session)?;
+        transaction.execute(
+            "INSERT INTO codex_events(
+                 task_id, sequence, process_generation, kind, summary, payload, occurred_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                event.task_id.to_string(),
+                event.sequence,
+                event.process_generation.to_string(),
+                event.kind,
+                event.summary,
+                serde_json::to_string(&event)?,
+                event.occurred_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        *session = next_session;
+        Ok(())
+    }
+
+    pub fn codex_session(&self, task_id: TaskId) -> Result<Option<CodexSessionRecord>> {
+        self.load_json_optional(
+            "SELECT payload FROM codex_sessions WHERE task_id = ?1",
+            &task_id.to_string(),
+            "Codex session",
+        )
+    }
+
+    pub fn codex_events(&self, task_id: TaskId, after: u64) -> Result<Vec<CodexEventRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT payload FROM codex_events
+             WHERE task_id = ?1 AND sequence > ?2 ORDER BY sequence",
+        )?;
+        let rows = statement.query_map(params![task_id.to_string(), after], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.map(|row| decode_json_row(row, "Codex event"))
+            .collect::<Result<Vec<_>>>()
+    }
+
+    pub fn enter_implementing_with_codex(
+        &self,
+        task: &Task,
+        checkpoint: &TaskCheckpoint,
+        session: &CodexSessionRecord,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            task.id == checkpoint.task_id,
+            "checkpoint task does not match"
+        );
+        anyhow::ensure!(
+            task.state == checkpoint.state,
+            "checkpoint state does not match"
+        );
+        anyhow::ensure!(
+            task.state == patchwright_core::TaskState::Implementing,
+            "task is not entering implementing"
+        );
+        anyhow::ensure!(
+            session.task_id == task.id,
+            "Codex session task does not match"
+        );
+        anyhow::ensure!(
+            session.status == CodexSessionStatus::Ready && session.thread_id.is_some(),
+            "Codex session is not ready"
+        );
+        validate_summary(checkpoint.summary.clone())?;
+        let transaction = self.connection.unchecked_transaction()?;
+        let persisted_task: String = transaction.query_row(
+            "SELECT payload FROM tasks WHERE id = ?1",
+            [task.id.to_string()],
+            |row| row.get(0),
+        )?;
+        let persisted_task: Task = serde_json::from_str(&persisted_task)?;
+        anyhow::ensure!(
+            persisted_task.state == patchwright_core::TaskState::Preparing,
+            "persisted task is not prepared"
+        );
+        let persisted_session: String = transaction.query_row(
+            "SELECT payload FROM codex_sessions WHERE task_id = ?1",
+            [task.id.to_string()],
+            |row| row.get(0),
+        )?;
+        let persisted_session: CodexSessionRecord = serde_json::from_str(&persisted_session)?;
+        anyhow::ensure!(
+            persisted_session.process_generation == session.process_generation
+                && persisted_session.status == CodexSessionStatus::Ready
+                && persisted_session.thread_id == session.thread_id,
+            "persisted Codex session does not match the ready generation"
+        );
+
+        let task_payload = serde_json::to_string(task)?;
+        let checkpoint_payload = serde_json::to_string(checkpoint)?;
+        transaction.execute(
+            "UPDATE tasks SET payload = ?2, updated_at = ?3 WHERE id = ?1",
+            params![
+                task.id.to_string(),
+                task_payload,
+                task.updated_at.to_rfc3339()
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO task_events(task_id, summary, payload, occurred_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                task.id.to_string(),
+                checkpoint.summary,
+                task_payload,
+                task.updated_at.to_rfc3339()
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO task_checkpoints(id, task_id, state, summary, payload, occurred_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                checkpoint.id.to_string(),
+                checkpoint.task_id.to_string(),
+                enum_name(checkpoint.state),
+                checkpoint.summary,
+                checkpoint_payload,
+                checkpoint.occurred_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn save_repository_binding(&self, binding: &RepositoryBinding) -> Result<()> {
@@ -718,6 +873,46 @@ fn parse_persisted_timestamp(value: &str) -> Result<chrono::DateTime<chrono::Utc
         .context("decode persisted timestamp")
 }
 
+fn validate_codex_event_kind(value: &str) -> Result<String> {
+    let value = value.trim();
+    anyhow::ensure!(
+        !value.is_empty() && value.len() <= 64 && !value.chars().any(char::is_control),
+        "invalid Codex event kind"
+    );
+    Ok(value.to_owned())
+}
+
+fn upsert_codex_session(
+    transaction: &rusqlite::Transaction<'_>,
+    session: &CodexSessionRecord,
+) -> Result<()> {
+    transaction.execute(
+        "INSERT INTO codex_sessions(
+             task_id, process_generation, status, thread_id, last_turn_id,
+             last_sequence, payload, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(task_id) DO UPDATE SET
+             process_generation=excluded.process_generation,
+             status=excluded.status,
+             thread_id=excluded.thread_id,
+             last_turn_id=excluded.last_turn_id,
+             last_sequence=excluded.last_sequence,
+             payload=excluded.payload,
+             updated_at=excluded.updated_at",
+        params![
+            session.task_id.to_string(),
+            session.process_generation.to_string(),
+            enum_name(session.status),
+            session.thread_id,
+            session.last_turn_id,
+            session.last_sequence,
+            serde_json::to_string(session)?,
+            session.updated_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
 fn apply_migrations(connection: &mut Connection) -> Result<()> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute_batch(
@@ -849,5 +1044,32 @@ const MIGRATIONS: &[(u32, &str)] = &[
              created_at TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS task_sources_task_id ON task_sources(task_id);",
+    ),
+    (
+        4,
+        "CREATE TABLE IF NOT EXISTS codex_sessions (
+             task_id TEXT PRIMARY KEY,
+             process_generation TEXT NOT NULL,
+             status TEXT NOT NULL,
+             thread_id TEXT,
+             last_turn_id TEXT,
+             last_sequence INTEGER NOT NULL,
+             payload TEXT NOT NULL,
+             updated_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS codex_sessions_status
+             ON codex_sessions(status, updated_at);
+         CREATE TABLE IF NOT EXISTS codex_events (
+             task_id TEXT NOT NULL,
+             sequence INTEGER NOT NULL,
+             process_generation TEXT NOT NULL,
+             kind TEXT NOT NULL,
+             summary TEXT NOT NULL,
+             payload TEXT NOT NULL,
+             occurred_at TEXT NOT NULL,
+             PRIMARY KEY(task_id, sequence)
+         );
+         CREATE INDEX IF NOT EXISTS codex_events_generation
+             ON codex_events(task_id, process_generation, sequence);",
     ),
 ];
