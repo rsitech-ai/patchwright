@@ -30,6 +30,18 @@ async fn capture_request(
         .push((method.clone(), format!("/{path}"), body.clone()));
     let response = if method == Method::GET && path.ends_with("/pulls/4") {
         json!({"id":91,"node_id":"PR_node","number":4,"html_url":"https://example.invalid/pull/4","draft":true,"head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}})
+    } else if path == "graphql"
+        && body["query"]
+            .as_str()
+            .is_some_and(|query| query.contains("ReviewThreadIdentity"))
+    {
+        json!({"data":{"node":{"id":"PRRT_kwDOExample","isResolved":false,"viewerCanResolve":true,"pullRequest":{"number":4,"headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","repository":{"nameWithOwner":"octo/fixture"}}}}})
+    } else if path == "graphql"
+        && body["query"]
+            .as_str()
+            .is_some_and(|query| query.contains("ResolveReviewThread"))
+    {
+        json!({"data":{"resolveReviewThread":{"thread":{"id":"PRRT_kwDOExample","isResolved":true}}}})
     } else if path == "graphql" {
         json!({"data":{"markPullRequestReadyForReview":{"pullRequest":{"databaseId":91,"number":4,"url":"https://example.invalid/pull/4","isDraft":false}}}})
     } else if path.ends_with("/merge") {
@@ -40,6 +52,30 @@ async fn capture_request(
         json!({"id":91,"html_url":"https://example.invalid/result/91"})
     };
     (StatusCode::CREATED, Json(response))
+}
+
+#[tokio::test]
+async fn resolves_only_the_exact_owned_review_thread_at_the_captured_head() {
+    let (client, capture) = client().await;
+    let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    let result = client
+        .execute(
+            "octo",
+            "fixture",
+            &GitHubAction::resolve_review_thread(4, "PRRT_kwDOExample", sha).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.resolved, Some(true));
+    let requests = capture.0.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].1, "/repos/octo/fixture/pulls/4");
+    assert_eq!(requests[1].1, "/graphql");
+    assert_eq!(requests[1].2["variables"]["threadId"], "PRRT_kwDOExample");
+    assert_eq!(requests[2].1, "/graphql");
+    assert_eq!(requests[2].2["variables"]["threadId"], "PRRT_kwDOExample");
 }
 
 async fn client() -> (GitHubMutationClient, Capture) {

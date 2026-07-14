@@ -16,6 +16,7 @@ public struct GitHubActionPayload: Codable, Equatable, Sendable {
     public let issueNumber: UInt64?
     public let body: String?
     public let pullRequestNumber: UInt64?
+    public let threadId: String?
     public let expectedHeadSha: String?
     public let method: String?
     public let branch: String?
@@ -35,6 +36,7 @@ public struct GitHubActionPayload: Codable, Equatable, Sendable {
         issueNumber: UInt64? = nil,
         body: String? = nil,
         pullRequestNumber: UInt64? = nil,
+        threadId: String? = nil,
         expectedHeadSha: String? = nil,
         method: String? = nil,
         branch: String? = nil,
@@ -53,6 +55,7 @@ public struct GitHubActionPayload: Codable, Equatable, Sendable {
         self.issueNumber = issueNumber
         self.body = body
         self.pullRequestNumber = pullRequestNumber
+        self.threadId = threadId
         self.expectedHeadSha = expectedHeadSha
         self.method = method
         self.branch = branch
@@ -172,6 +175,8 @@ public struct GitHubMutationResult: Codable, Equatable, Sendable {
     public let htmlUrl: String?
     public let sha: String?
     public let merged: Bool?
+    public let nodeId: String?
+    public let resolved: Bool?
 }
 
 public struct DeliveryExecution: Codable, Equatable, Sendable {

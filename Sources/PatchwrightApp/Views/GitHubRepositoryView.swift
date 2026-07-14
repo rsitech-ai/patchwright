@@ -205,6 +205,14 @@ struct GitHubRepositoryView: View {
                         HStack {
                             Text(entry.author).bold()
                             Text(entry.state ?? entry.kind).font(.caption).foregroundStyle(.secondary)
+                            if entry.kind == "reviewThread" {
+                                Label(
+                                    entry.threadResolved == true ? "Resolved" : "Unresolved",
+                                    systemImage: entry.threadResolved == true ? "checkmark.circle.fill" : "circle.dashed"
+                                )
+                                .font(.caption)
+                                .foregroundStyle(entry.threadResolved == true ? .green : .orange)
+                            }
                             Spacer()
                         }
                         MarkdownBodyView(source: entry.body ?? "No written comment")

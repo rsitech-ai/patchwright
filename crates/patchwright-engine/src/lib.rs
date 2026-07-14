@@ -18,7 +18,7 @@ pub use conversion::{
 };
 pub use delivery::{
     DeliveryError, DeliveryPreview, approve_delivery, authorize_execution,
-    complete_successful_delivery, preview_delivery,
+    complete_successful_delivery, preview_delivery, reconcile_completed_task_from_snapshot,
 };
 pub use github::{
     GhCliCredentialBroker, GitHubAccount, GitHubCheckRun, GitHubDiscussion, GitHubPermission,

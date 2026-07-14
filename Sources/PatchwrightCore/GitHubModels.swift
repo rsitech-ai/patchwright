@@ -47,6 +47,7 @@ public struct GitHubWorkItem: Codable, Identifiable, Equatable, Sendable {
     public let kind: GitHubWorkItemKind
     public let title: String
     public let state: String
+    public let stateReason: String?
     public let body: String?
     public let author: String
     public let htmlUrl: String
@@ -56,6 +57,8 @@ public struct GitHubWorkItem: Codable, Identifiable, Equatable, Sendable {
     public let baseSha: String?
     public let headRef: String?
     public let headSha: String?
+    public let merged: Bool?
+    public let mergeCommitSha: String?
     public let createdAt: Date?
     public let headCommittedAt: Date?
     public let latestReviewAt: Date?
@@ -77,6 +80,7 @@ public struct GitHubWorkItem: Codable, Identifiable, Equatable, Sendable {
     public let milestone: String?
     public var baseSHA: String? { baseSha }
     public var headSHA: String? { headSha }
+    public var mergeCommitSHA: String? { mergeCommitSha }
     public var htmlURL: String { htmlUrl }
 }
 
@@ -91,7 +95,12 @@ public struct GitHubDiscussion: Codable, Identifiable, Equatable, Sendable {
     public let line: UInt64?
     public let htmlUrl: String
     public let updatedAt: String?
+    public let threadNodeId: String?
+    public let threadResolved: Bool?
+    public let threadOutdated: Bool?
+    public let viewerCanResolve: Bool?
     public var htmlURL: String { htmlUrl }
+    public var threadNodeID: String? { threadNodeId }
 }
 
 public struct GitHubCheckRun: Codable, Identifiable, Equatable, Sendable {

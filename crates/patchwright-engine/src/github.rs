@@ -20,6 +20,10 @@ impl GitHubToken {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
+
+    pub(crate) fn expose_for_authorization_header(&self) -> &str {
+        &self.0
+    }
 }
 
 impl fmt::Debug for GitHubToken {
@@ -170,6 +174,8 @@ pub struct GitHubWorkItem {
     pub kind: WorkItemKind,
     pub title: String,
     pub state: String,
+    #[serde(default)]
+    pub state_reason: Option<String>,
     pub body: Option<String>,
     pub author: String,
     pub html_url: String,
@@ -182,6 +188,10 @@ pub struct GitHubWorkItem {
     #[serde(default)]
     pub head_ref: Option<String>,
     pub head_sha: Option<String>,
+    #[serde(default)]
+    pub merged: Option<bool>,
+    #[serde(default)]
+    pub merge_commit_sha: Option<String>,
     #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
@@ -234,6 +244,14 @@ pub struct GitHubDiscussion {
     pub line: Option<u64>,
     pub html_url: String,
     pub updated_at: Option<String>,
+    #[serde(default)]
+    pub thread_node_id: Option<String>,
+    #[serde(default)]
+    pub thread_resolved: Option<bool>,
+    #[serde(default)]
+    pub thread_outdated: Option<bool>,
+    #[serde(default)]
+    pub viewer_can_resolve: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -435,7 +453,7 @@ impl GitHubSource {
         let source = Arc::new(self.clone());
         let concurrency = Arc::new(tokio::sync::Semaphore::new(8));
         let mut jobs = tokio::task::JoinSet::new();
-        for pull in pull_rows {
+        for pull in &pull_rows {
             let source = Arc::clone(&source);
             let concurrency = Arc::clone(&concurrency);
             let base = base.to_owned();
@@ -510,7 +528,150 @@ impl GitHubSource {
             );
         }
 
+        discussions.extend(self.review_threads(base, pull_rows, resource_limit).await?);
+
         Ok(discussions)
+    }
+
+    async fn review_threads(
+        &self,
+        base: &str,
+        pull_rows: &[WirePull],
+        resource_limit: usize,
+    ) -> Result<Vec<GitHubDiscussion>> {
+        let repository = base
+            .strip_prefix("/repos/")
+            .context("review thread repository path is invalid")?;
+        let (owner, name) = repository
+            .split_once('/')
+            .context("review thread repository identity is invalid")?;
+        let source = Arc::new(self.clone());
+        let concurrency = Arc::new(tokio::sync::Semaphore::new(8));
+        let mut jobs = tokio::task::JoinSet::new();
+        for pull in pull_rows.iter().filter(|pull| pull.item.state == "open") {
+            let source = Arc::clone(&source);
+            let concurrency = Arc::clone(&concurrency);
+            let owner = owner.to_owned();
+            let name = name.to_owned();
+            let number = pull.item.number;
+            jobs.spawn(async move {
+                let _permit = concurrency.acquire_owned().await?;
+                source
+                    .review_threads_for_pull(&owner, &name, number, resource_limit)
+                    .await
+            });
+        }
+        let mut threads = Vec::new();
+        while let Some(result) = jobs.join_next().await {
+            threads.extend(result.context("join GitHub review thread fetch")??);
+        }
+        Ok(threads)
+    }
+
+    async fn review_threads_for_pull(
+        &self,
+        owner: &str,
+        name: &str,
+        number: u64,
+        resource_limit: usize,
+    ) -> Result<Vec<GitHubDiscussion>> {
+        let mut after: Option<String> = None;
+        let mut result = Vec::new();
+        loop {
+            let response = self
+                .graphql(&serde_json::json!({
+                    "query":"query PatchwrightReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100, after: $after) { nodes { id isResolved isOutdated viewerCanResolve path line comments(first: 1) { nodes { databaseId body author { login } url updatedAt } } } pageInfo { hasNextPage endCursor } } } } }",
+                    "variables":{"owner":owner,"name":name,"number":number,"after":after}
+                }))
+                .await?;
+            if response.get("errors").is_some() {
+                bail!("GitHub GraphQL review thread query failed");
+            }
+            let connection = response
+                .pointer("/data/repository/pullRequest/reviewThreads")
+                .context("GitHub review thread response was incomplete")?;
+            let nodes = connection
+                .get("nodes")
+                .and_then(serde_json::Value::as_array)
+                .context("GitHub review thread nodes were missing")?;
+            for node in nodes {
+                let Some(comment) = node.pointer("/comments/nodes/0") else {
+                    continue;
+                };
+                let Some(id) = comment
+                    .get("databaseId")
+                    .and_then(serde_json::Value::as_u64)
+                else {
+                    continue;
+                };
+                result.push(GitHubDiscussion {
+                    id,
+                    item_number: number,
+                    kind: "reviewThread".into(),
+                    author: comment
+                        .pointer("/author/login")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("ghost")
+                        .to_owned(),
+                    body: comment
+                        .get("body")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned),
+                    state:
+                        Some(
+                            if node.get("isResolved").and_then(serde_json::Value::as_bool)
+                                == Some(true)
+                            {
+                                "resolved"
+                            } else {
+                                "unresolved"
+                            }
+                            .into(),
+                        ),
+                    path: node
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned),
+                    line: node.get("line").and_then(serde_json::Value::as_u64),
+                    html_url: comment
+                        .get("url")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    updated_at: comment
+                        .get("updatedAt")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned),
+                    thread_node_id: node
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned),
+                    thread_resolved: node.get("isResolved").and_then(serde_json::Value::as_bool),
+                    thread_outdated: node.get("isOutdated").and_then(serde_json::Value::as_bool),
+                    viewer_can_resolve: node
+                        .get("viewerCanResolve")
+                        .and_then(serde_json::Value::as_bool),
+                });
+                if result.len() >= resource_limit {
+                    return Ok(result);
+                }
+            }
+            if connection
+                .pointer("/pageInfo/hasNextPage")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+            {
+                break;
+            }
+            after = connection
+                .pointer("/pageInfo/endCursor")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned);
+            if after.is_none() {
+                bail!("GitHub review thread pagination cursor was missing");
+            }
+        }
+        Ok(result)
     }
 
     async fn checks(
@@ -566,6 +727,31 @@ impl GitHubSource {
             bail!("GitHub API returned {status}");
         }
         response.json().await.context("decode GitHub response")
+    }
+
+    async fn graphql(&self, body: &serde_json::Value) -> Result<serde_json::Value> {
+        let url = self
+            .base_url
+            .join("/graphql")
+            .context("build GraphQL URL")?;
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(&self.token.0)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", API_VERSION)
+            .json(body)
+            .send()
+            .await
+            .context("GitHub GraphQL request failed")?;
+        let status = response.status();
+        if !status.is_success() {
+            bail!("GitHub GraphQL returned {status}");
+        }
+        response
+            .json()
+            .await
+            .context("decode GitHub GraphQL response")
     }
 
     async fn paginated<T: DeserializeOwned>(
@@ -795,6 +981,8 @@ struct WireItem {
     number: u64,
     title: String,
     state: String,
+    #[serde(default)]
+    state_reason: Option<String>,
     body: Option<String>,
     user: User,
     html_url: String,
@@ -823,6 +1011,7 @@ impl WireItem {
             kind,
             title: self.title,
             state: self.state,
+            state_reason: self.state_reason,
             body: self.body,
             author: self.user.login,
             html_url: self.html_url,
@@ -832,6 +1021,8 @@ impl WireItem {
             base_sha: None,
             head_ref: None,
             head_sha: None,
+            merged: None,
+            merge_commit_sha: None,
             created_at: self.created_at,
             head_committed_at: None,
             latest_review_at: None,
@@ -881,6 +1072,10 @@ struct WirePull {
     #[serde(default)]
     rebaseable: Option<bool>,
     #[serde(default)]
+    merged: Option<bool>,
+    #[serde(default)]
+    merge_commit_sha: Option<String>,
+    #[serde(default)]
     additions: u64,
     #[serde(default)]
     deletions: u64,
@@ -920,6 +1115,7 @@ impl EnrichedPull {
             kind: WorkItemKind::PullRequest,
             title: self.pull.item.title,
             state: self.pull.item.state,
+            state_reason: self.pull.item.state_reason,
             body: self.pull.item.body,
             author: self.pull.item.user.login,
             html_url: self.pull.item.html_url,
@@ -929,6 +1125,8 @@ impl EnrichedPull {
             base_sha: Some(self.pull.base.sha),
             head_ref: Some(self.pull.head.ref_name),
             head_sha: Some(self.pull.head.sha),
+            merged: self.pull.merged,
+            merge_commit_sha: self.pull.merge_commit_sha,
             created_at: self.pull.item.created_at,
             head_committed_at: self.head_committed_at,
             latest_review_at,
@@ -1003,6 +1201,10 @@ impl WireComment {
             line: None,
             html_url: self.html_url,
             updated_at: self.updated_at,
+            thread_node_id: None,
+            thread_resolved: None,
+            thread_outdated: None,
+            viewer_can_resolve: None,
         })
     }
 }
@@ -1030,6 +1232,10 @@ impl WireReviewComment {
             line: self.line,
             html_url: self.html_url,
             updated_at: self.updated_at,
+            thread_node_id: None,
+            thread_resolved: None,
+            thread_outdated: None,
+            viewer_can_resolve: None,
         })
     }
 }
@@ -1055,6 +1261,10 @@ impl WireReview {
             line: None,
             html_url: self.html_url,
             updated_at: self.submitted_at,
+            thread_node_id: None,
+            thread_resolved: None,
+            thread_outdated: None,
+            viewer_can_resolve: None,
         }
     }
 }
