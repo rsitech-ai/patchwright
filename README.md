@@ -50,7 +50,7 @@ PATCHWRIGHT_GITHUB_WEBHOOK_SECRET='runtime-secret' \
 cargo run -p patchwright-relay -- --address 127.0.0.1:8787
 ```
 
-The relay binds to loopback by default. Production HTTPS termination, GitHub App installation, private keys, and installation-token brokering are operator configuration and are never committed.
+The relay binds to loopback by default. GitHub App metadata and a Keychain or owner-only protected-key reference are operator configuration and are never committed. The engine brokers repository-scoped, short-lived installation tokens for installed-repository ingestion and every approved mutation.
 
 ## Direct macOS distribution
 
@@ -58,6 +58,6 @@ The relay binds to loopback by default. Production HTTPS termination, GitHub App
 
 ## Safety
 
-Merge is disabled in code. GitHub writes, network access, dependency installation, and workflow changes require action-specific approval. Set `PATCHWRIGHT_AUTOMATION_DISABLED=1` to fail closed for every mutating capability while retaining read-only inspection.
+Merge is disabled by default and can execute only for a typed pull-request task after an exact action preview, a separate merge-class approval, a fresh exact-head-SHA precondition, and a single-use execution claim. GitHub writes, network access, dependency installation, and workflow changes require action-specific approval. Set `PATCHWRIGHT_AUTOMATION_DISABLED=1` to fail closed for every mutating capability while retaining read-only inspection.
 
 See [the product design](docs/superpowers/specs/2026-07-13-patchwright-stages-1-3-design.md), [production plan](docs/production-plan.md), and [security operations](docs/security.md).

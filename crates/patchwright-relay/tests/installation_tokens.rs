@@ -86,6 +86,18 @@ fn authenticator(root: &std::path::Path) -> AppAuthenticator<ProtectedFileKeyPro
     .unwrap()
 }
 
+#[test]
+fn ingestion_token_requests_only_repository_read_permissions() {
+    let permissions = InstallationPermissions::ingestion();
+    assert_eq!(permissions.as_map()["metadata"], "read");
+    assert_eq!(permissions.as_map()["actions"], "read");
+    assert_eq!(permissions.as_map()["checks"], "read");
+    assert_eq!(permissions.as_map()["contents"], "read");
+    assert_eq!(permissions.as_map()["issues"], "read");
+    assert_eq!(permissions.as_map()["pull_requests"], "read");
+    assert!(permissions.as_map().values().all(|value| value == "read"));
+}
+
 #[tokio::test]
 async fn discovers_installation_mints_scoped_token_and_collapses_cache() {
     let root = tempdir().unwrap();

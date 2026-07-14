@@ -25,28 +25,38 @@ pub enum MergeMethod {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum GitHubAction {
     CreateBranch {
         branch: String,
+        #[serde(alias = "from_sha")]
         from_sha: String,
     },
     PushIntent {
         branch: String,
+        #[serde(alias = "head_sha")]
         head_sha: String,
     },
     Comment {
+        #[serde(alias = "issue_number")]
         issue_number: u64,
         body: String,
     },
     Review {
+        #[serde(alias = "pull_request_number")]
         pull_request_number: u64,
         event: ReviewEvent,
         body: String,
+        #[serde(alias = "inline_comments")]
         inline_comments: Vec<InlineReviewComment>,
     },
     CheckRun {
         name: String,
+        #[serde(alias = "head_sha")]
         head_sha: String,
         status: String,
         conclusion: Option<String>,
@@ -58,18 +68,25 @@ pub enum GitHubAction {
         body: String,
     },
     UpdatePullRequestBranch {
+        #[serde(alias = "pull_request_number")]
         pull_request_number: u64,
+        #[serde(alias = "expected_head_sha")]
         expected_head_sha: String,
     },
     ClosePullRequest {
+        #[serde(alias = "pull_request_number")]
         pull_request_number: u64,
     },
     EnqueuePullRequest {
+        #[serde(alias = "pull_request_number")]
         pull_request_number: u64,
+        #[serde(alias = "expected_head_sha")]
         expected_head_sha: String,
     },
     MergePullRequest {
+        #[serde(alias = "pull_request_number")]
         pull_request_number: u64,
+        #[serde(alias = "expected_head_sha")]
         expected_head_sha: String,
         method: MergeMethod,
     },

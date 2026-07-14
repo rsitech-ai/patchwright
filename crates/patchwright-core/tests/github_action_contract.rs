@@ -1,6 +1,7 @@
 use patchwright_core::{
     GitHubAction, GitHubActionPreview, MergeMethod, RemoteIdentity, RemotePrecondition, ReviewEvent,
 };
+use serde_json::json;
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -53,4 +54,25 @@ fn action_contract_rejects_ambiguous_or_unsafe_boundaries() {
     assert!(RemoteIdentity::new(1, 0, "octo/fixture").is_err());
     assert!(RemoteIdentity::new(1, 7, "not-a-repository").is_err());
     assert!(RemotePrecondition::new(Some("short"), Some(SHA_B), 1).is_err());
+}
+
+#[test]
+fn action_json_uses_swift_facing_camel_case_and_accepts_legacy_snake_case() {
+    let action = GitHubAction::create_branch("feat/fix", SHA_A).unwrap();
+    assert_eq!(
+        serde_json::to_value(&action).unwrap(),
+        json!({"kind":"createBranch","branch":"feat/fix","fromSha":SHA_A})
+    );
+
+    let legacy: GitHubAction = serde_json::from_value(json!({
+        "kind": "mergePullRequest",
+        "pull_request_number": 12,
+        "expected_head_sha": SHA_B,
+        "method": "squash"
+    }))
+    .unwrap();
+    assert_eq!(
+        legacy,
+        GitHubAction::merge_pull_request(12, SHA_B, MergeMethod::Squash).unwrap()
+    );
 }
