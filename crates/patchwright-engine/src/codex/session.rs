@@ -294,13 +294,17 @@ async fn send_request(
     process
         .write_line(&serde_json::to_string(&request)?)
         .await?;
-    let line = process.read_initialization_line().await?;
-    match decoder.decode_line(line.as_bytes())? {
-        IncomingMessage::Response(response) => Ok(response),
-        IncomingMessage::ServerRequest(_) | IncomingMessage::Event(_) => {
-            Err(CodexSessionError::UnexpectedHandshakeMessage)
+    for _ in 0..128 {
+        let line = process.read_initialization_line().await?;
+        match decoder.decode_line(line.as_bytes())? {
+            IncomingMessage::Response(response) => return Ok(response),
+            IncomingMessage::Event(_) => {}
+            IncomingMessage::ServerRequest(_) => {
+                return Err(CodexSessionError::UnexpectedHandshakeMessage);
+            }
         }
     }
+    Err(CodexSessionError::UnexpectedHandshakeMessage)
 }
 
 fn validate_initialize_response(response: &ResponseEnvelope) -> Result<(), CodexSessionError> {

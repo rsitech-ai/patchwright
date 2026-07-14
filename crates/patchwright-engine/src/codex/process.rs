@@ -296,6 +296,10 @@ impl CodexProcess {
                     })?
             };
         let _ = status;
+        // The app-server leader may exit on TERM while descendants in the same recorded
+        // process group ignore it and keep inherited pipes open. Always sweep the owned
+        // group before awaiting pipe-capture shutdown; ESRCH is already treated as success.
+        self.sweep_group_after_leader_exit()?;
         self.group_active = false;
         self.finish_stderr_capture().await;
         self.state = CodexProcessState::Exited;
@@ -341,6 +345,17 @@ impl CodexProcess {
             Err(source) => Err(CodexProcessError::Signal {
                 process_group_id: self.process_group_id,
                 signal,
+                source,
+            }),
+        }
+    }
+
+    fn sweep_group_after_leader_exit(&self) -> Result<(), CodexProcessError> {
+        match killpg(Pid::from_raw(self.process_group_id), Signal::SIGKILL) {
+            Ok(()) | Err(Errno::ESRCH | Errno::EPERM) => Ok(()),
+            Err(source) => Err(CodexProcessError::Signal {
+                process_group_id: self.process_group_id,
+                signal: Signal::SIGKILL,
                 source,
             }),
         }
