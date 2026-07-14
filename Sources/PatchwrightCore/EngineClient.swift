@@ -96,6 +96,10 @@ public extension EngineServing {
         )
     }
 
+    func interruptCodex(taskID: UUID, cancel: Bool) async throws -> CodexRuntimeStatus {
+        try await call(method: cancel ? "codex.cancel" : "codex.pause", params: ["taskId": taskID.uuidString], as: CodexRuntimeStatus.self)
+    }
+
     func previewTaskFromGitHub(_ item: GitHubWorkItem) async throws -> ConversionPreview {
         try await call(
             method: "task.previewFromGitHub",

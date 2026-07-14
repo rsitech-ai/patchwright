@@ -153,6 +153,8 @@ async fn dispatch(request: Request, state: &ServerState) -> Value {
         "codex.turn.steer" => codex_turn_steer(request.id, &request.params, state).await,
         "codex.approvals" => codex_approvals(request.id, &request.params, state).await,
         "codex.approval.resolve" => codex_approval_resolve(request.id, &request.params, state).await,
+        "codex.pause" => codex_interrupt(request.id, &request.params, state, false).await,
+        "codex.cancel" => codex_interrupt(request.id, &request.params, state, true).await,
         _ => rpc_error(request.id, -32601, "method not found", None),
     }
 }
@@ -604,6 +606,13 @@ async fn codex_approval_resolve(id: Value, params: &Value, state: &ServerState) 
     let mut codex = state.codex.lock().await;
     let Some(service) = codex.as_mut() else { return rpc_error(id, -32050, "Codex unavailable", None) };
     match service.resolve_approval(task_id, approval_id, generation, approve, state.store.as_ref()).await { Ok(value) => rpc_result(id, json!(value)), Err(error) => codex_rpc_error(id, error) }
+}
+
+async fn codex_interrupt(id: Value, params: &Value, state: &ServerState, cancel: bool) -> Value {
+    let task_id = match codex_task_id(params) { Ok(value) => value, Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)) };
+    let mut codex = state.codex.lock().await;
+    let Some(service) = codex.as_mut() else { return rpc_error(id, -32050, "Codex unavailable", None) };
+    match service.interrupt(task_id, cancel, state.store.as_ref()).await { Ok(value) => rpc_result(id, json!(value)), Err(error) => codex_rpc_error(id, error) }
 }
 
 async fn codex_turn_input(id: Value, params: &Value, state: &ServerState, steer: bool) -> Value {
