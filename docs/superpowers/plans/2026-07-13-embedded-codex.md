@@ -43,12 +43,12 @@
 - Add: `crates/patchwright-engine/tests/support/fake_codex_app_server.rs`
 - Modify: `crates/patchwright-engine/Cargo.toml`
 
-- [ ] Write fake-server tests for exact executable discovery, missing executable, version mismatch warning, worktree `cwd`, independent task processes, stderr capture bounds, early exit, hung initialization, and process-group cleanup.
-- [ ] Observe RED.
-- [ ] Implement `CodexExecutable`, `CodexProcess`, and `CodexProcessFactory`; launch with piped stdio/stderr and a distinct Unix process group.
-- [ ] Add initialization and request timeouts, bounded stderr ring buffer, child-exit watcher, and explicit process states `starting/ready/stopping/exited/failed`.
-- [ ] Never pass access tokens or GitHub environment variables into the child; construct an allowlisted environment plus required user/Codex paths.
-- [ ] Run focused tests including two simultaneous fake tasks and commit: `Supervise task-owned Codex processes`.
+- [x] Write fake-server tests for exact executable discovery, missing executable, version mismatch warning, worktree `cwd`, independent task processes, stderr capture bounds, early exit, hung initialization, and process-group cleanup.
+- [x] Observe RED.
+- [x] Implement `CodexExecutable`, `CodexProcess`, and `CodexProcessFactory`; launch with piped stdio/stderr and a distinct Unix process group.
+- [x] Add initialization and request timeouts, bounded stderr ring buffer, child-exit watcher, and explicit process states `starting/ready/stopping/exited/failed`.
+- [x] Never pass access tokens or GitHub environment variables into the child; construct an allowlisted environment plus required user/Codex paths.
+- [x] Run focused tests including two simultaneous fake tasks and commit: `Supervise task-owned Codex processes`.
 
 ## Task 3: Initialize account state and persist thread identity
 
