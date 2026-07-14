@@ -52,4 +52,14 @@ final class CodexPresentationTests: XCTestCase {
         XCTAssertFalse(status.canSteer)
         XCTAssertFalse(status.canStart)
     }
+
+    func testRuntimeApprovalDecodesExactSingleUseBoundary() throws {
+        let data = Data(#"{"id":"33333333-3333-3333-3333-333333333333","taskId":"11111111-1111-1111-1111-111111111111","class":"codexRuntime","requestId":"command-request","processGeneration":"22222222-2222-2222-2222-222222222222","threadId":"thread-1","turnId":"turn-1","itemId":"item-1","kind":"command","reason":"Run tests","command":"swift test","cwd":"/tmp/worktree","grantRoot":null,"state":"pending","createdAt":"2026-07-14T08:00:00Z","expiresAt":"2026-07-14T08:10:00Z","decidedAt":null}"#.utf8)
+        let approval = try JSONDecoder.patchwright.decode(CodexRuntimeApproval.self, from: data)
+        XCTAssertEqual(approval.class, "codexRuntime")
+        XCTAssertEqual(approval.kind, .command)
+        XCTAssertEqual(approval.state, .pending)
+        XCTAssertEqual(approval.requestId, .string("command-request"))
+        XCTAssertEqual(approval.command, "swift test")
+    }
 }

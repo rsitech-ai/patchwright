@@ -2,6 +2,7 @@ use crate::{
     CancellationState, GitHubAccount, GitHubRepository, GitHubRepositorySnapshot, Job,
     JobCheckpoint, JobId, JobState, TaskCheckpoint,
     codex::session::{CodexEventDraft, CodexEventRecord, CodexSessionRecord, CodexSessionStatus},
+    codex::service::CodexRuntimeApproval,
     jobs::validate_summary,
 };
 use anyhow::{Context, Result, bail};
@@ -202,6 +203,21 @@ impl EventStore {
         })?;
         rows.map(|row| decode_json_row(row, "Codex event"))
             .collect::<Result<Vec<_>>>()
+    }
+
+    pub fn save_codex_runtime_approval(&self, approval: &CodexRuntimeApproval) -> Result<()> {
+        self.connection.execute("INSERT INTO codex_runtime_approvals(id, task_id, process_generation, request_id, state, payload, expires_at) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(id) DO UPDATE SET state=excluded.state,payload=excluded.payload,expires_at=excluded.expires_at", params![approval.id.to_string(), approval.task_id.to_string(), approval.process_generation.to_string(), serde_json::to_string(&approval.request_id)?, enum_name(approval.state), serde_json::to_string(approval)?, approval.expires_at.to_rfc3339()])?;
+        Ok(())
+    }
+
+    pub fn codex_runtime_approval(&self, id: uuid::Uuid) -> Result<Option<CodexRuntimeApproval>> {
+        self.load_json_optional("SELECT payload FROM codex_runtime_approvals WHERE id = ?1", &id.to_string(), "Codex runtime approval")
+    }
+
+    pub fn codex_runtime_approvals(&self, task_id: TaskId) -> Result<Vec<CodexRuntimeApproval>> {
+        let mut statement = self.connection.prepare("SELECT payload FROM codex_runtime_approvals WHERE task_id = ?1 ORDER BY expires_at, id")?;
+        let rows = statement.query_map([task_id.to_string()], |row| row.get::<_, String>(0))?;
+        rows.map(|row| decode_json_row(row, "Codex runtime approval")).collect()
     }
 
     pub fn enter_implementing_with_codex(
@@ -1113,4 +1129,15 @@ const MIGRATIONS: &[(u32, &str)] = &[
          CREATE INDEX IF NOT EXISTS codex_events_generation
              ON codex_events(task_id, process_generation, sequence);",
     ),
+    (5, "CREATE TABLE IF NOT EXISTS codex_runtime_approvals (
+             id TEXT PRIMARY KEY,
+             task_id TEXT NOT NULL,
+             process_generation TEXT NOT NULL,
+             request_id TEXT NOT NULL,
+             state TEXT NOT NULL,
+             payload TEXT NOT NULL,
+             expires_at TEXT NOT NULL
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS codex_runtime_approvals_request ON codex_runtime_approvals(task_id, process_generation, request_id);
+         CREATE INDEX IF NOT EXISTS codex_runtime_approvals_task ON codex_runtime_approvals(task_id, state, expires_at);")
 ];

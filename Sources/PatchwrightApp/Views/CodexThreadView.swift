@@ -5,6 +5,7 @@ struct CodexThreadView: View {
     @ObservedObject var store: WorkspaceStore
     let task: EngineeringTask
     @State private var draft = ""
+    @State private var selectedApproval: CodexRuntimeApproval?
 
     private var status: CodexRuntimeStatus? { store.codexStatus(for: task.id) }
     private var transcript: CodexTranscript { store.codexTranscript(for: task.id) }
@@ -24,6 +25,11 @@ struct CodexThreadView: View {
                 try? await Task.sleep(for: .seconds(1))
             }
         }
+        .sheet(item: $selectedApproval) { approval in
+            CodexApprovalSheet(approval: approval) { approve in
+                Task { await store.resolveCodexApproval(approval, approve: approve) }
+            }
+        }
     }
 
     @ViewBuilder private var runtimeBar: some View {
@@ -37,6 +43,10 @@ struct CodexThreadView: View {
             }
             Spacer()
             if isBusy { ProgressView().controlSize(.small) }
+            if let approval = store.codexApprovalsByTask[task.id]?.first(where: { $0.state == .pending }) {
+                Button("Review Request", systemImage: "checkmark.shield") { selectedApproval = approval }
+                    .buttonStyle(.borderedProminent)
+            }
             if status?.canStart == true || status == nil {
                 Button("Start Codex", systemImage: "play.fill") {
                     Task { await store.startCodex(taskID: task.id) }
