@@ -112,6 +112,25 @@ fn remote_identity_and_sha_mismatches_fail_before_approval() {
 }
 
 #[test]
+fn action_must_be_declared_by_the_typed_task_contract() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = EventStore::open(&directory.path().join("engine.sqlite3")).unwrap();
+    let task = fixture(&store);
+    let undeclared = GitHubActionPreview::new(
+        RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
+        GitHubAction::check_run("Patchwright", &"a".repeat(40), "completed", Some("success"))
+            .unwrap(),
+        RemotePrecondition::new(None, Some(&"a".repeat(40)), 3).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        preview_delivery(&store, task.id, undeclared),
+        Err(DeliveryError::CapabilityNotDeclared)
+    );
+}
+
+#[test]
 fn merge_uses_a_separate_merge_class_and_exact_head_sha() {
     let directory = tempfile::tempdir().unwrap();
     let store = EventStore::open(&directory.path().join("engine.sqlite3")).unwrap();

@@ -1,8 +1,8 @@
 use crate::{EventStore, GitHubWorkItem, WorkItemKind};
 use chrono::{DateTime, Utc};
 use patchwright_core::{
-    GitHubIssueSourceInput, GitHubPullRequestSourceInput, RepositoryBindingId, RiskClass, Task,
-    TaskContract, TaskContractDraft, TaskSource,
+    Capability, GitHubIssueSourceInput, GitHubPullRequestSourceInput, RepositoryBindingId,
+    RiskClass, Task, TaskContract, TaskContractDraft, TaskSource,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -190,7 +190,7 @@ impl<'store> TaskConversionService<'store> {
             head_sha: preview.head_sha.clone(),
             instruction_digests: vec![],
             verification_commands: vec![],
-            required_capabilities: vec![],
+            required_capabilities: capabilities_for(item.kind),
             risk: RiskClass::Moderate,
             sensitive_paths: vec![],
             dependencies: vec![],
@@ -211,6 +211,28 @@ impl<'store> TaskConversionService<'store> {
             task,
             created,
         })
+    }
+}
+
+fn capabilities_for(kind: WorkItemKind) -> Vec<Capability> {
+    match kind {
+        WorkItemKind::Issue => vec![
+            Capability::CreateBranch,
+            Capability::PushBranch,
+            Capability::CreatePullRequest,
+            Capability::PostComment,
+            Capability::CreateCheckRun,
+        ],
+        WorkItemKind::PullRequest => vec![
+            Capability::PushBranch,
+            Capability::PostComment,
+            Capability::PostReview,
+            Capability::CreateCheckRun,
+            Capability::UpdatePullRequestBranch,
+            Capability::ClosePullRequest,
+            Capability::EnqueuePullRequest,
+            Capability::MergePullRequest,
+        ],
     }
 }
 

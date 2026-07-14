@@ -5,6 +5,7 @@ cd "$ROOT_DIR"
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 bash -n script/smoke_github_app.sh
+Tests/PackagingTests/github_app_smoke_contract.sh
 Tests/PackagingTests/release_contract.sh
 cargo test -p patchwright-core --test sorting_contract
 cargo test -p patchwright-engine --test task_conversion
