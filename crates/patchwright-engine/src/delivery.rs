@@ -29,6 +29,12 @@ pub fn preview_delivery(
         .task_contract(task_id)
         .map_err(persistence)?
         .ok_or(DeliveryError::ContractMissing)?;
+    if !contract
+        .required_capabilities()
+        .contains(&action.action().capability())
+    {
+        return Err(DeliveryError::CapabilityNotDeclared);
+    }
     let binding_id = task
         .repository_binding_id
         .ok_or(DeliveryError::BindingMissing)?;
@@ -164,6 +170,8 @@ pub enum DeliveryError {
     TaskMissing,
     #[error("delivery task contract is missing")]
     ContractMissing,
+    #[error("delivery action capability is not declared by the task contract")]
+    CapabilityNotDeclared,
     #[error("delivery repository binding is missing")]
     BindingMissing,
     #[error("delivery repository binding changed")]
