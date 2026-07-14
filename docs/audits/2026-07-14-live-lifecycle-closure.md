@@ -77,7 +77,7 @@ Patchwright PR #1 was read-only throughout this audit and remains open.
 ## Remaining boundaries
 
 - GitHub requires user-context authority to resolve author-owned review threads. The current local product brokers that authority from an authenticated `gh` installation after the App attempt fails; a clean-machine distribution needs either authenticated `gh` or a future in-app GitHub App user-authorization flow for this one action.
-- The staged test app is locally ad-hoc signed. A valid `Developer ID Application: Rafal Sikora (2NY8A789TN)` identity is now installed, but `notarytool history --keychain-profile Patchwright` reports that no Keychain password item exists. Developer ID package assembly can proceed; notarization/stapling, Gatekeeper distribution acceptance, final DMG qualification, and clean-machine validation remain `blocked:external` until a notary profile is stored.
+- The staged test app is locally ad-hoc signed. A valid `Developer ID Application: Rafal Sikora (2NY8A789TN)` identity is installed, but live signing paused at the macOS Keychain private-key access prompt and was cancelled without producing a partially qualified artifact. `notarytool history --keychain-profile Patchwright` also reports that no Keychain password item exists. Developer ID signing needs one local Keychain approval; notarization/stapling, Gatekeeper distribution acceptance, final DMG qualification, and clean-machine validation additionally need a stored notary profile.
 - The GitHub App is intentionally installed only on the disposable sandbox. Installing it on another repository is an owner-controlled authorization decision.
 
 ## Rollback
