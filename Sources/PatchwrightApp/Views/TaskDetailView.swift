@@ -7,6 +7,8 @@ struct TaskDetailView: View {
     @SceneStorage("patchwright.taskWorkbenchTab") private var tabRaw = TaskWorkbenchTab.overview.rawValue
     @State private var deliveryBody = ""
     @State private var deliveryApprovalPresented = false
+    @State private var mergeApprovalPresented = false
+    @State private var mergeMethod = GitHubMergeMethod.squash
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,6 +26,9 @@ struct TaskDetailView: View {
             tabContent
         }
         .sheet(isPresented: $deliveryApprovalPresented) {
+            DeliveryApprovalSheet(store: store, task: task)
+        }
+        .sheet(isPresented: $mergeApprovalPresented) {
             DeliveryApprovalSheet(store: store, task: task)
         }
     }
@@ -68,7 +73,7 @@ struct TaskDetailView: View {
                         case .changes: placeholder("Changes", "Worktree file changes and diffs will appear here.", "doc.badge.gearshape")
                         case .verification: placeholder("Verification", "Commands, checks, findings, and evidence will appear here.", "checkmark.shield")
                         case .delivery: deliveryPanel
-                        case .merge: placeholder("Merge", "Exact-SHA merge readiness and the separate merge approval will appear here.", "arrow.triangle.merge")
+                        case .merge: mergePanel
                         }
                     }
                     .padding(20)
@@ -126,6 +131,46 @@ struct TaskDetailView: View {
                     deliveryBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         || store.deliveryBusyTaskIDs.contains(task.id)
                 )
+            }
+            if let error = store.deliveryError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    private var mergePanel: some View {
+        detailCard("Exact-SHA pull request merge") {
+            Text("Merge requires a fresh preview and a separate Merge-class approval bound to the ingested head and base SHAs.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Picker("Method", selection: $mergeMethod) {
+                ForEach(GitHubMergeMethod.allCases) { method in Text(method.label).tag(method) }
+            }
+            .pickerStyle(.segmented)
+            HStack {
+                if let execution = store.deliveryExecutions[task.id] {
+                    Label(execution.state.capitalized, systemImage: "checkmark.seal")
+                        .foregroundStyle(.green)
+                }
+                Spacer()
+                Button("Preview Exact Merge", systemImage: "eye") {
+                    Task {
+                        await store.previewMergeDelivery(task: task, method: mergeMethod)
+                        if store.deliveryPreviews[task.id]?.action.action.kind == "mergePullRequest" {
+                            mergeApprovalPresented = true
+                        }
+                    }
+                }
+                .disabled(store.deliveryBusyTaskIDs.contains(task.id))
+            }
+            if case .githubPullRequest(let source) = task.source {
+                LabeledContent("Head", value: String(source.headSHA.prefix(12)))
+                LabeledContent("Base", value: String(source.baseSHA.prefix(12)))
+            } else {
+                Label("Only ingested pull request tasks can be merged.", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.secondary)
             }
             if let error = store.deliveryError {
                 Label(error, systemImage: "exclamationmark.triangle")

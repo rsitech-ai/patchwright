@@ -15,11 +15,31 @@ public struct GitHubActionPayload: Codable, Equatable, Sendable {
     public let kind: String
     public let issueNumber: UInt64?
     public let body: String?
+    public let pullRequestNumber: UInt64?
+    public let expectedHeadSha: String?
+    public let method: String?
     public init(commentNumber: UInt64, body: String) {
         kind = "comment"
         issueNumber = commentNumber
         self.body = body
+        pullRequestNumber = nil
+        expectedHeadSha = nil
+        method = nil
     }
+    public init(pullRequestNumber: UInt64, expectedHeadSha: String, method: GitHubMergeMethod) {
+        kind = "mergePullRequest"
+        issueNumber = nil
+        body = nil
+        self.pullRequestNumber = pullRequestNumber
+        self.expectedHeadSha = expectedHeadSha
+        self.method = method.rawValue
+    }
+}
+
+public enum GitHubMergeMethod: String, Codable, CaseIterable, Identifiable, Sendable {
+    case merge, squash, rebase
+    public var id: String { rawValue }
+    public var label: String { rawValue.capitalized }
 }
 
 public struct GitHubActionPreviewDraft: Codable, Equatable, Sendable {
