@@ -9,3 +9,5 @@
 - [ ] The final accessibility, resize, theme, runtime-log, secret, license, and reproducibility audits are green.
 - [ ] Approval-gated merge is exact-SHA bound; changed remote state invalidates approval; the automation kill switch is exercised.
 - [ ] The release report names every remaining external gate independently.
+
+Current audit evidence and blockers are recorded in `docs/audits/2026-07-13-patchwright-final-e2e.md`.
