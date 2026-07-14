@@ -3,6 +3,7 @@ mod domain;
 mod github_actions;
 mod instructions;
 mod policy;
+mod queue;
 mod sorting;
 
 pub use contract::{
@@ -27,6 +28,9 @@ pub use instructions::{
 pub use policy::{
     ActionFingerprint, ActionFingerprintDraft, Approval, ApprovalClass, ApprovalError, Capability,
     Policy, PolicyDecision,
+};
+pub use queue::{
+    QueueCandidate, QueueDecision, QueueError, QueueTier, WorkflowPreset, assess_queue,
 };
 pub use sorting::{
     CiHealth, PullRequestQueueRecord, PullRequestQueueState, PullRequestSort, PullRequestSortKey,
