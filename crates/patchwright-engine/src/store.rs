@@ -1,6 +1,6 @@
 use crate::{
     CancellationState, GitHubAccount, GitHubRepository, GitHubRepositorySnapshot, Job,
-    JobCheckpoint, JobId, JobState, TaskCheckpoint,
+    JobCheckpoint, JobId, JobState, MonitorRecord, TaskCheckpoint,
     codex::service::CodexRuntimeApproval,
     codex::session::{CodexEventDraft, CodexEventRecord, CodexSessionRecord, CodexSessionStatus},
     jobs::validate_summary,
@@ -392,10 +392,20 @@ impl EventStore {
 
     pub fn approval(&self, id: uuid::Uuid) -> Result<Option<Approval>> {
         self.load_json_optional(
-            "SELECT payload FROM approvals WHERE id = ?1",
+            "SELECT payload FROM approvals WHERE id = ?1 AND invalidated_at IS NULL",
             &id.to_string(),
             "approval",
         )
+    }
+
+    pub fn invalidate_task_approvals(&self, task_id: TaskId) -> Result<usize> {
+        self.connection
+            .execute(
+                "UPDATE approvals SET invalidated_at = ?2
+                 WHERE task_id = ?1 AND invalidated_at IS NULL",
+                params![task_id.to_string(), chrono::Utc::now().to_rfc3339()],
+            )
+            .context("invalidate task approvals")
     }
 
     pub fn approval_action_digest(&self, id: uuid::Uuid) -> Result<Option<String>> {
@@ -860,6 +870,44 @@ impl EventStore {
             .collect()
     }
 
+    pub fn save_monitor(&self, monitor: &MonitorRecord) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO monitors(id, task_id, repository_full_name, pull_request_number, state,
+                 next_attempt_at, payload, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET state=excluded.state,
+                 next_attempt_at=excluded.next_attempt_at, payload=excluded.payload,
+                 updated_at=excluded.updated_at",
+            params![
+                monitor.id.to_string(),
+                monitor.task_id.to_string(),
+                monitor.repository_full_name,
+                monitor.pull_request_number,
+                enum_name(monitor.state),
+                monitor.next_attempt_at.map(|value| value.to_rfc3339()),
+                serde_json::to_string(monitor)?,
+                monitor.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn monitor(&self, id: uuid::Uuid) -> Result<Option<MonitorRecord>> {
+        self.load_json_optional(
+            "SELECT payload FROM monitors WHERE id = ?1",
+            &id.to_string(),
+            "monitor",
+        )
+    }
+
+    pub fn task_monitors(&self, task_id: TaskId) -> Result<Vec<MonitorRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT payload FROM monitors WHERE task_id = ?1 ORDER BY updated_at DESC, id",
+        )?;
+        let rows = statement.query_map([task_id.to_string()], |row| row.get::<_, String>(0))?;
+        rows.map(|row| decode_json_row(row, "monitor")).collect()
+    }
+
     pub fn github_repository(&self, full_name: &str) -> Result<Option<GitHubRepositorySnapshot>> {
         let payload: Option<String> = self
             .connection
@@ -1192,5 +1240,18 @@ const MIGRATIONS: &[(u32, &str)] = &[
              updated_at TEXT NOT NULL,
              PRIMARY KEY(repository_full_name, pull_request_number)
          );
-         CREATE UNIQUE INDEX IF NOT EXISTS queue_decisions_position ON queue_decisions(position);")
+         CREATE UNIQUE INDEX IF NOT EXISTS queue_decisions_position ON queue_decisions(position);"),
+    (7, "ALTER TABLE approvals ADD COLUMN invalidated_at TEXT;
+         CREATE TABLE IF NOT EXISTS monitors (
+             id TEXT PRIMARY KEY,
+             task_id TEXT NOT NULL,
+             repository_full_name TEXT NOT NULL,
+             pull_request_number INTEGER NOT NULL,
+             state TEXT NOT NULL,
+             next_attempt_at TEXT,
+             payload TEXT NOT NULL,
+             updated_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS monitors_task ON monitors(task_id, updated_at);
+         CREATE INDEX IF NOT EXISTS monitors_due ON monitors(state, next_attempt_at);")
 ];

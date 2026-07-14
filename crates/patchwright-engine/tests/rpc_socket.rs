@@ -99,7 +99,61 @@ async fn socket_supports_health_create_and_timeline() {
     .await;
     assert_eq!(timeline["result"].as_array().unwrap().len(), 1);
 
+    assert_monitor_rpc(&mut stream, task_id).await;
+
     server.abort();
+}
+
+async fn assert_monitor_rpc(stream: &mut BufReader<UnixStream>, task_id: &str) {
+    let monitor_request = json!({
+        "taskId": task_id,
+        "repositoryFullName": "octocat/hello",
+        "pullRequestNumber": 7,
+        "expectedHeadSha": "b".repeat(40),
+        "expectedBaseSha": "a".repeat(40),
+        "repairBudget": 2
+    });
+    let started = call(
+        stream,
+        json!({
+            "jsonrpc":"2.0","id":5,"method":"monitor.start",
+            "params":{"monitor":monitor_request.to_string()}
+        }),
+    )
+    .await;
+    assert_eq!(started["result"]["state"], "pending");
+    let monitor_id = started["result"]["id"].as_str().unwrap();
+    let observed = call(
+        stream,
+        json!({
+            "jsonrpc":"2.0","id":6,"method":"monitor.observe",
+            "params":{
+                "monitorId":monitor_id,
+                "observation":json!({
+                    "observedAt":"2026-07-14T09:00:00Z",
+                    "headSha":"b".repeat(40),
+                    "baseSha":"a".repeat(40),
+                    "ci":"success",
+                    "review":"approved",
+                    "mergeability":"mergeable",
+                    "repositoryAccessible":true,
+                    "networkAvailable":true,
+                    "rateLimitedUntil":null
+                }).to_string()
+            }
+        }),
+    )
+    .await;
+    assert_eq!(observed["result"]["outcome"]["state"], "succeeded");
+    let status = call(
+        stream,
+        json!({
+            "jsonrpc":"2.0","id":7,"method":"monitor.status",
+            "params":{"monitorId":monitor_id}
+        }),
+    )
+    .await;
+    assert_eq!(status["result"]["state"], "succeeded");
 }
 
 #[tokio::test]

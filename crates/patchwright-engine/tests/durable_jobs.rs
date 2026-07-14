@@ -74,7 +74,7 @@ fn legacy_database_migrates_without_losing_existing_tasks() {
         .unwrap()
         .unwrap();
     assert_eq!(loaded.state, TaskState::AwaitingPreparationApproval);
-    assert_eq!(store.schema_versions().unwrap(), vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(store.schema_versions().unwrap(), vec![1, 2, 3, 4, 5, 6, 7]);
     drop(store);
 
     let connection = Connection::open(database).unwrap();
