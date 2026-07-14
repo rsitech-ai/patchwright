@@ -23,6 +23,10 @@ public final class WorkspaceStore: ObservableObject {
     @Published public private(set) var conversionPreview: ConversionPreview?
     @Published public private(set) var isConvertingGitHubItem = false
     @Published public private(set) var conversionError: String?
+    @Published public private(set) var codexStatuses: [UUID: CodexRuntimeStatus] = [:]
+    @Published public private(set) var codexEventsByTask: [UUID: [CodexEvent]] = [:]
+    @Published public private(set) var codexBusyTaskIDs: Set<UUID> = []
+    @Published public private(set) var codexError: String?
     @Published public private(set) var presentationPreferences: WorkspacePresentationPreferences
     @Published public var githubError: String?
     public let engine: any EngineServing
@@ -147,6 +151,76 @@ public final class WorkspaceStore: ObservableObject {
             selectedTaskID = task.id
         } catch {
             connectionState = .failed(error.localizedDescription)
+        }
+    }
+
+    public func codexStatus(for taskID: UUID) -> CodexRuntimeStatus? {
+        codexStatuses[taskID]
+    }
+
+    public func codexTranscript(for taskID: UUID) -> CodexTranscript {
+        CodexTranscript(events: codexEventsByTask[taskID] ?? [])
+    }
+
+    public func refreshCodex(taskID: UUID) async {
+        do {
+            let status = try await engine.codexStatus(taskID: taskID)
+            let cursor = codexEventsByTask[taskID]?.last?.sequence ?? 0
+            let newEvents = try await engine.codexEvents(taskID: taskID, after: cursor)
+            if !newEvents.isEmpty {
+                let existing = codexEventsByTask[taskID] ?? []
+                let seen = Set(existing.map(\.sequence))
+                codexEventsByTask[taskID] = (existing + newEvents.filter { !seen.contains($0.sequence) })
+                    .sorted { $0.sequence < $1.sequence }
+            }
+            codexStatuses[taskID] = status
+            codexError = nil
+        } catch {
+            codexError = error.localizedDescription
+        }
+    }
+
+    public func startCodex(taskID: UUID) async {
+        guard !codexBusyTaskIDs.contains(taskID) else { return }
+        codexBusyTaskIDs.insert(taskID)
+        defer { codexBusyTaskIDs.remove(taskID) }
+        do {
+            codexStatuses[taskID] = try await engine.startCodex(taskID: taskID)
+            codexError = nil
+            await refreshTasks()
+            await refreshCodex(taskID: taskID)
+        } catch {
+            codexError = error.localizedDescription
+        }
+    }
+
+    public func sendCodexMessage(taskID: UUID, input: String) async {
+        let input = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty,
+              input.utf8.count <= 64 * 1_024,
+              !codexBusyTaskIDs.contains(taskID),
+              let status = codexStatuses[taskID],
+              status.canSend else { return }
+        codexBusyTaskIDs.insert(taskID)
+        defer { codexBusyTaskIDs.remove(taskID) }
+        do {
+            if status.canSteer {
+                _ = try await engine.steerCodexTurn(
+                    taskID: taskID,
+                    clientMessageID: UUID(),
+                    input: input
+                )
+            } else {
+                _ = try await engine.startCodexTurn(
+                    taskID: taskID,
+                    clientMessageID: UUID(),
+                    input: input
+                )
+            }
+            codexError = nil
+            await refreshCodex(taskID: taskID)
+        } catch {
+            codexError = error.localizedDescription
         }
     }
 

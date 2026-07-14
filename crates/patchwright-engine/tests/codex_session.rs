@@ -10,6 +10,7 @@ use patchwright_engine::codex::session::{
     CodexAccountState, CodexSession, CodexSessionStatus, ThreadBootstrap,
 };
 use patchwright_engine::{EventStore, TaskCheckpoint};
+use std::sync::Mutex;
 use tempfile::tempdir;
 
 fn protocol_body(
@@ -63,10 +64,14 @@ async fn initializes_in_order_persists_account_and_atomically_enters_implementin
     let worktree = root.path().join("worktree");
     std::fs::create_dir(&worktree).unwrap();
     let mut process = factory.launch("task", &worktree).unwrap();
-    let store = EventStore::open(&root.path().join("events.sqlite")).unwrap();
+    let store = Mutex::new(EventStore::open(&root.path().join("events.sqlite")).unwrap());
     let mut task = Task::new("Codex task", worktree.to_str().unwrap()).unwrap();
     advance_to_preparing(&mut task);
-    store.save_task(&task, "worktree prepared").unwrap();
+    store
+        .lock()
+        .unwrap()
+        .save_task(&task, "worktree prepared")
+        .unwrap();
 
     let session = CodexSession::connect(
         task.id,
@@ -84,24 +89,46 @@ async fn initializes_in_order_persists_account_and_atomically_enters_implementin
     assert_eq!(session.thread_id(), Some("thread-new"));
     assert_eq!(process.state(), CodexProcessState::Ready);
     assert_eq!(
-        store.load_task(task.id).unwrap().unwrap().state,
+        store
+            .lock()
+            .unwrap()
+            .load_task(task.id)
+            .unwrap()
+            .unwrap()
+            .state,
         TaskState::Preparing
     );
 
     task.transition(TaskState::Implementing).unwrap();
     let checkpoint = TaskCheckpoint::new(task.id, task.state, "Codex thread ready").unwrap();
     store
+        .lock()
+        .unwrap()
         .enter_implementing_with_codex(&task, &checkpoint, session.record())
         .unwrap();
     assert_eq!(
-        store.load_task(task.id).unwrap().unwrap().state,
+        store
+            .lock()
+            .unwrap()
+            .load_task(task.id)
+            .unwrap()
+            .unwrap()
+            .state,
         TaskState::Implementing
     );
     assert_eq!(
-        store.codex_session(task.id).unwrap(),
+        store.lock().unwrap().codex_session(task.id).unwrap(),
         Some(session.record().clone())
     );
-    assert!(store.codex_events(task.id, 0).unwrap().len() >= 4);
+    assert!(
+        store
+            .lock()
+            .unwrap()
+            .codex_events(task.id, 0)
+            .unwrap()
+            .len()
+            >= 4
+    );
     process.terminate().await.unwrap();
 }
 
@@ -132,7 +159,7 @@ async fn records_signed_out_and_unavailable_account_states() {
         let worktree = root.path().join("worktree");
         std::fs::create_dir(&worktree).unwrap();
         let mut process = factory.launch(name, &worktree).unwrap();
-        let store = EventStore::open(&root.path().join("events.sqlite")).unwrap();
+        let store = Mutex::new(EventStore::open(&root.path().join("events.sqlite")).unwrap());
         let task = Task::new(name, worktree.to_str().unwrap()).unwrap();
         let session = CodexSession::connect(
             task.id,
@@ -152,6 +179,7 @@ async fn records_signed_out_and_unavailable_account_states() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn resumes_a_saved_thread_after_restart_and_requires_confirmation_when_stale() {
     let root = tempdir().unwrap();
     let database = root.path().join("events.sqlite");
@@ -170,7 +198,7 @@ async fn resumes_a_saved_thread_after_restart_and_requires_confirmation_when_sta
     let version = executable.version().to_owned();
     let factory = CodexProcessFactory::new(executable, CodexProcessConfig::default());
     let mut process = factory.launch("first", &worktree).unwrap();
-    let store = EventStore::open(&database).unwrap();
+    let store = Mutex::new(EventStore::open(&database).unwrap());
     let first = CodexSession::connect(
         task.id,
         &mut process,
@@ -197,8 +225,13 @@ async fn resumes_a_saved_thread_after_restart_and_requires_confirmation_when_sta
     let version = executable.version().to_owned();
     let factory = CodexProcessFactory::new(executable, CodexProcessConfig::default());
     let mut process = factory.launch("resumed", &worktree).unwrap();
-    let store = EventStore::open(&database).unwrap();
-    let saved = store.codex_session(task.id).unwrap().unwrap();
+    let store = Mutex::new(EventStore::open(&database).unwrap());
+    let saved = store
+        .lock()
+        .unwrap()
+        .codex_session(task.id)
+        .unwrap()
+        .unwrap();
     let resumed = CodexSession::connect(
         task.id,
         &mut process,
@@ -247,6 +280,8 @@ async fn resumes_a_saved_thread_after_restart_and_requires_confirmation_when_sta
     let checkpoint = TaskCheckpoint::new(preparing.id, preparing.state, "not ready").unwrap();
     assert!(
         store
+            .lock()
+            .unwrap()
             .enter_implementing_with_codex(&preparing, &checkpoint, stale.record())
             .is_err()
     );
