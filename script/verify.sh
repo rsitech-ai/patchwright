@@ -8,6 +8,7 @@ cargo test -p patchwright-core --test sorting_contract
 cargo test -p patchwright-engine --test task_conversion
 cargo test -p patchwright-engine --test rpc_conversion
 cargo test -p patchwright-engine --test rpc_socket
+cargo test -p patchwright-engine --test codex_protocol --test codex_process --test codex_session --test codex_rpc --test codex_approvals --test codex_cancellation
 cargo test --workspace
 swift test --filter WorkspaceSortingTests
 swift test --filter ConversionStoreTests

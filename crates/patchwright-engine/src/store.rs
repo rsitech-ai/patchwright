@@ -1,8 +1,8 @@
 use crate::{
     CancellationState, GitHubAccount, GitHubRepository, GitHubRepositorySnapshot, Job,
     JobCheckpoint, JobId, JobState, TaskCheckpoint,
-    codex::session::{CodexEventDraft, CodexEventRecord, CodexSessionRecord, CodexSessionStatus},
     codex::service::CodexRuntimeApproval,
+    codex::session::{CodexEventDraft, CodexEventRecord, CodexSessionRecord, CodexSessionStatus},
     jobs::validate_summary,
 };
 use anyhow::{Context, Result, bail};
@@ -211,13 +211,18 @@ impl EventStore {
     }
 
     pub fn codex_runtime_approval(&self, id: uuid::Uuid) -> Result<Option<CodexRuntimeApproval>> {
-        self.load_json_optional("SELECT payload FROM codex_runtime_approvals WHERE id = ?1", &id.to_string(), "Codex runtime approval")
+        self.load_json_optional(
+            "SELECT payload FROM codex_runtime_approvals WHERE id = ?1",
+            &id.to_string(),
+            "Codex runtime approval",
+        )
     }
 
     pub fn codex_runtime_approvals(&self, task_id: TaskId) -> Result<Vec<CodexRuntimeApproval>> {
         let mut statement = self.connection.prepare("SELECT payload FROM codex_runtime_approvals WHERE task_id = ?1 ORDER BY expires_at, id")?;
         let rows = statement.query_map([task_id.to_string()], |row| row.get::<_, String>(0))?;
-        rows.map(|row| decode_json_row(row, "Codex runtime approval")).collect()
+        rows.map(|row| decode_json_row(row, "Codex runtime approval"))
+            .collect()
     }
 
     pub fn enter_implementing_with_codex(

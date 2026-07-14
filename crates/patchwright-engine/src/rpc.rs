@@ -152,7 +152,9 @@ async fn dispatch(request: Request, state: &ServerState) -> Value {
         "codex.turn.start" => codex_turn_start(request.id, &request.params, state).await,
         "codex.turn.steer" => codex_turn_steer(request.id, &request.params, state).await,
         "codex.approvals" => codex_approvals(request.id, &request.params, state).await,
-        "codex.approval.resolve" => codex_approval_resolve(request.id, &request.params, state).await,
+        "codex.approval.resolve" => {
+            codex_approval_resolve(request.id, &request.params, state).await
+        }
         "codex.pause" => codex_interrupt(request.id, &request.params, state, false).await,
         "codex.cancel" => codex_interrupt(request.id, &request.params, state, true).await,
         _ => rpc_error(request.id, -32601, "method not found", None),
@@ -591,28 +593,82 @@ async fn codex_turn_steer(id: Value, params: &Value, state: &ServerState) -> Val
 }
 
 async fn codex_approvals(id: Value, params: &Value, state: &ServerState) -> Value {
-    let task_id = match codex_task_id(params) { Ok(value) => value, Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)) };
+    let task_id = match codex_task_id(params) {
+        Ok(value) => value,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
     let mut codex = state.codex.lock().await;
-    let Some(service) = codex.as_mut() else { return rpc_error(id, -32050, "Codex unavailable", None) };
-    match service.approvals(task_id, state.store.as_ref()).await { Ok(value) => rpc_result(id, json!(value)), Err(error) => codex_rpc_error(id, error) }
+    let Some(service) = codex.as_mut() else {
+        return rpc_error(id, -32050, "Codex unavailable", None);
+    };
+    match service.approvals(task_id, state.store.as_ref()).await {
+        Ok(value) => rpc_result(id, json!(value)),
+        Err(error) => codex_rpc_error(id, error),
+    }
 }
 
 async fn codex_approval_resolve(id: Value, params: &Value, state: &ServerState) -> Value {
-    let task_id = match codex_task_id(params) { Ok(value) => value, Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)) };
-    let approval_id = params.get("approvalId").and_then(Value::as_str).and_then(|value| uuid::Uuid::parse_str(value).ok());
-    let generation = params.get("processGeneration").and_then(Value::as_str).and_then(|value| uuid::Uuid::parse_str(value).ok());
-    let approve = params.get("approve").and_then(|value| value.as_bool().or_else(|| value.as_str().and_then(|text| text.parse().ok())));
-    let (Some(approval_id), Some(generation), Some(approve)) = (approval_id, generation, approve) else { return rpc_error(id, -32602, "invalid parameters", Some("approvalId, processGeneration, and approve are required".into())) };
+    let task_id = match codex_task_id(params) {
+        Ok(value) => value,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let approval_id = params
+        .get("approvalId")
+        .and_then(Value::as_str)
+        .and_then(|value| uuid::Uuid::parse_str(value).ok());
+    let generation = params
+        .get("processGeneration")
+        .and_then(Value::as_str)
+        .and_then(|value| uuid::Uuid::parse_str(value).ok());
+    let approve = params.get("approve").and_then(|value| {
+        value
+            .as_bool()
+            .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+    });
+    let (Some(approval_id), Some(generation), Some(approve)) = (approval_id, generation, approve)
+    else {
+        return rpc_error(
+            id,
+            -32602,
+            "invalid parameters",
+            Some("approvalId, processGeneration, and approve are required".into()),
+        );
+    };
     let mut codex = state.codex.lock().await;
-    let Some(service) = codex.as_mut() else { return rpc_error(id, -32050, "Codex unavailable", None) };
-    match service.resolve_approval(task_id, approval_id, generation, approve, state.store.as_ref()).await { Ok(value) => rpc_result(id, json!(value)), Err(error) => codex_rpc_error(id, error) }
+    let Some(service) = codex.as_mut() else {
+        return rpc_error(id, -32050, "Codex unavailable", None);
+    };
+    match service
+        .resolve_approval(
+            task_id,
+            approval_id,
+            generation,
+            approve,
+            state.store.as_ref(),
+        )
+        .await
+    {
+        Ok(value) => rpc_result(id, json!(value)),
+        Err(error) => codex_rpc_error(id, error),
+    }
 }
 
 async fn codex_interrupt(id: Value, params: &Value, state: &ServerState, cancel: bool) -> Value {
-    let task_id = match codex_task_id(params) { Ok(value) => value, Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)) };
+    let task_id = match codex_task_id(params) {
+        Ok(value) => value,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
     let mut codex = state.codex.lock().await;
-    let Some(service) = codex.as_mut() else { return rpc_error(id, -32050, "Codex unavailable", None) };
-    match service.interrupt(task_id, cancel, state.store.as_ref()).await { Ok(value) => rpc_result(id, json!(value)), Err(error) => codex_rpc_error(id, error) }
+    let Some(service) = codex.as_mut() else {
+        return rpc_error(id, -32050, "Codex unavailable", None);
+    };
+    match service
+        .interrupt(task_id, cancel, state.store.as_ref())
+        .await
+    {
+        Ok(value) => rpc_result(id, json!(value)),
+        Err(error) => codex_rpc_error(id, error),
+    }
 }
 
 async fn codex_turn_input(id: Value, params: &Value, state: &ServerState, steer: bool) -> Value {

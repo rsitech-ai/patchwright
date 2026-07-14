@@ -107,6 +107,25 @@ fn decodes_validated_responses_notifications_and_unsupported_events() {
 }
 
 #[test]
+fn accepts_live_0144_incoming_messages_without_jsonrpc_member() {
+    let mut decoder = ProtocolDecoder::default();
+    decoder.register_request(RequestId::Number(1)).unwrap();
+    let response = decoder.decode_line(br#"{"id":1,"result":{"userAgent":"Codex Desktop/0.144.2","codexHome":"/tmp/codex-home","platformFamily":"unix","platformOs":"macos"}}"#).unwrap();
+    assert!(matches!(response, IncomingMessage::Response(_)));
+    let notification = decoder
+        .decode_line(br#"{"method":"remoteControl/status/changed","params":{"status":"disabled"}}"#)
+        .unwrap();
+    assert!(matches!(
+        notification,
+        IncomingMessage::Event(CodexEvent::Unsupported { .. })
+    ));
+    assert!(matches!(
+        decoder.decode_line(br#"{"jsonrpc":"1.0","method":"initialized","params":{}}"#),
+        Err(ProtocolError::UnsupportedJsonRpcVersion)
+    ));
+}
+
+#[test]
 fn encodes_only_the_pinned_client_method_discriminators() {
     let request = ClientRequest::new(
         RequestId::String("request-1".to_owned()),
