@@ -97,6 +97,7 @@ pub enum ServerRequestKind {
 pub struct ServerRequestEnvelope {
     pub id: RequestId,
     pub kind: ServerRequestKind,
+    pub params: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -255,6 +256,7 @@ impl ProtocolDecoder {
         Ok(IncomingMessage::ServerRequest(ServerRequestEnvelope {
             id,
             kind,
+            params: params.cloned().expect("validated server request params"),
         }))
     }
 

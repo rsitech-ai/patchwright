@@ -95,13 +95,13 @@
 - Add: `Sources/PatchwrightApp/Views/CodexApprovalSheet.swift`
 - Modify: `Sources/PatchwrightCore/WorkspaceStore.swift`
 
-- [ ] Add tests that a Codex command/file request creates only a `CodexRuntime` approval request; it cannot authorize network, GitHub delivery, workflow, or merge capability.
-- [ ] Test exact request ID/process generation/turn binding, expiration, duplicate response idempotency, restart recovery, and invalidation after a new turn/process generation.
-- [ ] Observe RED.
-- [ ] Normalize approval requests into typed previews with command argv/cwd or file diff summary and feed accept/decline back to the originating app-server request.
-- [ ] Add `codex.approval.resolve` RPC with optimistic generation check and append-only decision event.
-- [ ] Render an exact approval sheet with target, reason, expiration, invalidation, and Approve once/Decline. Do not add global approval.
-- [ ] Run all approval tests and commit: `Bridge exact Codex runtime approvals`.
+- [x] Add tests that a Codex command/file request creates only a `CodexRuntime` approval request; it cannot authorize network, GitHub delivery, workflow, or merge capability.
+- [x] Test exact request ID/process generation/turn binding, expiration, duplicate response idempotency, restart recovery, and invalidation after a new turn/process generation.
+- [x] Observe RED.
+- [x] Normalize approval requests into typed previews with command argv/cwd or file diff summary and feed accept/decline back to the originating app-server request.
+- [x] Add `codex.approval.resolve` RPC with optimistic generation check and append-only decision event.
+- [x] Render an exact approval sheet with target, reason, expiration, invalidation, and Approve once/Decline. Do not add global approval.
+- [x] Run all approval tests and commit: `Bridge exact Codex runtime approvals`.
 
 ## Task 6: Implement interruption, cancellation, and crash recovery
 
