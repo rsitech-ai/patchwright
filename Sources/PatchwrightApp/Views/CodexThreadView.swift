@@ -47,11 +47,19 @@ struct CodexThreadView: View {
                 Button("Review Request", systemImage: "checkmark.shield") { selectedApproval = approval }
                     .buttonStyle(.borderedProminent)
             }
+            if status?.state == .ready {
+                Button("Pause", systemImage: "pause.fill") { Task { await store.interruptCodex(taskID: task.id, cancel: false) } }
+                    .disabled(isBusy)
+                    .help("Interrupt Codex and retain the task worktree and evidence for resume")
+                Button("Cancel", systemImage: "xmark", role: .destructive) { Task { await store.interruptCodex(taskID: task.id, cancel: true) } }
+                    .disabled(isBusy)
+                    .help("Cancel this task, stop its Codex process group, and retain the worktree and evidence")
+            }
             if status?.canStart == true || status == nil {
                 Button("Start Codex", systemImage: "play.fill") {
                     Task { await store.startCodex(taskID: task.id) }
                 }
-                .disabled(isBusy || task.state != .preparing)
+                .disabled(isBusy || ![.preparing, .paused].contains(task.state))
             }
         }
         .padding(.horizontal, 16)
