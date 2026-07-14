@@ -4,7 +4,7 @@ Audit refreshed: 2026-07-14.
 
 ## Result
 
-**Repo-ready; GitHub integration blocked:external.** The local implementation and mock/restart boundaries pass. A production GitHub App, Keychain private key, installation, and authorized disposable-repository mutation run do not exist on this machine yet.
+**Repo-ready; GitHub App authentication verified; repository integration blocked:external.** The local implementation and mock/restart boundaries pass. The production App identity and protected private key exist and authenticate successfully. A repository installation and authorized disposable-repository mutation run do not exist yet.
 
 ## Verified locally
 
@@ -20,14 +20,12 @@ Audit refreshed: 2026-07-14.
 ## Current production boundary
 
 - Initial repository discovery still uses `gh` as an explicitly labeled development/read-only fallback. Production writes use the GitHub App broker. App-authenticated account-wide discovery remains an integration follow-up after the App is installed.
-- `~/.patchwright/github-app.json` is missing and the expected Keychain item is absent.
+- `~/.patchwright/github-app.json` has owner-only mode `600`, references App ID `4294269`, and resolves to an owner-only protected private-key file. `patchwright-relay github-app-health` authenticated to GitHub and returned the expected `patchwright-s1korrrr` identity without printing key or JWT material.
 - No remote qualification write or merge was attempted against `s1korrrr/patchwright`.
-- `script/smoke_github_app.sh` rejects the production repository, requires an exact disposable-repository allowlist and one-shot confirmation, validates file and Keychain boundaries, verifies repository identity, runs all local suites, and exits `78` until the remote mutation sequence has been performed and recorded.
+- `script/smoke_github_app.sh` rejects the production repository, requires an exact disposable-repository allowlist and one-shot confirmation, validates metadata plus Keychain or protected-file boundaries, authenticates the configured App identity, verifies repository identity, runs all local suites, and exits `78` until the remote mutation sequence has been performed and recorded.
 
 ## Required external sequence
 
-1. Create the prepared GitHub App with webhook disabled and repository permissions: Actions read, Administration read, Checks write, Contents write, Issues write, Pull requests write, Workflows write, Metadata read.
-2. Generate its private key and import it through Patchwright Settings. Only the Keychain reference is persisted.
-3. Install the App on one disposable repository, not the Patchwright repository.
-4. Set the disposable target variables printed by `script/smoke_github_app.sh` and run the authorized sequence.
-5. Record remote IDs and URLs, verify no secret appears in the database, logs, process table, Git configuration, or bundle, then change `integration_ready.github_delivery_merge` only after the full sequence passes.
+1. Install `Patchwright s1korrrr` on one disposable repository, not the Patchwright repository. The audited permissions are Actions read, Administration read, Checks write, Contents write, Issues write, Pull requests write, Workflows write, and mandatory Metadata read; the webhook remains disabled.
+2. Set the disposable target variables printed by `script/smoke_github_app.sh` and run the authorized sequence.
+3. Record remote IDs and URLs, verify no secret appears in the database, logs, process table, Git configuration, or bundle, then change `integration_ready.github_delivery_merge` only after the full sequence passes.

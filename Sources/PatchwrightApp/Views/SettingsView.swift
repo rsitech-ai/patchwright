@@ -20,12 +20,15 @@ struct SettingsView: View {
             Section("Patchwright GitHub App") {
                 TextField("App ID", text: $appID)
                 TextField("Client ID", text: $clientID)
-                LabeledContent("Private key", value: keyReference.isEmpty ? "Not imported" : "Stored in Keychain")
+                LabeledContent("Private key", value: privateKeyLocation)
                 HStack {
                     Button("Import Private Key…") { importPrivateKey() }
                         .disabled(importing || UInt64(appID) == nil || clientID.isEmpty)
                     Button("Save Metadata") {
-                        do { try saveMetadata(keyReference: keyReference) }
+                        do {
+                            try saveMetadata(keyReference: keyReference)
+                            try verifyConnection()
+                        }
                         catch { status = error.localizedDescription }
                     }
                         .disabled(UInt64(appID) == nil || clientID.isEmpty || keyReference.isEmpty)
@@ -51,37 +54,22 @@ struct SettingsView: View {
         panel.allowedContentTypes = [.data]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        panel.prompt = "Import into Keychain"
+        panel.prompt = "Import Securely"
         guard panel.runModal() == .OK, let path = panel.url else { return }
         importing = true
         defer { importing = false }
         do {
-            let executable = ProcessInfo.processInfo.environment["PATCHWRIGHT_RELAY_BINARY"]
-                .map(URL.init(fileURLWithPath:))
-                ?? Bundle.main.bundleURL.appending(path: "Contents/Helpers/patchwright-relay")
-            guard FileManager.default.isExecutableFile(atPath: executable.path) else {
-                throw SetupError("The bundled GitHub relay is unavailable. Rebuild Patchwright and try again.")
-            }
-            let service = "ai.patchwright.github-app.private-key"
-            let account = "app-\(appID)"
-            let process = Process()
-            process.executableURL = executable
-            process.arguments = [
-                "import-github-app-key", "--path", path.path,
-                "--service", service, "--account", account,
-            ]
-            process.standardInput = FileHandle.nullDevice
-            process.standardOutput = FileHandle.nullDevice
-            let errors = Pipe()
-            process.standardError = errors
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else {
-                throw SetupError("The private key was rejected. Use the unencrypted RSA PEM downloaded from this GitHub App.")
-            }
-            keyReference = "keychain:\(service)/\(account)"
+            let secretDirectory = configurationURL.deletingLastPathComponent()
+                .appending(path: "secrets", directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: secretDirectory, withIntermediateDirectories: true)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: secretDirectory.path)
+            let destination = secretDirectory.appending(path: "github-app-\(appID).pem")
+            try Data(contentsOf: path).write(to: destination, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+            keyReference = "file:\(destination.path)"
             try saveMetadata(keyReference: keyReference)
-            status = "Key imported and metadata saved. Relaunch Patchwright, then install the App on selected repositories."
+            try verifyConnection()
+            status = "App authenticated. Install it on selected repositories, then relaunch Patchwright."
         } catch {
             status = error.localizedDescription
         }
@@ -98,7 +86,7 @@ struct SettingsView: View {
 
     private func saveMetadata(keyReference: String) throws {
         guard let appID = UInt64(appID), !clientID.isEmpty, !keyReference.isEmpty else {
-            throw SetupError("App ID, Client ID, and a Keychain private-key reference are required.")
+            throw SetupError("App ID, Client ID, and a private-key reference are required.")
         }
         let directory = configurationURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -113,6 +101,33 @@ struct SettingsView: View {
         try data.write(to: configurationURL, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configurationURL.path)
         status = "Metadata saved. Relaunch Patchwright to apply the configuration."
+    }
+
+    private func verifyConnection() throws {
+        let executable = ProcessInfo.processInfo.environment["PATCHWRIGHT_RELAY_BINARY"]
+            .map(URL.init(fileURLWithPath:))
+            ?? Bundle.main.bundleURL.appending(path: "Contents/Helpers/patchwright-relay")
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
+            throw SetupError("The bundled GitHub relay is unavailable. Rebuild Patchwright and try again.")
+        }
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["github-app-health", "--config", configurationURL.path]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw SetupError("GitHub App authentication failed. Check the App ID and use its unencrypted RSA private key.")
+        }
+        status = "GitHub App authentication succeeded."
+    }
+
+    private var privateKeyLocation: String {
+        if keyReference.hasPrefix("keychain:") { return "Stored in Keychain" }
+        if keyReference.hasPrefix("file:") { return "Owner-only protected file" }
+        return "Not imported"
     }
 
     private var configurationURL: URL {

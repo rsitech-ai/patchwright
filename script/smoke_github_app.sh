@@ -27,13 +27,27 @@ fail() {
 
 APP_ID="$(jq -er '.appId | select(type == "number" and . > 0)' "$CONFIGURATION")" || fail "App ID is missing"
 CLIENT_ID="$(jq -er '.clientId | select(type == "string" and length > 0)' "$CONFIGURATION")" || fail "Client ID is missing"
-KEY_REFERENCE="$(jq -er '.keyReference | select(type == "string" and startswith("keychain:"))' "$CONFIGURATION")" || fail "Keychain reference is missing"
-KEYCHAIN_PATH="${KEY_REFERENCE#keychain:}"
-KEYCHAIN_SERVICE="${KEYCHAIN_PATH%/*}"
-KEYCHAIN_ACCOUNT="${KEYCHAIN_PATH##*/}"
-[[ -n "$KEYCHAIN_SERVICE" && -n "$KEYCHAIN_ACCOUNT" ]] || fail "Keychain reference is invalid"
-security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" >/dev/null 2>&1 \
-  || fail "the referenced GitHub App private key is unavailable in Keychain"
+KEY_REFERENCE="$(jq -er '.keyReference | select(type == "string" and length > 0)' "$CONFIGURATION")" || fail "private-key reference is missing"
+case "$KEY_REFERENCE" in
+  keychain:*)
+    KEYCHAIN_PATH="${KEY_REFERENCE#keychain:}"
+    KEYCHAIN_SERVICE="${KEYCHAIN_PATH%/*}"
+    KEYCHAIN_ACCOUNT="${KEYCHAIN_PATH##*/}"
+    [[ -n "$KEYCHAIN_SERVICE" && -n "$KEYCHAIN_ACCOUNT" ]] || fail "Keychain reference is invalid"
+    security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" >/dev/null 2>&1 \
+      || fail "the referenced GitHub App private key is unavailable in Keychain"
+    ;;
+  file:*)
+    KEY_PATH="${KEY_REFERENCE#file:}"
+    [[ "$KEY_PATH" == /* ]] || fail "the protected private-key path must be absolute"
+    [[ -f "$KEY_PATH" && ! -L "$KEY_PATH" ]] || fail "the protected private-key file is missing or symlinked"
+    KEY_MODE="$(stat -f '%Lp' "$KEY_PATH")"
+    [[ "$KEY_MODE" == 400 || "$KEY_MODE" == 600 ]] || fail "the protected private-key file must have owner-only mode 400 or 600"
+    ;;
+  *)
+    fail "private-key reference must use keychain: or file:"
+    ;;
+esac
 
 LIVE_REPOSITORY_ID="$(gh api "repos/$TARGET" --jq .id 2>/dev/null)" \
   || fail "the disposable repository is not readable with the current development credential"
@@ -43,6 +57,8 @@ printf 'GitHub App E2E target: %s (repository %s, installation %s, app %s, clien
   "$TARGET" "$TARGET_REPOSITORY_ID" "$TARGET_INSTALLATION_ID" "$APP_ID" "$CLIENT_ID"
 
 cd "$ROOT_DIR"
+cargo build --release -p patchwright-relay
+target/release/patchwright-relay github-app-health --config "$CONFIGURATION"
 cargo test -p patchwright-relay --test app_auth --test installation_tokens --test mutations
 cargo test -p patchwright-engine --test delivery_flow --test monitoring_flow --test queue_recovery
 
