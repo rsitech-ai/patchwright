@@ -1,7 +1,8 @@
 use crate::{
     CancellationState, ConversionError, ConversionRequest, EventStore, GhCliCredentialBroker,
     GitHubAccount, GitHubRepository, GitHubSource, GitHubSyncSummary, Job, JobId, JobKind,
-    JobState, TaskConversionService, approve_delivery, authorize_execution,
+    JobState, MonitorRecord, RemoteObservation, TaskConversionService, approve_delivery,
+    authorize_execution,
     codex::{
         process::{CodexExecutable, CodexProcessConfig, CodexProcessFactory},
         service::{CodexRuntimeStatus, CodexService, CodexServiceError, CodexServiceState},
@@ -165,6 +166,11 @@ async fn dispatch(request: Request, state: &ServerState) -> Value {
         "delivery.approve" => delivery_approve(request.id, &request.params, store),
         "delivery.execute" => delivery_execute(request.id, &request.params, store).await,
         "delivery.status" => delivery_status(request.id, &request.params, store),
+        "monitor.start" => monitor_start(request.id, &request.params, store),
+        "monitor.status" => monitor_status(request.id, &request.params, store),
+        "monitor.observe" => monitor_observe(request.id, &request.params, store),
+        "monitor.wake" => monitor_wake(request.id, &request.params, store),
+        "monitor.cancel" => monitor_cancel(request.id, &request.params, store),
         "codex.status" => codex_status(request.id, &request.params, state).await,
         "codex.start" => codex_start(request.id, &request.params, state).await,
         "codex.events" => codex_events(request.id, &request.params, state).await,
@@ -475,6 +481,169 @@ fn delivery_status(id: Value, params: &Value, store: &Mutex<EventStore>) -> Valu
         },
         Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MonitorStartRequest {
+    task_id: TaskId,
+    repository_full_name: String,
+    pull_request_number: u64,
+    expected_head_sha: String,
+    expected_base_sha: String,
+    #[serde(default = "default_repair_budget")]
+    repair_budget: u32,
+}
+
+const fn default_repair_budget() -> u32 {
+    3
+}
+
+fn monitor_start(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let request: MonitorStartRequest = match encoded_parameter(params, "monitor") {
+        Ok(request) => request,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let store = store.lock().expect("event store lock poisoned");
+    match store.load_task(request.task_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return rpc_error(
+                id,
+                -32070,
+                "monitor start failed",
+                Some("task is missing".into()),
+            );
+        }
+        Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    }
+    let monitor = match MonitorRecord::new(
+        request.task_id,
+        request.repository_full_name,
+        request.pull_request_number,
+        request.expected_head_sha,
+        request.expected_base_sha,
+        chrono::Utc::now(),
+        request.repair_budget,
+    ) {
+        Ok(monitor) => monitor,
+        Err(error) => {
+            return rpc_error(id, -32602, "invalid parameters", Some(error.to_string()));
+        }
+    };
+    match store.save_monitor(&monitor) {
+        Ok(()) => rpc_result(id, json!(monitor)),
+        Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    }
+}
+
+fn monitor_status(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let Some(monitor_id) = monitor_id(params) else {
+        return rpc_error(
+            id,
+            -32602,
+            "invalid parameters",
+            Some("monitorId is required".into()),
+        );
+    };
+    match store
+        .lock()
+        .expect("event store lock poisoned")
+        .monitor(monitor_id)
+    {
+        Ok(Some(monitor)) => rpc_result(id, json!(monitor)),
+        Ok(None) => rpc_error(id, -32071, "monitor is missing", None),
+        Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    }
+}
+
+fn monitor_observe(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let Some(monitor_id) = monitor_id(params) else {
+        return rpc_error(
+            id,
+            -32602,
+            "invalid parameters",
+            Some("monitorId is required".into()),
+        );
+    };
+    let observation: RemoteObservation = match encoded_parameter(params, "observation") {
+        Ok(observation) => observation,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let store = store.lock().expect("event store lock poisoned");
+    let mut monitor = match store.monitor(monitor_id) {
+        Ok(Some(monitor)) => monitor,
+        Ok(None) => return rpc_error(id, -32071, "monitor is missing", None),
+        Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    };
+    let outcome = match monitor.observe(observation, chrono::Utc::now()) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return rpc_error(
+                id,
+                -32072,
+                "monitor observation rejected",
+                Some(error.to_string()),
+            );
+        }
+    };
+    if outcome.invalidate_approvals {
+        if let Err(error) = store.invalidate_task_approvals(monitor.task_id) {
+            return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+        }
+    }
+    match store.save_monitor(&monitor) {
+        Ok(()) => rpc_result(id, json!({"monitor":monitor,"outcome":outcome})),
+        Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    }
+}
+
+fn monitor_wake(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    mutate_monitor(id, params, store, |monitor| {
+        monitor.wake(chrono::Utc::now())
+    })
+}
+
+fn monitor_cancel(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    mutate_monitor(id, params, store, |monitor| {
+        monitor.cancel(chrono::Utc::now())
+    })
+}
+
+fn mutate_monitor(
+    id: Value,
+    params: &Value,
+    store: &Mutex<EventStore>,
+    mutate: impl FnOnce(&mut MonitorRecord) -> bool,
+) -> Value {
+    let Some(monitor_id) = monitor_id(params) else {
+        return rpc_error(
+            id,
+            -32602,
+            "invalid parameters",
+            Some("monitorId is required".into()),
+        );
+    };
+    let store = store.lock().expect("event store lock poisoned");
+    let mut monitor = match store.monitor(monitor_id) {
+        Ok(Some(monitor)) => monitor,
+        Ok(None) => return rpc_error(id, -32071, "monitor is missing", None),
+        Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    };
+    let changed = mutate(&mut monitor);
+    if changed {
+        if let Err(error) = store.save_monitor(&monitor) {
+            return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+        }
+    }
+    rpc_result(id, json!({"changed":changed,"monitor":monitor}))
+}
+
+fn monitor_id(params: &Value) -> Option<uuid::Uuid> {
+    params
+        .get("monitorId")
+        .and_then(Value::as_str)
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
 }
 
 async fn execute_github_action(

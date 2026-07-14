@@ -6,6 +6,7 @@ mod conversion;
 mod delivery;
 mod github;
 mod jobs;
+mod monitoring;
 mod repository;
 mod rpc;
 mod store;
@@ -25,6 +26,10 @@ pub use github::{
 };
 pub use jobs::{
     CancellationState, Job, JobCheckpoint, JobError, JobId, JobKind, JobState, TaskCheckpoint,
+};
+pub use monitoring::{
+    CIState, Mergeability, MonitorOutcome, MonitorRecord, MonitorState, MonitoringError,
+    RemoteObservation, ReviewState,
 };
 pub use repository::{RepositoryInspection, RepositoryService};
 pub use rpc::{serve, serve_with_codex};
