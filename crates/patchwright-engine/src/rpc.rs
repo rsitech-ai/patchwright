@@ -1,7 +1,7 @@
 use crate::{
     CancellationState, ConversionError, ConversionRequest, EventStore, GhCliCredentialBroker,
-    GitHubAccount, GitHubRepository, GitHubSource, GitHubSyncSummary, Job, JobId, JobKind,
-    JobState, MonitorRecord, RemoteObservation, TaskConversionService, approve_delivery,
+    GitHubAccount, GitHubRepository, GitHubSource, GitHubSyncSummary, GitHubToken, Job, JobId,
+    JobKind, JobState, MonitorRecord, RemoteObservation, TaskConversionService, approve_delivery,
     authorize_execution,
     codex::{
         process::{CodexExecutable, CodexProcessConfig, CodexProcessFactory},
@@ -159,6 +159,9 @@ async fn dispatch(request: Request, state: &ServerState) -> Value {
         "github.queue.decisions" => github_queue_decisions(request.id, store),
         "github.repository" => github_repository(request.id, &request.params, store),
         "github.sync" => sync_github(request.id, &request.params, store).await,
+        "github.sync.repository" => {
+            sync_github_repository(request.id, &request.params, store).await
+        }
         "github.sync.start" => github_sync_start(request.id, &request.params, state).await,
         "github.sync.status" => github_sync_status(request.id, &request.params, store),
         "github.sync.cancel" => github_sync_cancel(request.id, &request.params, state).await,
@@ -956,6 +959,17 @@ fn required_string(params: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty() && value.len() <= 4_096)
         .map(str::to_owned)
+}
+
+fn positive_u64(params: &Value, key: &str) -> Option<u64> {
+    params
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+        })
+        .filter(|value| *value > 0)
 }
 
 fn optional_string(params: &Value, key: &str) -> Option<String> {
@@ -1766,6 +1780,122 @@ async fn sync_github(id: Value, params: &Value, store: &Mutex<EventStore>) -> Va
     }
     let summary = sync_repositories(account, repositories, source, resource_limit, store).await;
     rpc_result(id, json!(summary))
+}
+
+async fn sync_github_repository(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let Some(full_name) = required_string(params, "fullName") else {
+        return rpc_error(
+            id,
+            -32602,
+            "invalid parameters",
+            Some("fullName is required".into()),
+        );
+    };
+    let repository_id = positive_u64(params, "repositoryId");
+    let installation_id = positive_u64(params, "installationId");
+    let (Some(repository_id), Some(installation_id)) = (repository_id, installation_id) else {
+        return rpc_error(
+            id,
+            -32602,
+            "invalid parameters",
+            Some("repositoryId and installationId must be positive integers".into()),
+        );
+    };
+    let source =
+        match github_app_source_for_repository(&full_name, repository_id, installation_id).await {
+            Ok(source) => source,
+            Err(error) => {
+                return rpc_error(
+                    id,
+                    -32010,
+                    "GitHub App repository authentication unavailable",
+                    Some(error.to_string()),
+                );
+            }
+        };
+    let repository = match source.repository(&full_name).await {
+        Ok(repository) if repository.id == repository_id => repository,
+        Ok(_) => {
+            return rpc_error(id, -32014, "GitHub repository identity mismatch", None);
+        }
+        Err(error) => {
+            return rpc_error(
+                id,
+                -32013,
+                "GitHub repository lookup failed",
+                Some(error.to_string()),
+            );
+        }
+    };
+    let resource_limit = bounded_limit(params, "resourceLimit", 1000, 1000);
+    let snapshot = match source
+        .repository_snapshot(&repository, resource_limit)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return rpc_error(
+                id,
+                -32015,
+                "GitHub repository synchronization failed",
+                Some(error.to_string()),
+            );
+        }
+    };
+    if let Err(error) = store
+        .lock()
+        .expect("event store lock poisoned")
+        .replace_github_snapshot(&snapshot)
+    {
+        return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+    }
+    rpc_result(id, json!(snapshot))
+}
+
+async fn github_app_source_for_repository(
+    full_name: &str,
+    repository_id: u64,
+    installation_id: u64,
+) -> Result<GitHubSource> {
+    let (owner, repository_name) = full_name
+        .split_once('/')
+        .context("repository full name lacks owner")?;
+    if owner.is_empty() || repository_name.is_empty() || repository_name.contains('/') {
+        bail!("repository full name is invalid");
+    }
+    let runtime = github_app_runtime_configuration()
+        .context("GitHub App runtime configuration is unavailable")?;
+    let key_reference = KeyReference::parse(&runtime.key_reference)
+        .context("GitHub App key reference is invalid")?;
+    let configuration = GitHubAppConfiguration::new(
+        runtime.app_id,
+        runtime.client_id,
+        key_reference,
+        runtime.api_base_url.clone(),
+    )
+    .context("GitHub App configuration is invalid")?;
+    let authenticator = AppAuthenticator::new(configuration, ConfiguredKeyProvider)
+        .context("GitHub App authenticator is unavailable")?;
+    let broker = InstallationBroker::new(authenticator, &runtime.api_base_url)
+        .context("GitHub App installation broker is unavailable")?;
+    let token = broker
+        .token_for_repository(
+            owner,
+            repository_name,
+            repository_id,
+            InstallationPermissions::ingestion(),
+            chrono::Utc::now().timestamp(),
+        )
+        .await
+        .context("GitHub App installation token is unavailable")?;
+    if token.installation_id() != installation_id {
+        bail!("GitHub App installation identity mismatch");
+    }
+    GitHubSource::new(
+        &runtime.api_base_url,
+        GitHubToken::new(token.expose_for_authorization_header()),
+    )
+    .context("GitHub source is unavailable")
 }
 
 async fn sync_repositories(

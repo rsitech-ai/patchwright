@@ -10,6 +10,13 @@ TARGET="$TARGET_OWNER/$TARGET_REPOSITORY"
 ALLOWLIST="${PATCHWRIGHT_GITHUB_E2E_ALLOWLIST:-}"
 CONFIRMATION="${PATCHWRIGHT_GITHUB_E2E_CONFIRM:-}"
 CONFIGURATION="${PATCHWRIGHT_GITHUB_APP_CONFIG:-$HOME/.patchwright/github-app.json}"
+EXISTING_ISSUE_NUMBER="${PATCHWRIGHT_GITHUB_E2E_EXISTING_ISSUE_NUMBER:-}"
+MANUAL_UI_FIXTURE=false
+if [[ -n "$EXISTING_ISSUE_NUMBER" ]]; then
+  MANUAL_UI_FIXTURE=true
+  [[ "$EXISTING_ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ]] \
+    || fail "PATCHWRIGHT_GITHUB_E2E_EXISTING_ISSUE_NUMBER must be positive"
+fi
 
 fail() {
   printf 'blocked:external — %s\n' "$1" >&2
@@ -54,9 +61,12 @@ case "$KEY_REFERENCE" in
     ;;
 esac
 
-LIVE_REPOSITORY_ID="$(gh api "repos/$TARGET" --jq .id 2>/dev/null)" \
-  || fail "the disposable repository is not readable with the current development credential"
-[[ "$LIVE_REPOSITORY_ID" == "$TARGET_REPOSITORY_ID" ]] || fail "repository identity does not match the allowlisted ID"
+if [[ "$MANUAL_UI_FIXTURE" == false ]]; then
+  LIVE_REPOSITORY_ID="$(gh api "repos/$TARGET" --jq .id 2>/dev/null)" \
+    || fail "the disposable repository is not readable with the current development credential"
+  [[ "$LIVE_REPOSITORY_ID" == "$TARGET_REPOSITORY_ID" ]] \
+    || fail "repository identity does not match the allowlisted ID"
+fi
 
 printf 'GitHub App E2E target: %s (repository %s, installation %s, app %s, client %s)\n' \
   "$TARGET" "$TARGET_REPOSITORY_ID" "$TARGET_INSTALLATION_ID" "$APP_ID" "$CLIENT_ID"
@@ -66,6 +76,7 @@ cargo build --release -p patchwright-relay
 target/release/patchwright-relay github-app-health --config "$CONFIGURATION"
 cargo test -p patchwright-relay --test app_auth --test installation_tokens --test mutations
 cargo test -p patchwright-engine --test delivery_flow --test monitoring_flow --test queue_recovery
+cargo build -p patchwright-engine
 
 STATE_DIR="$(mktemp -d)"
 SOCKET="$STATE_DIR/engine.sock"
@@ -73,7 +84,10 @@ DATABASE="$STATE_DIR/engine.sqlite3"
 ENGINE_LOG="$STATE_DIR/engine.log"
 cleanup() {
   local status=$?
-  test -z "${ENGINE_PID:-}" || kill "$ENGINE_PID" >/dev/null 2>&1 || true
+  if [[ -n "${ENGINE_PID:-}" ]]; then
+    kill "$ENGINE_PID" >/dev/null 2>&1 || true
+    wait "$ENGINE_PID" >/dev/null 2>&1 || true
+  fi
   if [[ "$status" == 0 ]]; then
     rm -rf "$STATE_DIR"
   else
@@ -89,11 +103,13 @@ rpc_result() {
   local request response
   request="$(jq -cn --arg method "$method" --argjson params "$params" \
     '{jsonrpc:"2.0",id:1,method:$method,params:$params}')"
-  response="$(printf '%s\n' "$request" | nc -U "$SOCKET")" \
-    || die "engine RPC transport failed for $method"
+  response="$(printf '%s\n' "$request" | nc -U "$SOCKET")" || {
+    printf 'engine RPC transport failed for %s\n' "$method" >&2
+    return 1
+  }
   if ! jq -e 'has("result") and (has("error") | not)' >/dev/null <<<"$response"; then
     jq -c '{method:"'"$method"'",error:.error}' <<<"$response" >&2 || true
-    die "engine RPC rejected $method"
+    return 1
   fi
   jq -c '.result' <<<"$response"
 }
@@ -114,12 +130,36 @@ deliver() {
     '{remote:$remote,action:$action,expectedBaseSha:$expectedBaseSha,snapshotGeneration:$snapshotGeneration}
       + if $expectedHeadSha == "" then {} else {expectedHeadSha:$expectedHeadSha} end')"
   preview="$(rpc_result delivery.preview "$(jq -cn --arg taskId "$task_id" \
-    --argjson actionPreview "$action_preview" '{taskId:$taskId,actionPreview:$actionPreview}')")"
+    --argjson actionPreview "$action_preview" '{taskId:$taskId,actionPreview:$actionPreview}')")" \
+    || return 1
   approval="$(rpc_result delivery.approve "$(jq -cn --arg approvedBy "owner-qualified:$TARGET" \
-    --argjson preview "$preview" '{preview:$preview,approvedBy:$approvedBy}')")"
-  approval_id="$(jq -er '.id' <<<"$approval")" || die "delivery approval ID is missing"
+    --argjson preview "$preview" '{preview:$preview,approvedBy:$approvedBy}')")" || return 1
+  approval_id="$(jq -er '.id' <<<"$approval")" || return 1
   rpc_result delivery.execute "$(jq -cn --arg approvalId "$approval_id" \
     --argjson preview "$preview" '{preview:$preview,approvalId:$approvalId}')"
+}
+
+sync_until_work_item() {
+  local kind="$1"
+  local number="$2"
+  local attempt
+  for attempt in 1 2 3; do
+    SNAPSHOT="$(rpc_result github.sync.repository "$(jq -cn \
+      --arg fullName "$TARGET" \
+      --arg repositoryId "$TARGET_REPOSITORY_ID" \
+      --arg installationId "$TARGET_INSTALLATION_ID" \
+      '{fullName:$fullName,repositoryId:$repositoryId,installationId:$installationId,resourceLimit:1000}')")" \
+      || return 1
+    if jq -e --arg kind "$kind" --argjson number "$number" \
+      '.workItems[] | select(.number == $number and .kind == $kind)' \
+      >/dev/null <<<"$SNAPSHOT"; then
+      return 0
+    fi
+    if [[ "$attempt" != 3 ]]; then
+      sleep "$((attempt * 2))"
+    fi
+  done
+  die "qualification $kind #$number was not ingested after three bounded sync attempts"
 }
 
 mkdir -p "$STATE_DIR/repository" "$STATE_DIR/state" "$STATE_DIR/worktrees"
@@ -131,41 +171,54 @@ for _ in {1..100}; do
   sleep 0.05
 done
 test -S "$SOCKET" || die "engine socket did not become ready"
-rpc_result system.health '{}' >/dev/null
+rpc_result system.health '{}' >/dev/null || die "engine health check failed"
 
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+RUN_ID="${PATCHWRIGHT_GITHUB_E2E_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+[[ "$RUN_ID" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "qualification run ID is invalid"
 BRANCH="patchwright/e2e-$RUN_ID"
 MARKER="Patchwright GitHub App qualification $RUN_ID"
-BASE_BRANCH="$(gh api "repos/$TARGET" --jq .default_branch)" \
-  || die "default branch lookup failed"
-BASE_SHA="$(gh api "repos/$TARGET/commits/$BASE_BRANCH" --jq .sha)" \
-  || die "default branch commit lookup failed"
-BASE_TREE="$(gh api "repos/$TARGET/git/commits/$BASE_SHA" --jq .tree.sha)" \
-  || die "base tree lookup failed"
-BLOB_SHA="$(gh api --method POST "repos/$TARGET/git/blobs" \
-  -f content="$MARKER" -f encoding=utf-8 --jq .sha)" \
-  || die "qualification blob creation failed"
-TREE_SHA="$(jq -cn --arg base_tree "$BASE_TREE" --arg sha "$BLOB_SHA" \
-  '{base_tree:$base_tree,tree:[{path:"patchwright-e2e.txt",mode:"100644",type:"blob",sha:$sha}]}' \
-  | gh api --method POST "repos/$TARGET/git/trees" --input - --jq .sha)" \
-  || die "qualification tree creation failed"
-SEED_SHA="$(jq -cn --arg message "$MARKER" --arg tree "$TREE_SHA" --arg parent "$BASE_SHA" \
-  '{message:$message,tree:$tree,parents:[$parent]}' \
-  | gh api --method POST "repos/$TARGET/git/commits" --input - --jq .sha)" \
-  || die "qualification commit creation failed"
-ISSUE="$(gh api --method POST "repos/$TARGET/issues" \
-  -f title="[Patchwright E2E] Approval-gated delivery" \
-  -f body="Disposable private qualification fixture: $MARKER")" \
-  || die "qualification issue creation failed"
-ISSUE_NUMBER="$(jq -er .number <<<"$ISSUE")" || die "qualification issue number is missing"
-ISSUE_UPDATED_AT="$(jq -er .updated_at <<<"$ISSUE")" || die "qualification issue timestamp is missing"
-ISSUE_URL="$(jq -er .html_url <<<"$ISSUE")" || die "qualification issue URL is missing"
+if [[ "$MANUAL_UI_FIXTURE" == true ]]; then
+  ISSUE_NUMBER="$EXISTING_ISSUE_NUMBER"
+else
+  BASE_BRANCH="$(gh api "repos/$TARGET" --jq .default_branch)" \
+    || die "default branch lookup failed"
+  BASE_SHA="$(gh api "repos/$TARGET/commits/$BASE_BRANCH" --jq .sha)" \
+    || die "default branch commit lookup failed"
+  BASE_TREE="$(gh api "repos/$TARGET/git/commits/$BASE_SHA" --jq .tree.sha)" \
+    || die "base tree lookup failed"
+  BLOB_SHA="$(gh api --method POST "repos/$TARGET/git/blobs" \
+    -f content="$MARKER" -f encoding=utf-8 --jq .sha)" \
+    || die "qualification blob creation failed"
+  TREE_SHA="$(jq -cn --arg base_tree "$BASE_TREE" --arg sha "$BLOB_SHA" \
+    '{base_tree:$base_tree,tree:[{path:"patchwright-e2e.txt",mode:"100644",type:"blob",sha:$sha}]}' \
+    | gh api --method POST "repos/$TARGET/git/trees" --input - --jq .sha)" \
+    || die "qualification tree creation failed"
+  SEED_SHA="$(jq -cn --arg message "$MARKER" --arg tree "$TREE_SHA" --arg parent "$BASE_SHA" \
+    '{message:$message,tree:$tree,parents:[$parent]}' \
+    | gh api --method POST "repos/$TARGET/git/commits" --input - --jq .sha)" \
+    || die "qualification commit creation failed"
+  ISSUE="$(gh api --method POST "repos/$TARGET/issues" \
+    -f title="[Patchwright E2E] Approval-gated delivery" \
+    -f body="Disposable private qualification fixture: $MARKER")" \
+    || die "qualification issue creation failed"
+  ISSUE_NUMBER="$(jq -er .number <<<"$ISSUE")" || die "qualification issue number is missing"
+  ISSUE_UPDATED_AT="$(jq -er .updated_at <<<"$ISSUE")" || die "qualification issue timestamp is missing"
+  ISSUE_URL="$(jq -er .html_url <<<"$ISSUE")" || die "qualification issue URL is missing"
+fi
 
-rpc_result github.sync '{"repositoryLimit":"100","resourceLimit":"1000"}' >/dev/null
-SNAPSHOT="$(rpc_result github.repository "$(jq -cn --arg fullName "$TARGET" '{fullName:$fullName}')")"
-jq -e --argjson issue "$ISSUE_NUMBER" \
-  '.workItems[] | select(.number == $issue and .kind == "issue")' \
-  >/dev/null <<<"$SNAPSHOT" || die "qualification issue was not ingested"
+sync_until_work_item issue "$ISSUE_NUMBER" || die "qualification issue was not ingested"
+if [[ "$MANUAL_UI_FIXTURE" == true ]]; then
+  BASE_BRANCH="$(jq -er '.repository.defaultBranch' <<<"$SNAPSHOT")" \
+    || die "default branch is missing from the App snapshot"
+  BASE_SHA="$(jq -er '.repository.defaultBranchSha' <<<"$SNAPSHOT")" \
+    || die "default branch SHA is missing from the App snapshot"
+  ISSUE_UPDATED_AT="$(jq -er --argjson number "$ISSUE_NUMBER" \
+    '.workItems[] | select(.number == $number and .kind == "issue") | .updatedAt' \
+    <<<"$SNAPSHOT")" || die "qualification issue timestamp is missing"
+  ISSUE_URL="$(jq -er --argjson number "$ISSUE_NUMBER" \
+    '.workItems[] | select(.number == $number and .kind == "issue") | .htmlUrl' \
+    <<<"$SNAPSHOT")" || die "qualification issue URL is missing"
+fi
 rpc_result repository.bind "$(jq -cn \
   --arg repositoryFullName "$TARGET" \
   --arg installationId "$TARGET_INSTALLATION_ID" \
@@ -173,12 +226,14 @@ rpc_result repository.bind "$(jq -cn \
   --arg stateRoot "$STATE_DIR/state" \
   --arg worktreeRoot "$STATE_DIR/worktrees" \
   '{repositoryFullName:$repositoryFullName,installationId:$installationId,
-    managedClone:$managedClone,stateRoot:$stateRoot,worktreeRoot:$worktreeRoot}')" >/dev/null
+    managedClone:$managedClone,stateRoot:$stateRoot,worktreeRoot:$worktreeRoot}')" >/dev/null \
+  || die "repository binding failed"
 ISSUE_TASK="$(rpc_result task.createFromGitHub "$(jq -cn \
   --arg repositoryFullName "$TARGET" \
   --arg itemNumber "$ISSUE_NUMBER" \
   --arg expectedUpdatedAt "$ISSUE_UPDATED_AT" \
-  '{repositoryFullName:$repositoryFullName,itemNumber:$itemNumber,expectedUpdatedAt:$expectedUpdatedAt}')")"
+  '{repositoryFullName:$repositoryFullName,itemNumber:$itemNumber,expectedUpdatedAt:$expectedUpdatedAt}')")" \
+  || die "qualification issue task creation failed"
 ISSUE_TASK_ID="$(jq -er '.task.id' <<<"$ISSUE_TASK")" || die "qualification issue task is missing"
 REMOTE_IDENTITY="$(jq -cn \
   --argjson repositoryId "$TARGET_REPOSITORY_ID" \
@@ -186,27 +241,43 @@ REMOTE_IDENTITY="$(jq -cn \
   --arg repositoryFullName "$TARGET" \
   '{repositoryId:$repositoryId,installationId:$installationId,repositoryFullName:$repositoryFullName}')"
 
-BRANCH_RESULT="$(deliver "$ISSUE_TASK_ID" "$(jq -cn --arg branch "$BRANCH" --arg fromSha "$SEED_SHA" \
-  '{kind:"createBranch",branch:$branch,fromSha:$fromSha}')" "$BASE_SHA" "" 1)"
+BRANCH_FROM_SHA="${SEED_SHA:-$BASE_SHA}"
+BRANCH_RESULT="$(deliver "$ISSUE_TASK_ID" "$(jq -cn --arg branch "$BRANCH" --arg fromSha "$BRANCH_FROM_SHA" \
+  '{kind:"createBranch",branch:$branch,fromSha:$fromSha}')" "$BASE_SHA" "" 1)" \
+  || die "approval-gated branch delivery failed"
+if [[ "$MANUAL_UI_FIXTURE" == true ]]; then
+  printf 'Patchwright branch ready for one UI fixture commit: %s/tree/%s\n' "$TARGET" "$BRANCH" >&2
+  printf 'Paste the resulting 40-character commit SHA, then press Return: ' >&2
+  IFS= read -r SEED_SHA
+  [[ "$SEED_SHA" =~ ^[0-9a-f]{40}$ ]] || die "manual fixture commit SHA is invalid"
+fi
 CHECK_RESULT="$(deliver "$ISSUE_TASK_ID" "$(jq -cn --arg headSha "$SEED_SHA" \
   '{kind:"checkRun",name:"Patchwright Qualification",headSha:$headSha,status:"completed",conclusion:"success"}')" \
-  "$BASE_SHA" "" 1)"
+  "$BASE_SHA" "" 1)" || die "approval-gated check delivery failed"
 COMMENT_RESULT="$(deliver "$ISSUE_TASK_ID" "$(jq -cn --argjson issueNumber "$ISSUE_NUMBER" --arg body "$MARKER" \
-  '{kind:"comment",issueNumber:$issueNumber,body:$body}')" "$BASE_SHA" "" 1)"
+  '{kind:"comment",issueNumber:$issueNumber,body:$body}')" "$BASE_SHA" "" 1)" \
+  || die "approval-gated comment delivery failed"
 PR_RESULT="$(deliver "$ISSUE_TASK_ID" "$(jq -cn \
   --arg title "[Patchwright E2E] Approval-gated draft" \
   --arg head "$BRANCH" --arg base "$BASE_BRANCH" --arg body "$MARKER" \
-  '{kind:"draftPullRequest",title:$title,head:$head,base:$base,body:$body}')" "$BASE_SHA" "" 1)"
+  '{kind:"draftPullRequest",title:$title,head:$head,base:$base,body:$body}')" "$BASE_SHA" "" 1)" \
+  || die "approval-gated draft pull request delivery failed"
 PR_NUMBER="$(jq -er '.result.number' <<<"$PR_RESULT")" || die "draft pull request number is missing"
 PR_URL="$(jq -er '.result.htmlUrl' <<<"$PR_RESULT")" || die "draft pull request URL is missing"
-PR_NODE_ID="$(gh api "repos/$TARGET/pulls/$PR_NUMBER" --jq .node_id)" \
-  || die "draft pull request node lookup failed"
-gh api graphql --silent \
-  -f query='mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{isDraft}}}' \
-  -F id="$PR_NODE_ID" || die "marking the qualification pull request ready failed"
+if [[ "$MANUAL_UI_FIXTURE" == true ]]; then
+  printf 'Mark this disposable draft ready for review in GitHub: %s\n' "$PR_URL" >&2
+  printf 'Type ready after GitHub confirms the change: ' >&2
+  IFS= read -r READY_CONFIRMATION
+  [[ "$READY_CONFIRMATION" == "ready" ]] || die "manual ready-for-review confirmation is invalid"
+else
+  PR_NODE_ID="$(gh api "repos/$TARGET/pulls/$PR_NUMBER" --jq .node_id)" \
+    || die "draft pull request node lookup failed"
+  gh api graphql --silent \
+    -f query='mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{isDraft}}}' \
+    -F id="$PR_NODE_ID" || die "marking the qualification pull request ready failed"
+fi
 
-rpc_result github.sync '{"repositoryLimit":"100","resourceLimit":"1000"}' >/dev/null
-SNAPSHOT="$(rpc_result github.repository "$(jq -cn --arg fullName "$TARGET" '{fullName:$fullName}')")"
+sync_until_work_item pullRequest "$PR_NUMBER" || die "qualification pull request was not ingested"
 PR_UPDATED_AT="$(jq -er --argjson number "$PR_NUMBER" \
   '.workItems[] | select(.number == $number and .kind == "pullRequest") | .updatedAt' \
   <<<"$SNAPSHOT")" || die "qualification pull request was not ingested"
@@ -214,7 +285,8 @@ PR_TASK="$(rpc_result task.createFromGitHub "$(jq -cn \
   --arg repositoryFullName "$TARGET" \
   --arg itemNumber "$PR_NUMBER" \
   --arg expectedUpdatedAt "$PR_UPDATED_AT" \
-  '{repositoryFullName:$repositoryFullName,itemNumber:$itemNumber,expectedUpdatedAt:$expectedUpdatedAt}')")"
+  '{repositoryFullName:$repositoryFullName,itemNumber:$itemNumber,expectedUpdatedAt:$expectedUpdatedAt}')")" \
+  || die "qualification pull request task creation failed"
 PR_TASK_ID="$(jq -er '.task.id' <<<"$PR_TASK")" || die "qualification pull request task is missing"
 PR_BASE_SHA="$(jq -er --argjson number "$PR_NUMBER" \
   '.workItems[] | select(.number == $number and .kind == "pullRequest") | .baseSha' \
@@ -225,29 +297,45 @@ PR_HEAD_SHA="$(jq -er --argjson number "$PR_NUMBER" \
 
 REVIEW_RESULT="$(deliver "$PR_TASK_ID" "$(jq -cn --argjson pullRequestNumber "$PR_NUMBER" --arg body "$MARKER" \
   '{kind:"review",pullRequestNumber:$pullRequestNumber,event:"comment",body:$body,inlineComments:[]}')" \
-  "$PR_BASE_SHA" "$PR_HEAD_SHA" 2)"
+  "$PR_BASE_SHA" "$PR_HEAD_SHA" 2)" || die "approval-gated review delivery failed"
 MERGE_RESULT="$(deliver "$PR_TASK_ID" "$(jq -cn --argjson pullRequestNumber "$PR_NUMBER" --arg expectedHeadSha "$PR_HEAD_SHA" \
   '{kind:"mergePullRequest",pullRequestNumber:$pullRequestNumber,expectedHeadSha:$expectedHeadSha,method:"squash"}')" \
-  "$PR_BASE_SHA" "$PR_HEAD_SHA" 2)"
+  "$PR_BASE_SHA" "$PR_HEAD_SHA" 2)" || die "approval-gated merge delivery failed"
 jq -e '.result.merged == true' >/dev/null <<<"$MERGE_RESULT" \
   || die "qualification pull request was not merged"
 
 APP_SLUG="$(target/release/patchwright-relay github-app-health --config "$CONFIGURATION" | jq -er .slug)" \
   || die "final GitHub App identity check failed"
-gh api "repos/$TARGET/issues/$ISSUE_NUMBER/comments" \
-  | jq -e --arg marker "$MARKER" --arg login "$APP_SLUG[bot]" \
-    '.[] | select(.body == $marker and .user.login == $login)' >/dev/null \
-  || die "App-authored issue comment could not be reconciled"
-gh api "repos/$TARGET/pulls/$PR_NUMBER/reviews" \
-  | jq -e --arg marker "$MARKER" --arg login "$APP_SLUG[bot]" \
-    '.[] | select(.body == $marker and .user.login == $login)' >/dev/null \
-  || die "App-authored pull request review could not be reconciled"
-gh api "repos/$TARGET/commits/$PR_HEAD_SHA/check-runs" \
-  | jq -e --argjson appId "$APP_ID" \
-    '.check_runs[] | select(.name == "Patchwright Qualification" and .app.id == $appId and .conclusion == "success")' \
-    >/dev/null || die "App-authored check run could not be reconciled"
-gh api "repos/$TARGET/pulls/$PR_NUMBER" --jq '.merged == true' | grep -qx true \
-  || die "merged pull request state could not be reconciled"
+if [[ "$MANUAL_UI_FIXTURE" == true ]]; then
+  sync_until_work_item pullRequest "$PR_NUMBER" || die "merged pull request could not be reconciled"
+  jq -e --arg marker "$MARKER" --arg login "$APP_SLUG[bot]" --argjson number "$ISSUE_NUMBER" \
+    '.discussions[] | select(.itemNumber == $number and .body == $marker and .author == $login)' \
+    >/dev/null <<<"$SNAPSHOT" || die "App-authored issue comment could not be reconciled"
+  jq -e --arg marker "$MARKER" --arg login "$APP_SLUG[bot]" --argjson number "$PR_NUMBER" \
+    '.discussions[] | select(.itemNumber == $number and .body == $marker and .author == $login)' \
+    >/dev/null <<<"$SNAPSHOT" || die "App-authored pull request review could not be reconciled"
+  jq -e --argjson number "$PR_NUMBER" \
+    '.checks[] | select(.itemNumber == $number and .name == "Patchwright Qualification" and .conclusion == "success")' \
+    >/dev/null <<<"$SNAPSHOT" || die "App-authored check run could not be reconciled"
+  jq -e --argjson number "$PR_NUMBER" \
+    '.workItems[] | select(.number == $number and .kind == "pullRequest" and .state == "closed")' \
+    >/dev/null <<<"$SNAPSHOT" || die "merged pull request state could not be reconciled"
+else
+  gh api "repos/$TARGET/issues/$ISSUE_NUMBER/comments" \
+    | jq -e --arg marker "$MARKER" --arg login "$APP_SLUG[bot]" \
+      '.[] | select(.body == $marker and .user.login == $login)' >/dev/null \
+    || die "App-authored issue comment could not be reconciled"
+  gh api "repos/$TARGET/pulls/$PR_NUMBER/reviews" \
+    | jq -e --arg marker "$MARKER" --arg login "$APP_SLUG[bot]" \
+      '.[] | select(.body == $marker and .user.login == $login)' >/dev/null \
+    || die "App-authored pull request review could not be reconciled"
+  gh api "repos/$TARGET/commits/$PR_HEAD_SHA/check-runs" \
+    | jq -e --argjson appId "$APP_ID" \
+      '.check_runs[] | select(.name == "Patchwright Qualification" and .app.id == $appId and .conclusion == "success")' \
+      >/dev/null || die "App-authored check run could not be reconciled"
+  gh api "repos/$TARGET/pulls/$PR_NUMBER" --jq '.merged == true' | grep -qx true \
+    || die "merged pull request state could not be reconciled"
+fi
 
 if strings "$DATABASE" "$ENGINE_LOG" | grep -Eq 'BEGIN (RSA )?PRIVATE KEY|ghs_[A-Za-z0-9]+'; then
   die "credential material appeared in durable qualification evidence"
