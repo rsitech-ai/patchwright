@@ -3,6 +3,7 @@
 pub mod codex;
 mod command;
 mod conversion;
+mod delivery;
 mod github;
 mod jobs;
 mod repository;
@@ -13,6 +14,9 @@ mod worktree;
 pub use command::{CommandOutput, CommandRunner, CommandSpec};
 pub use conversion::{
     ConversionError, ConversionOutcome, ConversionPreview, ConversionRequest, TaskConversionService,
+};
+pub use delivery::{
+    DeliveryError, DeliveryPreview, approve_delivery, authorize_execution, preview_delivery,
 };
 pub use github::{
     GhCliCredentialBroker, GitHubAccount, GitHubCheckRun, GitHubDiscussion, GitHubPermission,

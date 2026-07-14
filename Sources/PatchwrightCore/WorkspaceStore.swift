@@ -31,6 +31,11 @@ public final class WorkspaceStore: ObservableObject {
     @Published public private(set) var codexApprovalsByTask: [UUID: [CodexRuntimeApproval]] = [:]
     @Published public private(set) var codexBusyTaskIDs: Set<UUID> = []
     @Published public private(set) var codexError: String?
+    @Published public private(set) var deliveryPreviews: [UUID: DeliveryPreview] = [:]
+    @Published public private(set) var deliveryApprovals: [UUID: DeliveryApproval] = [:]
+    @Published public private(set) var deliveryExecutions: [UUID: DeliveryExecution] = [:]
+    @Published public private(set) var deliveryBusyTaskIDs: Set<UUID> = []
+    @Published public private(set) var deliveryError: String?
     @Published public private(set) var presentationPreferences: WorkspacePresentationPreferences
     @Published public var githubError: String?
     public let engine: any EngineServing
@@ -183,6 +188,75 @@ public final class WorkspaceStore: ObservableObject {
             selectedTaskID = task.id
         } catch {
             connectionState = .failed(error.localizedDescription)
+        }
+    }
+
+    public func previewCommentDelivery(task: EngineeringTask, body: String) async {
+        let body = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty, !deliveryBusyTaskIDs.contains(task.id) else { return }
+        let identity: (UInt64, String, UInt64, String?, String?, Date)
+        switch task.source {
+        case .githubIssue(let source):
+            identity = (source.repositoryID, source.repositoryFullName, source.number, nil, nil, source.snapshotAt)
+        case .githubPullRequest(let source):
+            identity = (source.repositoryID, source.repositoryFullName, source.number, source.headSHA, source.baseSHA, source.snapshotAt)
+        default:
+            deliveryError = "GitHub delivery requires an ingested issue or pull request task."
+            return
+        }
+        guard let installationID = repositories.first(where: { $0.id == identity.0 })?.installationID else {
+            deliveryError = "Install the Patchwright GitHub App for this repository before preparing delivery."
+            return
+        }
+        deliveryBusyTaskIDs.insert(task.id)
+        defer { deliveryBusyTaskIDs.remove(task.id) }
+        do {
+            let draft = GitHubActionPreviewDraft(
+                remote: GitHubRemoteIdentity(
+                    repositoryId: identity.0,
+                    installationId: installationID,
+                    repositoryFullName: identity.1
+                ),
+                action: GitHubActionPayload(commentNumber: identity.2, body: body),
+                expectedHeadSha: identity.3,
+                expectedBaseSha: identity.4,
+                snapshotGeneration: max(1, UInt64(identity.5.timeIntervalSince1970))
+            )
+            deliveryPreviews[task.id] = try await engine.previewDelivery(taskID: task.id, draft: draft)
+            deliveryApprovals[task.id] = nil
+            deliveryExecutions[task.id] = nil
+            deliveryError = nil
+        } catch {
+            deliveryError = error.localizedDescription
+        }
+    }
+
+    public func approveDelivery(taskID: UUID) async {
+        guard let preview = deliveryPreviews[taskID], !deliveryBusyTaskIDs.contains(taskID) else { return }
+        deliveryBusyTaskIDs.insert(taskID)
+        defer { deliveryBusyTaskIDs.remove(taskID) }
+        do {
+            deliveryApprovals[taskID] = try await engine.approveDelivery(
+                preview,
+                approvedBy: ProcessInfo.processInfo.userName
+            )
+            deliveryError = nil
+        } catch {
+            deliveryError = error.localizedDescription
+        }
+    }
+
+    public func executeDelivery(taskID: UUID) async {
+        guard let preview = deliveryPreviews[taskID],
+              let approval = deliveryApprovals[taskID],
+              !deliveryBusyTaskIDs.contains(taskID) else { return }
+        deliveryBusyTaskIDs.insert(taskID)
+        defer { deliveryBusyTaskIDs.remove(taskID) }
+        do {
+            deliveryExecutions[taskID] = try await engine.executeDelivery(preview, approvalID: approval.id)
+            deliveryError = nil
+        } catch {
+            deliveryError = error.localizedDescription
         }
     }
 
