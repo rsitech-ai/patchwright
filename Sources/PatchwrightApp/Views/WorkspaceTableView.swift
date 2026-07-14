@@ -81,7 +81,9 @@ struct WorkspaceTableView: View {
     private var pullRequestTable: some View {
         Table(pullRequests, selection: $store.selectedWorkItemID) {
             TableColumn("Priority") { item in
-                Text(store.queueState(for: item).label)
+                let decision = store.queueDecision(for: item)
+                Text(decision?.tier.label ?? store.queueState(for: item).label)
+                    .help(decision?.reasons.joined(separator: "\n") ?? "No workflow decision")
             }
             .width(min: 88, ideal: 110)
             TableColumn("Repository", value: \.repositoryFullName)
@@ -194,6 +196,18 @@ struct WorkspaceTableView: View {
 
     @ToolbarContentBuilder private var tableToolbar: some ToolbarContent {
         if store.primarySelection == .queue {
+            ToolbarItem {
+                Menu(store.selectedWorkflowPreset.label, systemImage: "point.3.connected.trianglepath.dotted") {
+                    ForEach(PullRequestWorkflowPreset.allCases) { preset in
+                        Button {
+                            Task { await store.applyWorkflowPreset(preset) }
+                        } label: {
+                            Label(preset.label, systemImage: preset == store.selectedWorkflowPreset ? "checkmark" : "circle")
+                        }
+                    }
+                }
+                .help("Apply an explainable pull request workflow")
+            }
             ToolbarItem {
                 Menu("Sort", systemImage: "arrow.up.arrow.down") {
                     ForEach(PullRequestSortKey.allCases, id: \.self) { key in

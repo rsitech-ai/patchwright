@@ -20,6 +20,8 @@ public final class WorkspaceStore: ObservableObject {
     @Published public private(set) var selectedRepository: GitHubRepositorySnapshot?
     @Published public private(set) var githubSyncSummary: GitHubSyncSummary?
     @Published public private(set) var githubSyncJob: GitHubSyncJob?
+    @Published public private(set) var queueDecisions: [PullRequestQueueDecision] = []
+    @Published public private(set) var selectedWorkflowPreset: PullRequestWorkflowPreset = .quickWins
     @Published public private(set) var isSyncingGitHub = false
     @Published public private(set) var conversionPreview: ConversionPreview?
     @Published public private(set) var isConvertingGitHubItem = false
@@ -73,6 +75,11 @@ public final class WorkspaceStore: ObservableObject {
             githubStatus = try await engine.call(method: "github.status", params: [:], as: GitHubStatus.self)
             repositories = try await engine.call(method: "github.repositories", params: [:], as: [GitHubRepository].self)
             githubWorkItems = try await engine.call(method: "github.queue", params: [:], as: [GitHubWorkItem].self)
+            if let decisions = try? await engine.call(
+                method: "github.queue.decisions", params: [:], as: [PullRequestQueueDecision].self
+            ) {
+                queueDecisions = decisions
+            }
             githubError = nil
         } catch {
             githubError = error.localizedDescription
@@ -117,6 +124,7 @@ public final class WorkspaceStore: ObservableObject {
             }
             if job.state == .cancelled { githubError = nil }
             await refreshGitHub()
+            await applyWorkflowPreset(selectedWorkflowPreset)
             if let selectedRepositoryName,
                let repository = repositories.first(where: { $0.fullName == selectedRepositoryName }) {
                 await selectRepository(repository)
@@ -315,7 +323,30 @@ public final class WorkspaceStore: ObservableObject {
             )
         }
         let matching = records.filter { presentationPreferences.filter.matches($0, now: Date()) }
-        let ids = sortPullRequests(matching, by: presentationPreferences.pullRequestSort).map(\.id)
+        let presentationSorted = sortPullRequests(matching, by: presentationPreferences.pullRequestSort)
+        guard !queueDecisions.isEmpty else {
+            let byID = Dictionary(uniqueKeysWithValues: pulls.map { ($0.id, $0) })
+            return presentationSorted.map(\.id).compactMap { byID[$0] }
+        }
+        let workflowOrder = Dictionary(uniqueKeysWithValues: queueDecisions.enumerated().map {
+            ("\($0.element.repositoryFullName)#\($0.element.number)", $0.offset)
+        })
+        let workItemByID = Dictionary(uniqueKeysWithValues: pulls.map { ($0.id, $0) })
+        let presentationOrder = Dictionary(uniqueKeysWithValues: presentationSorted.enumerated().map {
+            ($0.element.id, $0.offset)
+        })
+        let sorted = matching.sorted { left, right in
+            let leftItem = workItemByID[left.id]
+            let rightItem = workItemByID[right.id]
+            let leftKey = leftItem.map { "\($0.repositoryFullName)#\($0.number)" } ?? ""
+            let rightKey = rightItem.map { "\($0.repositoryFullName)#\($0.number)" } ?? ""
+            let leftPosition = workflowOrder[leftKey] ?? Int.max
+            let rightPosition = workflowOrder[rightKey] ?? Int.max
+            if leftPosition != rightPosition { return leftPosition < rightPosition }
+            return (presentationOrder[left.id] ?? Int.max)
+                < (presentationOrder[right.id] ?? Int.max)
+        }
+        let ids = sorted.map { $0.id }
         let byID = Dictionary(uniqueKeysWithValues: pulls.map { ($0.id, $0) })
         return ids.compactMap { byID[$0] }
     }
@@ -391,11 +422,40 @@ public final class WorkspaceStore: ObservableObject {
     }
 
     public func queueState(for item: GitHubWorkItem) -> PullRequestQueueState {
+        if let decision = queueDecision(for: item) {
+            switch decision.tier {
+            case .critical, .ready: return .ready
+            case .repair, .review: return .needsWork
+            case .draft: return .inbox
+            case .stale: return .assessed
+            case .blocked: return .blocked
+            }
+        }
         if item.hasConflicts == true { return .blocked }
         if item.reviewDecision == "changesRequested" || item.ciHealth == "failing" { return .needsWork }
         if item.reviewDecision == "approved" && item.ciHealth == "passing" { return .ready }
         if item.draft { return .inbox }
         return .assessed
+    }
+
+    public func queueDecision(for item: GitHubWorkItem) -> PullRequestQueueDecision? {
+        queueDecisions.first {
+            $0.repositoryFullName == item.repositoryFullName && $0.number == item.number
+        }
+    }
+
+    public func applyWorkflowPreset(_ preset: PullRequestWorkflowPreset) async {
+        do {
+            selectedWorkflowPreset = preset
+            queueDecisions = try await engine.call(
+                method: "github.queue.assess",
+                params: ["preset": preset.rawValue],
+                as: [PullRequestQueueDecision].self
+            )
+            githubError = nil
+        } catch {
+            githubError = error.localizedDescription
+        }
     }
 
     public func previewTask(from item: GitHubWorkItem) async {

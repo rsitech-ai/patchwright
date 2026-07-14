@@ -163,3 +163,41 @@ public struct GitHubSyncJob: Codable, Identifiable, Equatable, Sendable {
     public let updatedAt: Date
     public let generation: UInt64
 }
+
+public enum PullRequestWorkflowPreset: String, Codable, CaseIterable, Identifiable, Sendable {
+    case quickWins, ciRescue, reviewClosure, conflictRecovery, dependencyChain, securityFirst
+    case releaseTrain, stalePullRequestTriage, draftCompletion, postMergeWatch
+    case reviewLoadBalancing, duplicateOverlapDetection
+
+    public var id: String { rawValue }
+    public var label: String {
+        switch self {
+        case .quickWins: "Quick Wins"
+        case .ciRescue: "CI Rescue"
+        case .reviewClosure: "Review Closure"
+        case .conflictRecovery: "Conflict Recovery"
+        case .dependencyChain: "Dependency Chain"
+        case .securityFirst: "Security First"
+        case .releaseTrain: "Release Train"
+        case .stalePullRequestTriage: "Stale PR Triage"
+        case .draftCompletion: "Draft Completion"
+        case .postMergeWatch: "Post-Merge Watch"
+        case .reviewLoadBalancing: "Review Load Balancing"
+        case .duplicateOverlapDetection: "Duplicate/Overlap Detection"
+        }
+    }
+}
+
+public enum PullRequestQueueTier: String, Codable, Sendable {
+    case critical, ready, repair, review, draft, stale, blocked
+    public var label: String { rawValue.capitalized }
+}
+
+public struct PullRequestQueueDecision: Codable, Equatable, Sendable {
+    public let repositoryFullName: String
+    public let number: UInt64
+    public let tier: PullRequestQueueTier
+    public let score: Int64
+    public let reasons: [String]
+    public let decisionInputSha256: String
+}

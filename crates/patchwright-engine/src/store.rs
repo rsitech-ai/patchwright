@@ -7,7 +7,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use patchwright_core::{
-    Approval, RepositoryBinding, RepositoryBindingId, Task, TaskContract, TaskId,
+    Approval, QueueDecision, RepositoryBinding, RepositoryBindingId, Task, TaskContract, TaskId,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
@@ -821,6 +821,35 @@ impl EventStore {
             .context("load latest GitHub sync time")
     }
 
+    pub fn replace_queue_decisions(&self, decisions: &[QueueDecision]) -> Result<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute("DELETE FROM queue_decisions", [])?;
+        for (position, decision) in decisions.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO queue_decisions(repository_full_name, pull_request_number, position, payload, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    decision.repository_full_name,
+                    decision.number,
+                    position,
+                    serde_json::to_string(decision)?,
+                    chrono::Utc::now().to_rfc3339(),
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn queue_decisions(&self) -> Result<Vec<QueueDecision>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT payload FROM queue_decisions ORDER BY position")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|row| serde_json::from_str(&row?).context("decode persisted queue decision"))
+            .collect()
+    }
+
     pub fn github_repository(&self, full_name: &str) -> Result<Option<GitHubRepositorySnapshot>> {
         let payload: Option<String> = self
             .connection
@@ -1144,5 +1173,14 @@ const MIGRATIONS: &[(u32, &str)] = &[
              expires_at TEXT NOT NULL
          );
          CREATE UNIQUE INDEX IF NOT EXISTS codex_runtime_approvals_request ON codex_runtime_approvals(task_id, process_generation, request_id);
-         CREATE INDEX IF NOT EXISTS codex_runtime_approvals_task ON codex_runtime_approvals(task_id, state, expires_at);")
+         CREATE INDEX IF NOT EXISTS codex_runtime_approvals_task ON codex_runtime_approvals(task_id, state, expires_at);"),
+    (6, "CREATE TABLE IF NOT EXISTS queue_decisions (
+             repository_full_name TEXT NOT NULL,
+             pull_request_number INTEGER NOT NULL,
+             position INTEGER NOT NULL,
+             payload TEXT NOT NULL,
+             updated_at TEXT NOT NULL,
+             PRIMARY KEY(repository_full_name, pull_request_number)
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS queue_decisions_position ON queue_decisions(position);")
 ];
