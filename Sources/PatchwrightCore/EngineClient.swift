@@ -180,6 +180,14 @@ public extension EngineServing {
         )
     }
 
+    func reconcileTaskWithGitHub(taskID: UUID) async throws -> EngineeringTask {
+        try await call(
+            method: "task.reconcileGitHub",
+            params: ["taskId": taskID.uuidString],
+            as: EngineeringTask.self
+        )
+    }
+
     func bindRepository(_ repository: GitHubRepository) async throws -> RepositoryBindingSummary {
         guard let installationID = repository.installationID else {
             throw EngineError.remote(
@@ -211,6 +219,14 @@ public extension EngineServing {
                 "resourceLimit": "1000",
             ],
             as: GitHubRepositorySnapshot.self
+        )
+    }
+
+    func githubRepositorySnapshot(fullName: String) async throws -> GitHubRepositorySnapshot? {
+        try await call(
+            method: "github.repository",
+            params: ["fullName": fullName],
+            as: GitHubRepositorySnapshot?.self
         )
     }
 }

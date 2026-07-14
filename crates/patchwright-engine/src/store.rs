@@ -593,6 +593,30 @@ impl EventStore {
         Ok(())
     }
 
+    pub fn save_task_events(&self, task_events: &[(Task, String)]) -> Result<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        for (task, summary) in task_events {
+            let payload = serde_json::to_string(task)?;
+            transaction.execute(
+                "INSERT INTO tasks(id, payload, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
+                params![task.id.to_string(), payload, task.updated_at.to_rfc3339()],
+            )?;
+            transaction.execute(
+                "INSERT INTO task_events(task_id, summary, payload, occurred_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    task.id.to_string(),
+                    summary,
+                    payload,
+                    task.updated_at.to_rfc3339()
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn delivery_result(&self, key: &str) -> Result<Option<String>> {
         self.connection
             .query_row(

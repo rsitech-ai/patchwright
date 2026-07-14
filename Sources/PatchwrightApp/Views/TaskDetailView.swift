@@ -36,6 +36,7 @@ struct TaskDetailView: View {
             while !Task.isCancelled {
                 await store.refreshTaskTimeline(taskID: task.id)
                 await store.refreshTaskWorktree(taskID: task.id)
+                await store.refreshTaskRepository(task: task)
                 try? await Task.sleep(for: .seconds(2))
             }
         }
@@ -107,6 +108,23 @@ struct TaskDetailView: View {
             detailCard("Progress") { lifecycleTimeline }
             detailCard("Source") {
                 sourceSummary
+                if task.source != nil, task.state != .completed {
+                    Divider()
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Remote completion")
+                                .font(.subheadline.weight(.semibold))
+                            Text("Refresh GitHub and complete this task only when its exact captured issue or PR outcome is confirmed.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Reconcile with GitHub") {
+                            Task { await store.reconcileTaskWithGitHub(task) }
+                        }
+                        .disabled(store.taskLifecycleBusyTaskIDs.contains(task.id))
+                    }
+                }
             }
             detailCard("Implementation contract") {
                 ContentUnavailableView(
@@ -231,11 +249,62 @@ struct TaskDetailView: View {
                     }
                 }
             }
+            if case .githubPullRequest(let source) = task.source {
+                reviewThreadActions(source: source)
+            }
             deliveryActions
             if let error = store.deliveryError {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.red)
+            }
+        }
+    }
+
+    private func reviewThreadActions(source: GitHubPullRequestTaskSource) -> some View {
+        let threads = store.repositorySnapshotByTask[task.id]?.discussions.filter {
+            $0.itemNumber == source.number && $0.kind == "reviewThread"
+        } ?? []
+        return detailCard("Review threads") {
+            if threads.isEmpty {
+                Text("No review threads ingested.").foregroundStyle(.secondary)
+            } else {
+                ForEach(threads) { thread in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Label(
+                                thread.threadResolved == true ? "Resolved" : "Unresolved",
+                                systemImage: thread.threadResolved == true ? "checkmark.circle.fill" : "bubble.left.and.exclamationmark.bubble.right"
+                            )
+                            .foregroundStyle(thread.threadResolved == true ? .green : .orange)
+                            Spacer()
+                            if thread.threadResolved != true, let threadID = thread.threadNodeID {
+                                Button("Preview Resolve") {
+                                    preview(
+                                        GitHubActionPayload(
+                                            kind: "resolveReviewThread",
+                                            pullRequestNumber: source.number,
+                                            threadId: threadID,
+                                            expectedHeadSha: source.headSHA
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                        if thread.threadResolved != true, thread.viewerCanResolve == false {
+                            Text("GitHub requires signed-in user authority for this thread. Patchwright revalidates that authority at execution without storing the user token.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        if let path = thread.path {
+                            Text("\(path)\(thread.line.map { ":\($0)" } ?? "")")
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(thread.body ?? "No written comment").font(.callout)
+                    }
+                    if thread.id != threads.last?.id { Divider() }
+                }
             }
         }
     }

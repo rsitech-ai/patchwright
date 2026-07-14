@@ -54,6 +54,14 @@ pub enum GitHubAction {
         #[serde(alias = "inline_comments")]
         inline_comments: Vec<InlineReviewComment>,
     },
+    ResolveReviewThread {
+        #[serde(alias = "pull_request_number")]
+        pull_request_number: u64,
+        #[serde(alias = "thread_id")]
+        thread_id: String,
+        #[serde(alias = "expected_head_sha")]
+        expected_head_sha: String,
+    },
     CheckRun {
         name: String,
         #[serde(alias = "head_sha")]
@@ -143,6 +151,18 @@ impl GitHubAction {
             event,
             body,
             inline_comments,
+        })
+    }
+
+    pub fn resolve_review_thread(
+        pull_request_number: u64,
+        thread_id: &str,
+        expected_head_sha: &str,
+    ) -> Result<Self, GitHubActionError> {
+        Ok(Self::ResolveReviewThread {
+            pull_request_number: validate_number(pull_request_number)?,
+            thread_id: validate_node_id(thread_id)?,
+            expected_head_sha: validate_sha(expected_head_sha)?,
         })
     }
 
@@ -243,6 +263,7 @@ impl GitHubAction {
             Self::PushIntent { .. } => Capability::PushBranch,
             Self::Comment { .. } => Capability::PostComment,
             Self::Review { .. } => Capability::PostReview,
+            Self::ResolveReviewThread { .. } => Capability::ResolveThread,
             Self::CheckRun { .. } => Capability::CreateCheckRun,
             Self::DraftPullRequest { .. } => Capability::CreatePullRequest,
             Self::UpdatePullRequestBranch { .. } => Capability::UpdatePullRequestBranch,
@@ -263,6 +284,10 @@ impl GitHubAction {
     pub const fn pull_request_number(&self) -> Option<u64> {
         match self {
             Self::Review {
+                pull_request_number,
+                ..
+            }
+            | Self::ResolveReviewThread {
                 pull_request_number,
                 ..
             }
@@ -499,6 +524,7 @@ const fn permissions_for(action: &GitHubAction) -> &'static [&'static str] {
             &["issues:write", "metadata:read"]
         }
         GitHubAction::Review { .. }
+        | GitHubAction::ResolveReviewThread { .. }
         | GitHubAction::DraftPullRequest { .. }
         | GitHubAction::UpdatePullRequestBranch { .. }
         | GitHubAction::ReadyPullRequest { .. }
@@ -507,6 +533,18 @@ const fn permissions_for(action: &GitHubAction) -> &'static [&'static str] {
         | GitHubAction::MergePullRequest { .. } => &["pull_requests:write", "metadata:read"],
         GitHubAction::CheckRun { .. } => &["checks:write", "metadata:read"],
     }
+}
+
+fn validate_node_id(value: &str) -> Result<String, GitHubActionError> {
+    if value.is_empty()
+        || value.len() > 256
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(GitHubActionError::InvalidField("threadId"));
+    }
+    Ok(value.to_owned())
 }
 
 fn validate_number(value: u64) -> Result<u64, GitHubActionError> {

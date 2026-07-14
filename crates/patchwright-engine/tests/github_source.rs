@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, Query},
     http::{HeaderMap, HeaderValue},
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
 };
 use patchwright_engine::{GitHubSource, GitHubToken, WorkItemKind};
 use serde_json::{Value, json};
@@ -117,6 +117,7 @@ async fn authenticated_source_paginates_and_separates_issues_from_pull_requests(
         .route("/repos/{owner}/{repo}/pulls", get(pulls))
         .route("/repos/{owner}/{repo}/pulls/{number}", get(pull_detail))
         .route("/repos/{owner}/{repo}/pulls/{number}/reviews", get(reviews))
+        .route("/graphql", post(review_threads))
         .route("/repos/{owner}/{repo}/issues/comments", get(empty_array))
         .route("/repos/{owner}/{repo}/pulls/comments", get(empty_array))
         .route("/repos/{owner}/{repo}/actions/runs", get(workflow_runs))
@@ -193,6 +194,14 @@ fn assert_enriched_snapshot(snapshot: &patchwright_engine::GitHubRepositorySnaps
         Some("2026-07-13T09:00:00Z")
     );
     assert_eq!(snapshot.repository.open_pull_request_count, 1);
+    let thread = snapshot
+        .discussions
+        .iter()
+        .find(|discussion| discussion.kind == "reviewThread")
+        .unwrap();
+    assert_eq!(thread.thread_node_id.as_deref(), Some("PRRT_fixture"));
+    assert_eq!(thread.thread_resolved, Some(false));
+    assert_eq!(thread.viewer_can_resolve, Some(true));
     assert_eq!(snapshot.repository.failing_check_count, 1);
     assert_eq!(snapshot.repository.installation_id, Some(99));
     assert!(snapshot.repository.permissions.push.is_granted());
@@ -211,7 +220,7 @@ fn assert_enriched_snapshot(snapshot: &patchwright_engine::GitHubRepositorySnaps
     );
     assert_eq!(
         pull_request.latest_review_at.as_deref(),
-        Some("2026-07-13T09:45:00Z")
+        Some("2026-07-13T10:30:00Z")
     );
     assert_eq!(
         pull_request.review_decision.as_deref(),
@@ -298,6 +307,40 @@ async fn reviews() -> Json<Value> {
     Json(
         json!([{"id":50,"body":"Please fix","user":{"login":"reviewer"},"html_url":"https://example/review","state":"CHANGES_REQUESTED","submitted_at":"2026-07-13T09:45:00Z"}]),
     )
+}
+
+async fn review_threads(Json(body): Json<Value>) -> Json<Value> {
+    assert!(
+        body["query"]
+            .as_str()
+            .is_some_and(|query| query.contains("PatchwrightReviewThreads"))
+    );
+    Json(json!({
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "nodes": [{
+                            "id": "PRRT_fixture",
+                            "isResolved": false,
+                            "isOutdated": false,
+                            "viewerCanResolve": true,
+                            "path": "src/lib.rs",
+                            "line": 9,
+                            "comments": {"nodes": [{
+                                "databaseId": 701,
+                                "body": "Please cover this branch.",
+                                "author": {"login": "reviewer"},
+                                "url": "https://example.invalid/review/701",
+                                "updatedAt": "2026-07-13T10:30:00Z"
+                            }]}
+                        }],
+                        "pageInfo": {"hasNextPage": false, "endCursor": null}
+                    }
+                }
+            }
+        }
+    }))
 }
 
 async fn empty_array() -> Json<Value> {

@@ -1,4 +1,4 @@
-use crate::EventStore;
+use crate::{EventStore, GitHubRepositorySnapshot, WorkItemKind};
 use chrono::{Duration, Utc};
 use patchwright_core::{
     ActionFingerprint, ActionFingerprintDraft, Approval, ApprovalClass, Capability,
@@ -163,7 +163,12 @@ pub fn complete_successful_delivery(
     encoded_result: &str,
     merged: bool,
 ) -> Result<(), DeliveryError> {
-    if preview.action.action().capability() != Capability::MergePullRequest || !merged {
+    let capability = preview.action.action().capability();
+    let terminal = matches!(
+        capability,
+        Capability::CloseIssue | Capability::ClosePullRequest
+    ) || (capability == Capability::MergePullRequest && merged);
+    if !terminal {
         return store
             .complete_delivery(key, encoded_result)
             .map_err(persistence);
@@ -177,40 +182,39 @@ pub fn complete_successful_delivery(
         (
             TaskState::AwaitingDeliveryApproval,
             TaskState::Delivering,
-            "Approved exact-SHA merge delivery started",
+            "Approved terminal GitHub delivery started",
         ),
         (
             TaskState::Delivering,
             TaskState::Monitoring,
-            "GitHub accepted the merge delivery; reconciling remote state",
+            "GitHub accepted the terminal delivery; reconciling remote state",
         ),
         (
             TaskState::Monitoring,
             TaskState::AwaitingMergeApproval,
-            "Remote merge preconditions reconciled",
+            "Remote completion preconditions reconciled",
         ),
         (
             TaskState::AwaitingMergeApproval,
             TaskState::Merging,
-            "Approved exact-SHA merge is being finalized",
+            "Approved terminal delivery is being finalized",
         ),
         (
             TaskState::Merging,
             TaskState::Completed,
-            "GitHub confirmed the pull request merged",
+            "GitHub confirmed the task outcome completed",
         ),
     ];
     let mut events = Vec::new();
     if task.state != TaskState::Completed {
-        let start = lifecycle
+        let Some(start) = lifecycle
             .iter()
             .position(|(state, _, _)| *state == task.state)
-            .ok_or_else(|| {
-                DeliveryError::Persistence(format!(
-                    "merged task cannot reconcile from {}",
-                    task.state
-                ))
-            })?;
+        else {
+            return store
+                .complete_delivery(key, encoded_result)
+                .map_err(persistence);
+        };
         for (_, next, summary) in &lifecycle[start..] {
             task.transition(*next)
                 .map_err(|error| DeliveryError::Persistence(error.to_string()))?;
@@ -220,6 +224,95 @@ pub fn complete_successful_delivery(
     store
         .complete_delivery_with_task_events(key, encoded_result, &events)
         .map_err(persistence)
+}
+
+pub fn reconcile_completed_task_from_snapshot(
+    store: &EventStore,
+    task_id: TaskId,
+    snapshot: &GitHubRepositorySnapshot,
+) -> Result<patchwright_core::Task, DeliveryError> {
+    let task = store
+        .load_task(task_id)
+        .map_err(persistence)?
+        .ok_or(DeliveryError::TaskMissing)?;
+    let repository_id = task
+        .source
+        .repository_id()
+        .ok_or(DeliveryError::SourceMismatch)?;
+    let repository_full_name = task
+        .source
+        .repository_full_name()
+        .ok_or(DeliveryError::SourceMismatch)?;
+    let number = task
+        .source
+        .item_number()
+        .ok_or(DeliveryError::SourceMismatch)?;
+    if snapshot.repository.id != repository_id
+        || snapshot.repository.full_name != repository_full_name
+    {
+        return Err(DeliveryError::SourceMismatch);
+    }
+    let item = snapshot
+        .work_items
+        .iter()
+        .find(|item| item.number == number)
+        .ok_or(DeliveryError::RemoteItemMissing)?;
+    let completed = match item.kind {
+        WorkItemKind::PullRequest => {
+            if task.source.head_sha() != item.head_sha.as_deref() {
+                return Err(DeliveryError::PreconditionMismatch);
+            }
+            item.merged == Some(true)
+        }
+        WorkItemKind::Issue => {
+            item.state == "closed" && item.state_reason.as_deref() != Some("not_planned")
+        }
+    };
+    if !completed {
+        return Err(DeliveryError::RemoteNotCompleted);
+    }
+    if task.state == TaskState::Completed {
+        return Ok(task);
+    }
+    let events = completion_events(task)?;
+    store.save_task_events(&events).map_err(persistence)?;
+    events
+        .last()
+        .map(|(task, _)| task.clone())
+        .ok_or(DeliveryError::TaskMissing)
+}
+
+fn completion_events(
+    mut task: patchwright_core::Task,
+) -> Result<Vec<(patchwright_core::Task, String)>, DeliveryError> {
+    let lifecycle = [
+        (TaskState::AwaitingDeliveryApproval, TaskState::Delivering),
+        (TaskState::Delivering, TaskState::Monitoring),
+        (TaskState::Monitoring, TaskState::AwaitingMergeApproval),
+        (TaskState::AwaitingMergeApproval, TaskState::Merging),
+        (TaskState::Merging, TaskState::Completed),
+    ];
+    let start = lifecycle
+        .iter()
+        .position(|(state, _)| *state == task.state)
+        .ok_or_else(|| {
+            DeliveryError::Persistence(format!(
+                "completed task cannot reconcile from {}",
+                task.state
+            ))
+        })?;
+    let mut events = Vec::new();
+    for (_, next) in &lifecycle[start..] {
+        task.transition(*next)
+            .map_err(|error| DeliveryError::Persistence(error.to_string()))?;
+        let summary = if *next == TaskState::Completed {
+            "GitHub confirmed the task outcome is complete"
+        } else {
+            "GitHub completion reconciled into the durable task lifecycle"
+        };
+        events.push((task.clone(), summary.into()));
+    }
+    Ok(events)
 }
 
 fn digest(input: &[u8]) -> String {
@@ -246,6 +339,12 @@ pub enum DeliveryError {
     RemoteMismatch,
     #[error("delivery source SHA precondition changed")]
     PreconditionMismatch,
+    #[error("GitHub reconciliation source does not match the task")]
+    SourceMismatch,
+    #[error("GitHub reconciliation item is missing from the fresh snapshot")]
+    RemoteItemMissing,
+    #[error("GitHub has not completed the task outcome")]
+    RemoteNotCompleted,
     #[error("delivery action fingerprint is invalid")]
     FingerprintInvalid,
     #[error("delivery preview changed and must be approved again")]
