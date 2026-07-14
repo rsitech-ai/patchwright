@@ -2,6 +2,22 @@ import XCTest
 @testable import PatchwrightCore
 
 final class CodexPresentationTests: XCTestCase {
+    @MainActor
+    func testCompletedTurnRefreshesVisibleTaskLifecycle() async throws {
+        let engine = CodexLifecycleEngine()
+        let store = WorkspaceStore(engine: engine, healthRetryAttempts: 1)
+        let taskID = try XCTUnwrap(UUID(uuidString: "11111111-1111-1111-1111-111111111111"))
+
+        await store.refreshCodex(taskID: taskID)
+
+        XCTAssertEqual(store.tasks.first?.id, taskID)
+        XCTAssertEqual(store.tasks.first?.state, .verifying)
+        let methods = await engine.calledMethods()
+        XCTAssertEqual(methods, [
+            "codex.status", "codex.events", "codex.approvals", "task.list",
+        ])
+    }
+
     func testOrderedEventsCoalesceStreamingContentAndRetainUnknownEvents() throws {
         let data = Data(#"""
         [
@@ -62,4 +78,32 @@ final class CodexPresentationTests: XCTestCase {
         XCTAssertEqual(approval.requestId, .string("command-request"))
         XCTAssertEqual(approval.command, "swift test")
     }
+}
+
+private actor CodexLifecycleEngine: EngineServing {
+    private var methods: [String] = []
+
+    func call<Result: Decodable & Sendable>(
+        method: String,
+        params _: [String: String],
+        as _: Result.Type
+    ) async throws -> Result {
+        methods.append(method)
+        let json: String
+        switch method {
+        case "codex.status":
+            json = #"{"taskId":"11111111-1111-1111-1111-111111111111","state":"ready","processGeneration":"22222222-2222-2222-2222-222222222222","accountState":"signedIn","threadId":"thread-1","turnId":null,"lastSequence":8,"canStart":false,"canSend":true,"canSteer":false}"#
+        case "codex.events":
+            json = #"[{"taskId":"11111111-1111-1111-1111-111111111111","processGeneration":"22222222-2222-2222-2222-222222222222","sequence":8,"kind":"turnCompleted","summary":"done","threadId":"thread-1","turnId":"turn-1","content":"completed","occurredAt":"2026-07-14T08:00:07Z"}]"#
+        case "codex.approvals":
+            json = "[]"
+        case "task.list":
+            json = #"[{"id":"11111111-1111-1111-1111-111111111111","title":"Review pull request","repositoryPath":"/tmp/worktree","state":"verifying","createdAt":"2026-07-14T08:00:00Z","updatedAt":"2026-07-14T08:00:07Z"}]"#
+        default:
+            throw EngineError.remote(code: -32601, message: "method not found")
+        }
+        return try JSONDecoder.patchwright.decode(Result.self, from: Data(json.utf8))
+    }
+
+    func calledMethods() -> [String] { methods }
 }

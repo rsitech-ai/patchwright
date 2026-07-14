@@ -147,6 +147,7 @@ fn issue_and_pull_request_convert_to_typed_tasks_with_exact_source_identity() {
             Capability::CreatePullRequest,
             Capability::PostComment,
             Capability::CreateCheckRun,
+            Capability::CloseIssue,
         ]
     );
 
@@ -168,6 +169,7 @@ fn issue_and_pull_request_convert_to_typed_tasks_with_exact_source_identity() {
             Capability::PostReview,
             Capability::CreateCheckRun,
             Capability::UpdatePullRequestBranch,
+            Capability::ReadyPullRequest,
             Capability::ClosePullRequest,
             Capability::EnqueuePullRequest,
             Capability::MergePullRequest,

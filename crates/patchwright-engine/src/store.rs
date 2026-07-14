@@ -530,6 +530,19 @@ impl EventStore {
     }
 
     pub fn claim_delivery(&self, key: &str) -> Result<bool> {
+        let reset = self.connection.execute(
+            "UPDATE deliveries
+             SET claimed_at = datetime('now'), result = NULL, completed_at = NULL
+             WHERE key = ?1
+               AND CASE
+                   WHEN json_valid(result) THEN json_extract(result, '$.state') = 'failed'
+                   ELSE 0
+               END",
+            [key],
+        )?;
+        if reset == 1 {
+            return Ok(true);
+        }
         let inserted = self.connection.execute(
             "INSERT OR IGNORE INTO deliveries(key, claimed_at) VALUES (?1, datetime('now'))",
             [key],
@@ -543,6 +556,40 @@ impl EventStore {
             params![key, result],
         )?;
         anyhow::ensure!(updated == 1, "delivery key was not claimed");
+        Ok(())
+    }
+
+    pub fn complete_delivery_with_task_events(
+        &self,
+        key: &str,
+        result: &str,
+        task_events: &[(Task, String)],
+    ) -> Result<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let updated = transaction.execute(
+            "UPDATE deliveries SET result = ?2, completed_at = datetime('now') WHERE key = ?1",
+            params![key, result],
+        )?;
+        anyhow::ensure!(updated == 1, "delivery key was not claimed");
+        for (task, summary) in task_events {
+            let payload = serde_json::to_string(task)?;
+            transaction.execute(
+                "INSERT INTO tasks(id, payload, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
+                params![task.id.to_string(), payload, task.updated_at.to_rfc3339()],
+            )?;
+            transaction.execute(
+                "INSERT INTO task_events(task_id, summary, payload, occurred_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    task.id.to_string(),
+                    summary,
+                    payload,
+                    task.updated_at.to_rfc3339()
+                ],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 

@@ -179,7 +179,7 @@ while IFS= read -r line; do :; done"#,
             .unwrap()
             .unwrap()
             .state,
-        TaskState::Implementing
+        TaskState::Verifying
     );
     assert!(
         store

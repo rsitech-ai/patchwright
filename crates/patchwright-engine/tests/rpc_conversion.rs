@@ -3,6 +3,7 @@ use patchwright_engine::{
     GitHubWorkItem, WorkItemKind, serve,
 };
 use serde_json::{Value, json};
+use std::process::Command;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
@@ -23,6 +24,10 @@ async fn call(stream: &mut BufReader<UnixStream>, request: Value) -> Value {
 }
 
 fn snapshot() -> GitHubRepositorySnapshot {
+    snapshot_with_base(BASE_SHA)
+}
+
+fn snapshot_with_base(base_sha: &str) -> GitHubRepositorySnapshot {
     GitHubRepositorySnapshot {
         repository: GitHubRepository {
             id: 42,
@@ -37,7 +42,7 @@ fn snapshot() -> GitHubRepositorySnapshot {
             open_issues_count: 1,
             open_pull_request_count: 0,
             failing_check_count: 0,
-            default_branch_sha: Some(BASE_SHA.into()),
+            default_branch_sha: Some(base_sha.into()),
             default_branch_committed_at: Some("2026-07-13T10:00:00Z".into()),
             installation_id: Some(99),
             permissions: GitHubRepositoryPermissions::default(),
@@ -82,6 +87,21 @@ fn snapshot() -> GitHubRepositorySnapshot {
         checks: vec![],
         workflow_runs: vec![],
     }
+}
+
+fn git(repository: &std::path::Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {arguments:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 #[tokio::test]
@@ -143,5 +163,98 @@ async fn rpc_binds_repository_then_previews_and_creates_idempotently() {
         created["result"]["task"]["id"],
         repeated["result"]["task"]["id"]
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn rpc_plans_and_prepares_an_isolated_worktree_before_codex() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = directory.path().join("managed-repository");
+    std::fs::create_dir_all(&repository).unwrap();
+    git(&repository, &["init", "-b", "main"]);
+    std::fs::write(repository.join("README.md"), "sandbox\n").unwrap();
+    git(&repository, &["add", "README.md"]);
+    git(
+        &repository,
+        &[
+            "-c",
+            "user.name=Patchwright Test",
+            "-c",
+            "user.email=test@patchwright.local",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+    );
+    let base_sha = git(&repository, &["rev-parse", "HEAD"]);
+    let socket = directory.path().join("engine.sock");
+    let database = directory.path().join("engine.sqlite3");
+    {
+        let store = EventStore::open(&database).unwrap();
+        store
+            .replace_github_snapshot(&snapshot_with_base(&base_sha))
+            .unwrap();
+    }
+    let server_socket = socket.clone();
+    let server_database = database.clone();
+    let server = tokio::spawn(async move { serve(&server_socket, &server_database).await });
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let mut stream = BufReader::new(UnixStream::connect(&socket).await.unwrap());
+    let state_root = directory.path().join("state");
+    let worktree_root = directory.path().join("worktrees");
+    let bound = call(
+        &mut stream,
+        json!({"jsonrpc":"2.0","id":1,"method":"repository.bind","params":{
+            "repositoryFullName":"acme/widget","installationId":"99",
+            "managedClone":repository.to_string_lossy(),
+            "stateRoot":state_root.to_string_lossy(),
+            "worktreeRoot":worktree_root.to_string_lossy()
+        }}),
+    )
+    .await;
+    assert_eq!(bound["result"]["fullName"], "acme/widget");
+    let conversion = json!({
+        "repositoryFullName":"acme/widget","itemNumber":"7",
+        "expectedUpdatedAt":"2026-07-13T12:00:00Z"
+    });
+    let created = call(
+        &mut stream,
+        json!({"jsonrpc":"2.0","id":2,"method":"task.createFromGitHub","params":conversion}),
+    )
+    .await;
+    let task_id = created["result"]["task"]["id"].as_str().unwrap();
+
+    let planned = call(
+        &mut stream,
+        json!({"jsonrpc":"2.0","id":3,"method":"task.plan","params":{"taskId":task_id}}),
+    )
+    .await;
+    assert_eq!(planned["result"]["state"], "awaitingPreparationApproval");
+
+    let prepared = call(
+        &mut stream,
+        json!({"jsonrpc":"2.0","id":4,"method":"task.prepare","params":{"taskId":task_id}}),
+    )
+    .await;
+    assert_eq!(prepared["result"]["state"], "preparing");
+    let worktree = std::path::PathBuf::from(prepared["result"]["repositoryPath"].as_str().unwrap());
+    assert!(worktree.join("README.md").exists());
+    assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), base_sha);
+    assert_eq!(
+        git(&worktree, &["branch", "--show-current"]),
+        format!("patchwright/{task_id}")
+    );
+    let inspection = call(
+        &mut stream,
+        json!({"jsonrpc":"2.0","id":5,"method":"task.worktree","params":{"taskId":task_id}}),
+    )
+    .await;
+    assert_eq!(inspection["result"]["headSha"], base_sha);
+    assert_eq!(inspection["result"]["dirty"], false);
     server.abort();
 }

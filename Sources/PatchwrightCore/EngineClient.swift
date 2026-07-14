@@ -140,6 +140,46 @@ public extension EngineServing {
         )
     }
 
+    func planTask(taskID: UUID) async throws -> EngineeringTask {
+        try await call(
+            method: "task.plan",
+            params: ["taskId": taskID.uuidString],
+            as: EngineeringTask.self
+        )
+    }
+
+    func prepareTask(taskID: UUID) async throws -> EngineeringTask {
+        try await call(
+            method: "task.prepare",
+            params: ["taskId": taskID.uuidString],
+            as: EngineeringTask.self
+        )
+    }
+
+    func taskTimeline(taskID: UUID) async throws -> [EngineeringTask] {
+        try await call(
+            method: "task.timeline",
+            params: ["taskId": taskID.uuidString],
+            as: [EngineeringTask].self
+        )
+    }
+
+    func inspectTaskWorktree(taskID: UUID) async throws -> WorktreeInspection {
+        try await call(
+            method: "task.worktree",
+            params: ["taskId": taskID.uuidString],
+            as: WorktreeInspection.self
+        )
+    }
+
+    func readyTaskForDelivery(taskID: UUID) async throws -> EngineeringTask {
+        try await call(
+            method: "task.readyForDelivery",
+            params: ["taskId": taskID.uuidString],
+            as: EngineeringTask.self
+        )
+    }
+
     func bindRepository(_ repository: GitHubRepository) async throws -> RepositoryBindingSummary {
         guard let installationID = repository.installationID else {
             throw EngineError.remote(
@@ -159,6 +199,18 @@ public extension EngineServing {
                 "worktreeRoot": root.appending(path: "worktrees", directoryHint: .isDirectory).path,
             ],
             as: RepositoryBindingSummary.self
+        )
+    }
+
+    func syncRepositoryWithGitHubApp(_ repository: GitHubRepository) async throws -> GitHubRepositorySnapshot {
+        try await call(
+            method: "github.sync.repository",
+            params: [
+                "fullName": repository.fullName,
+                "repositoryId": String(repository.id),
+                "resourceLimit": "1000",
+            ],
+            as: GitHubRepositorySnapshot.self
         )
     }
 }

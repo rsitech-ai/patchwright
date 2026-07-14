@@ -754,6 +754,25 @@ fn persist_incoming(
         append_event(store, &mut active.session, draft)?;
         if completed {
             active.active_turn_id = None;
+            let store = lock_store(store)?;
+            let mut task = store
+                .load_task(active.session.task_id)?
+                .ok_or(CodexServiceError::TaskNotFound)?;
+            if task.state == TaskState::Implementing {
+                task.transition(TaskState::Verifying)
+                    .map_err(|_| CodexServiceError::InvalidTaskState(task.state))?;
+                let checkpoint = TaskCheckpoint::new(
+                    task.id,
+                    task.state,
+                    "Codex turn completed; verification is ready",
+                )?;
+                task.checkpoint_id = Some(checkpoint.id());
+                store.save_task_with_checkpoint(
+                    &task,
+                    "Codex implementation turn completed",
+                    &checkpoint,
+                )?;
+            }
         }
     }
     if let IncomingMessage::ServerRequest(request) = message {

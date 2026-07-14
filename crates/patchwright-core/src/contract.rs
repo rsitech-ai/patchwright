@@ -291,7 +291,9 @@ pub struct GitHubPullRequestSource {
 pub enum TaskSource {
     #[default]
     LocalRequest,
+    #[serde(rename = "githubIssue", alias = "gitHubIssue")]
     GitHubIssue(GitHubIssueSource),
+    #[serde(rename = "githubPullRequest", alias = "gitHubPullRequest")]
     GitHubPullRequest(GitHubPullRequestSource),
 }
 

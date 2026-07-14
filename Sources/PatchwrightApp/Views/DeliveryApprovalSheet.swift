@@ -16,11 +16,16 @@ struct DeliveryApprovalSheet: View {
                 if let preview {
                     Section("Exact GitHub write") {
                         LabeledContent("Target", value: preview.action.remote.repositoryFullName)
-                        LabeledContent(
-                            "Item",
-                            value: "#\(preview.action.action.issueNumber ?? preview.action.action.pullRequestNumber ?? 0)"
-                        )
+                        if let number = preview.action.action.issueNumber ?? preview.action.action.pullRequestNumber {
+                            LabeledContent("Item", value: "#\(number)")
+                        }
                         LabeledContent("Action", value: preview.fingerprint.actionKind)
+                        if let branch = preview.action.action.branch ?? preview.action.action.head {
+                            LabeledContent("Branch", value: branch)
+                        }
+                        if let deliveryHead = preview.action.action.headSha {
+                            LabeledContent("Delivery commit", value: short(deliveryHead))
+                        }
                         LabeledContent("Head", value: short(preview.fingerprint.headSha))
                         LabeledContent("Base", value: short(preview.fingerprint.baseSha))
                         LabeledContent("Snapshot", value: "Generation \(preview.fingerprint.invalidationGeneration)")
@@ -28,10 +33,7 @@ struct DeliveryApprovalSheet: View {
                         LabeledContent("Permissions", value: preview.action.requiredPermissions.joined(separator: ", "))
                     }
                     Section(preview.action.action.kind == "mergePullRequest" ? "Merge operation" : "Remote content") {
-                        Text(
-                            preview.action.action.body
-                                ?? "\((preview.action.action.method ?? "merge").capitalized) the exact approved head SHA."
-                        )
+                        Text(actionSummary(preview.action.action))
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -69,12 +71,12 @@ struct DeliveryApprovalSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     if execution == nil {
                         if approval == nil {
-                            Button(preview?.action.action.kind == "mergePullRequest" ? "Approve Merge" : "Approve Comment") {
+                            Button(preview?.action.action.kind == "mergePullRequest" ? "Approve Merge" : "Approve Action") {
                                 Task { await store.approveDelivery(taskID: task.id) }
                             }
                                 .disabled(preview == nil || store.deliveryBusyTaskIDs.contains(task.id))
                         } else {
-                            Button(preview?.action.action.kind == "mergePullRequest" ? "Execute Approved Merge" : "Execute Approved Comment") {
+                            Button(preview?.action.action.kind == "mergePullRequest" ? "Execute Approved Merge" : "Execute Approved Action") {
                                 Task { await store.executeDelivery(taskID: task.id) }
                             }
                                 .disabled(store.deliveryBusyTaskIDs.contains(task.id))
@@ -88,5 +90,19 @@ struct DeliveryApprovalSheet: View {
 
     private func short(_ value: String?) -> String {
         value.map { String($0.prefix(12)) } ?? "Not bound"
+    }
+
+    private func actionSummary(_ action: GitHubActionPayload) -> String {
+        if let body = action.body, !body.isEmpty { return body }
+        return switch action.kind {
+        case "pushIntent": "Push the exact committed worktree HEAD to the isolated task branch."
+        case "closeIssue": "Close this issue as completed."
+        case "closePullRequest": "Close this pull request without merging it."
+        case "updatePullRequestBranch": "Request GitHub to update the pull request branch at the captured head SHA."
+        case "readyPullRequest": "Mark this draft pull request ready for review only if its remote head still matches the captured SHA."
+        case "checkRun": "Publish the exact Patchwright check-run status for this commit."
+        case "mergePullRequest": "\((action.method ?? "merge").capitalized) the exact approved head SHA into the default branch."
+        default: "Execute this exact approval-bound GitHub action."
+        }
     }
 }
