@@ -20,9 +20,17 @@ done
 cd "$ROOT_DIR"
 swift build -c release
 cargo build --release -p patchwright-engine -p patchwright-relay
+if [[ -e "$APP_BUNDLE" || -L "$APP_BUNDLE" ]]; then
+  /usr/bin/trash "$APP_BUNDLE"
+fi
 mkdir -p "$STAGING_ROOT" "$ROOT_DIR/dist" "$APP_MACOS"
-mkdir -p "$APP_BUNDLE/Contents/Helpers"
-cp "$(swift build -c release --show-bin-path)/$APP_NAME" "$APP_MACOS/$APP_NAME"
+mkdir -p "$APP_BUNDLE/Contents/Helpers" "$APP_BUNDLE/Contents/Frameworks"
+SWIFT_BIN_DIR="$(swift build -c release --show-bin-path)"
+SPARKLE_FRAMEWORK="$SWIFT_BIN_DIR/Sparkle.framework"
+[[ -d "$SPARKLE_FRAMEWORK" && ! -L "$SPARKLE_FRAMEWORK" ]] \
+  || { echo "Sparkle.framework missing from the resolved release build" >&2; exit 65; }
+cp "$SWIFT_BIN_DIR/$APP_NAME" "$APP_MACOS/$APP_NAME"
+/usr/bin/ditto "$SPARKLE_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
 cp "$ROOT_DIR/target/release/patchwright-engine" "$APP_BUNDLE/Contents/Helpers/patchwright-engine"
 cp "$ROOT_DIR/target/release/patchwright-relay" "$APP_BUNDLE/Contents/Helpers/patchwright-relay"
 chmod +x "$APP_MACOS/$APP_NAME"
@@ -37,7 +45,16 @@ clean_bundle_metadata() {
 }
 clean_bundle_metadata
 "$ROOT_DIR/script/validate_bundle.sh" "$APP_BUNDLE"
-/usr/bin/codesign --force --deep --sign - "$APP_BUNDLE"
+SPARKLE="$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+/usr/bin/codesign --force --sign - "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
+/usr/bin/codesign --force --sign - --preserve-metadata=entitlements \
+  "$SPARKLE/Versions/B/XPCServices/Downloader.xpc"
+/usr/bin/codesign --force --sign - "$SPARKLE/Versions/B/Autoupdate"
+/usr/bin/codesign --force --sign - "$SPARKLE/Versions/B/Updater.app"
+/usr/bin/codesign --force --sign - "$SPARKLE"
+/usr/bin/codesign --force --sign - "$APP_BUNDLE/Contents/Helpers/patchwright-engine"
+/usr/bin/codesign --force --sign - "$APP_BUNDLE/Contents/Helpers/patchwright-relay"
+/usr/bin/codesign --force --sign - "$APP_BUNDLE"
 /usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
 if [[ -e "$DIST_APP_BUNDLE" && ! -L "$DIST_APP_BUNDLE" ]]; then
   /usr/bin/trash "$DIST_APP_BUNDLE"
