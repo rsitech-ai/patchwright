@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
 public enum RelayHealthCheckError: Error, Equatable, LocalizedError, Sendable {
     case launchFailed(String)
@@ -42,6 +45,12 @@ public enum RelayHealthChecker {
             }
             guard process.isRunning else { return process.terminationStatus }
             process.terminate()
+            try await Task.sleep(for: .milliseconds(100))
+            if process.isRunning {
+                #if canImport(Darwin)
+                Darwin.kill(process.processIdentifier, SIGKILL)
+                #endif
+            }
             process.waitUntilExit()
             throw RelayHealthCheckError.timedOut
         }.value
