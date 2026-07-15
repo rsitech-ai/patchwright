@@ -17,9 +17,10 @@ final class RelayHealthCheckerTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let executable = directory.appending(path: "slow-relay")
-        try "#!/bin/sh\nsleep 5\n".write(to: executable, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\ntrap '' TERM\nsleep 5\n".write(to: executable, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
 
+        let started = ContinuousClock.now
         do {
             try await RelayHealthChecker.verify(
                 executable: executable,
@@ -29,6 +30,7 @@ final class RelayHealthCheckerTests: XCTestCase {
             XCTFail("slow relay unexpectedly passed")
         } catch let error as RelayHealthCheckError {
             XCTAssertEqual(error, .timedOut)
+            XCTAssertLessThan(ContinuousClock.now - started, .seconds(1))
         }
     }
 }
