@@ -82,6 +82,27 @@ if [[ -n "$(find "$APP_PATH" -type l ! -path "$SPARKLE/*" -print -quit)" ]]; the
   die "symlinks outside Sparkle.framework are not allowed"
 fi
 
+while IFS= read -r -d '' nested_bundle; do
+  relative="${nested_bundle#"$SPARKLE/"}"
+  [[ "$nested_bundle" != "$SPARKLE" ]] || relative="."
+  case "$relative" in
+    .|Versions/B/Updater.app|Versions/B/XPCServices/Downloader.xpc|Versions/B/XPCServices/Installer.xpc) ;;
+    *) die "unexpected Sparkle nested code object: $relative" ;;
+  esac
+done < <(find "$SPARKLE" -type d \( -name '*.framework' -o -name '*.app' -o -name '*.xpc' -o -name '*.bundle' \) -print0)
+
+while IFS= read -r -d '' candidate; do
+  relative="${candidate#"$SPARKLE/"}"
+  is_code=false
+  [[ "$relative" == *.dylib ]] && is_code=true
+  /usr/bin/file -b "$candidate" 2>/dev/null | grep -Eq '(^| )Mach-O( |$)' && is_code=true
+  [[ "$is_code" == true ]] || continue
+  case "$relative" in
+    Versions/B/Sparkle|Versions/B/Autoupdate|Versions/B/Updater.app/Contents/MacOS/Updater|Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader|Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer) ;;
+    *) die "unexpected Sparkle nested code object: $relative" ;;
+  esac
+done < <(find "$SPARKLE" -type f -print0)
+
 validate_sparkle_plist() {
   local plist="$1"
   local identifier="$2"
