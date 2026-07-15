@@ -20,10 +20,6 @@ impl GitHubToken {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
-
-    pub(crate) fn expose_for_authorization_header(&self) -> &str {
-        &self.0
-    }
 }
 
 impl fmt::Debug for GitHubToken {

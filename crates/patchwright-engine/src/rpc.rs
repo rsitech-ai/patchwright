@@ -730,24 +730,9 @@ async fn execute_github_action(
             ..Default::default()
         });
     }
-    let result = GitHubMutationClient::new(&api_url, token.expose_for_authorization_header())?
+    GitHubMutationClient::new(&api_url, token.expose_for_authorization_header())?
         .execute(owner, repository, preview.action.action())
-        .await;
-    if matches!(
-        (&result, preview.action.action()),
-        (
-            Err(MutationError::ReviewThreadNotResolvable),
-            GitHubAction::ResolveReviewThread { .. }
-        )
-    ) {
-        let user_token = GhCliCredentialBroker::new(github_cli_path())
-            .token()
-            .map_err(|_| MutationError::ReviewThreadNotResolvable)?;
-        return GitHubMutationClient::new(&api_url, user_token.expose_for_authorization_header())?
-            .execute(owner, repository, preview.action.action())
-            .await;
-    }
-    result
+        .await
 }
 
 fn github_cli_path() -> String {
