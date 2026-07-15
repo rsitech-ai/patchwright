@@ -139,7 +139,11 @@ struct TaskDetailView: View {
     @ViewBuilder private var lifecycleControls: some View {
         let busy = store.taskLifecycleBusyTaskIDs.contains(task.id)
         HStack {
-            if busy { ProgressView().controlSize(.small) }
+            if busy {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Task operation in progress")
+            }
             Spacer()
             if task.state == .discovered {
                 Button("Assess & Plan", systemImage: "list.bullet.clipboard") {
@@ -211,6 +215,7 @@ struct TaskDetailView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 TextEditor(text: $deliveryBody)
+                    .accessibilityLabel("GitHub delivery message")
                     .font(.body)
                     .frame(minHeight: 120)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
@@ -240,6 +245,7 @@ struct TaskDetailView: View {
                                     kind: "review",
                                     body: deliveryBody,
                                     pullRequestNumber: source.number,
+                                    expectedHeadSha: source.headSHA,
                                     event: reviewEvent.rawValue,
                                     inlineComments: []
                                 )

@@ -1,4 +1,5 @@
 import AppKit
+import PatchwrightCore
 import SwiftUI
 
 struct SettingsView: View {
@@ -27,7 +28,7 @@ struct SettingsView: View {
                     Button("Save Metadata") {
                         do {
                             try saveMetadata(keyReference: keyReference)
-                            try verifyConnection()
+                            Task { await verifyConnection() }
                         }
                         catch { status = error.localizedDescription }
                     }
@@ -68,8 +69,7 @@ struct SettingsView: View {
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
             keyReference = "file:\(destination.path)"
             try saveMetadata(keyReference: keyReference)
-            try verifyConnection()
-            status = "App authenticated. Install it on selected repositories, then relaunch Patchwright."
+            Task { await verifyConnection() }
         } catch {
             status = error.localizedDescription
         }
@@ -103,25 +103,23 @@ struct SettingsView: View {
         status = "Metadata saved. Relaunch Patchwright to apply the configuration."
     }
 
-    private func verifyConnection() throws {
+    private func verifyConnection() async {
         let executable = ProcessInfo.processInfo.environment["PATCHWRIGHT_RELAY_BINARY"]
             .map(URL.init(fileURLWithPath:))
             ?? Bundle.main.bundleURL.appending(path: "Contents/Helpers/patchwright-relay")
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
-            throw SetupError("The bundled GitHub relay is unavailable. Rebuild Patchwright and try again.")
+            status = "The bundled GitHub relay is unavailable. Rebuild Patchwright and try again."
+            return
         }
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = ["github-app-health", "--config", configurationURL.path]
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw SetupError("GitHub App authentication failed. Check the App ID and use its unencrypted RSA private key.")
+        do {
+            try await RelayHealthChecker.verify(
+                executable: executable,
+                configurationURL: configurationURL
+            )
+            status = "GitHub App authentication succeeded. Install it on selected repositories, then relaunch Patchwright."
+        } catch {
+            status = error.localizedDescription
         }
-        status = "GitHub App authentication succeeded."
     }
 
     private var privateKeyLocation: String {
