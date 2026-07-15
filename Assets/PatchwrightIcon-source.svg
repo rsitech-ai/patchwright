@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="ground" x1="190" y1="126" x2="842" y2="920" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#15283B"/>
+      <stop offset="1" stop-color="#08111C"/>
+    </linearGradient>
+    <linearGradient id="steel" x1="328" y1="258" x2="694" y2="790" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#DCE8F1"/>
+      <stop offset="0.52" stop-color="#9FB4C6"/>
+      <stop offset="1" stop-color="#647A90"/>
+    </linearGradient>
+    <filter id="shadow" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="24" stdDeviation="28" flood-color="#02070C" flood-opacity="0.55"/>
+    </filter>
+  </defs>
+
+  <rect x="48" y="48" width="928" height="928" rx="218" fill="url(#ground)"/>
+  <rect x="72" y="72" width="880" height="880" rx="196" fill="none" stroke="#29435B" stroke-width="8" opacity="0.55"/>
+
+  <g filter="url(#shadow)">
+    <!-- The offset patch: two strong tiles, joined only at the repaired seam. -->
+    <path d="M178 635Q178 603 210 603H462Q494 603 494 635V812Q494 844 462 844H210Q178 844 178 812Z" fill="#526A80"/>
+    <path d="M530 591Q530 559 562 559H814Q846 559 846 591V768Q846 800 814 800H562Q530 800 530 768Z" fill="#71879A"/>
+    <path d="M494 643H530V759H494Z" fill="#E3A23B"/>
+    <path d="M494 643L530 607V643Z" fill="#F4C25E"/>
+
+    <!-- Drafting compass shoulders. Broad geometry remains legible at 16 px. -->
+    <path d="M489 260L315 664Q307 683 322 696L355 725Q374 741 386 718L544 299Z" fill="url(#steel)"/>
+    <path d="M535 261L710 608Q720 628 705 643L673 674Q655 691 643 668L480 299Z" fill="url(#steel)"/>
+
+    <!-- Steel nib converges on the amber repair seam. -->
+    <path d="M512 300L448 609L474 722L512 793L550 722L576 609Z" fill="#B9CAD8"/>
+    <path d="M512 472L512 793L550 722L576 609Z" fill="#8299AC"/>
+    <circle cx="512" cy="274" r="69" fill="#D9E5ED"/>
+    <circle cx="512" cy="274" r="30" fill="#20364A"/>
+    <path d="M500 784L512 824L524 784Z" fill="#E3A23B"/>
+  </g>
+</svg>
