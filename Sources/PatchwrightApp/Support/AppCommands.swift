@@ -3,7 +3,16 @@ import SwiftUI
 
 struct PatchwrightCommands: Commands {
     @ObservedObject var store: WorkspaceStore
+    @ObservedObject var updateController: UpdateController
+
     var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button("Check for Updates…") {
+                updateController.checkForUpdates()
+            }
+            .disabled(!updateController.canCheckForUpdates)
+        }
+
         CommandMenu("Task") {
             Button("Refresh Engine") { Task { await store.refreshHealth() } }
                 .keyboardShortcut("r", modifiers: [.command, .shift])

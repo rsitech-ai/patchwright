@@ -30,5 +30,13 @@
     <string>Copyright © 2026 Patchwright contributors. Licensed under MIT OR Apache-2.0.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>SUFeedURL</key>
+    <string>https://github.com/s1korrrr/patchwright/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>htmrpoa1FW+5XpjtoRDemtHvmp77ic0ok18a4rPZ6XE=</string>
+    <key>SURequireSignedFeed</key>
+    <true/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
 </dict>
 </plist>
