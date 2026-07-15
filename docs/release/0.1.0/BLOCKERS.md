@@ -27,7 +27,7 @@ Apple's App Sandbox documentation is the implementation reference:
    canonical scan is incomplete.
 2. Two medium same-user RPC authorization findings and seven low findings
    remain open.
-3. Fixed findings require a rescan against commit `2918423` or later.
+3. Fixed findings require a rescan against commit `53aa639` or later.
 4. Runtime logs contain an AppKit reentrant table-delegate warning that should
    be triaged on Xcode 26/macOS 26 and macOS 27.
 5. Minimum macOS 26 compatibility has not been tested on a macOS 26 machine.
