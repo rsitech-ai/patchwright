@@ -187,7 +187,11 @@ struct GitHubRepositoryView: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
-            if store.isConvertingGitHubItem { ProgressView().controlSize(.small) }
+            if store.isConvertingGitHubItem {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Creating Patchwright task")
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)

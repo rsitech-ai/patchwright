@@ -691,7 +691,7 @@ async fn execute_github_action(
         return Err(MutationError::InvalidTarget);
     }
     if let GitHubAction::PushIntent { branch, head_sha } = preview.action.action() {
-        let (repository_path, state_root, default_branch) = {
+        let (repository_path, state_root, default_branch, clone_url) = {
             let store = store
                 .lock()
                 .map_err(|_| MutationError::GitTransportFailed)?;
@@ -710,6 +710,7 @@ async fn execute_github_action(
                 task.repository_path,
                 binding.state_root().to_owned(),
                 binding.default_branch().to_owned(),
+                binding.clone_url().to_owned(),
             )
         };
         if branch == &default_branch {
@@ -719,6 +720,7 @@ async fn execute_github_action(
             Path::new(&repository_path),
             branch,
             head_sha,
+            &clone_url,
             Path::new(&state_root),
             token.expose_for_authorization_header(),
         )
@@ -1250,6 +1252,7 @@ async fn task_prepare(id: Value, params: &Value, store: &Mutex<EventStore>) -> V
         };
         if let Err(error) = crate::GitTransport::clone_repository(
             binding.clone_url(),
+            binding.full_name(),
             repository,
             Path::new(binding.state_root()),
             token.expose_for_authorization_header(),

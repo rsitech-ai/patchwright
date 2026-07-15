@@ -82,6 +82,7 @@ impl GitHubMutationClient {
             }
             GitHubAction::Review {
                 pull_request_number,
+                expected_head_sha,
                 event,
                 body,
                 inline_comments,
@@ -92,7 +93,7 @@ impl GitHubMutationClient {
                         json!({"path":comment.path(),"line":comment.line(),"side":"RIGHT","body":comment.body()})
                     })
                     .collect();
-                let mut payload = json!({"body":body,"comments":comments});
+                let mut payload = json!({"body":body,"comments":comments,"commit_id":expected_head_sha});
                 if *event != ReviewEvent::Pending {
                     payload["event"] = Value::String(review_event(*event).to_owned());
                 }
