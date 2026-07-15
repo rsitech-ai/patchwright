@@ -50,6 +50,20 @@ BUNDLE_COPYRIGHT="$(/usr/libexec/PlistBuddy -c 'Print :NSHumanReadableCopyright'
 [[ "$BUNDLE_COPYRIGHT" != *"All rights reserved"* ]] \
   || fail "bundle copyright must not claim All rights reserved"
 
+SPARKLE_FEED="$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$ROOT_DIR/Packaging/Info.plist" 2>/dev/null || true)"
+[[ "$SPARKLE_FEED" == 'https://github.com/s1korrrr/patchwright/releases/latest/download/appcast.xml' ]] \
+  || fail "Sparkle feed must target the latest GitHub release appcast"
+
+for signed_feed_key in SUVerifyUpdateBeforeExtraction SURequireSignedFeed; do
+  [[ "$(/usr/libexec/PlistBuddy -c "Print :$signed_feed_key" "$ROOT_DIR/Packaging/Info.plist" 2>/dev/null || true)" == true ]] \
+    || fail "$signed_feed_key must be true"
+done
+
+SPARKLE_PUBLIC_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$ROOT_DIR/Packaging/Info.plist" 2>/dev/null || true)"
+[[ -n "$SPARKLE_PUBLIC_KEY" ]] || fail "SUPublicEDKey must be present"
+KEY_BYTES="$(printf '%s' "$SPARKLE_PUBLIC_KEY" | /usr/bin/base64 -D 2>/dev/null | /usr/bin/wc -c | /usr/bin/tr -d ' ')"
+[[ "$KEY_BYTES" == 32 ]] || fail "SUPublicEDKey must decode to exactly 32 bytes"
+
 for target in \
   '#build-and-verify' \
   'https://github.com/s1korrrr/patchwright/releases' \

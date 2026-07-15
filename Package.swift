@@ -8,10 +8,24 @@ let package = Package(
         .library(name: "PatchwrightCore", targets: ["PatchwrightCore"]),
         .executable(name: "Patchwright", targets: ["PatchwrightApp"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.2"),
+    ],
     targets: [
         .target(name: "PatchwrightCore"),
-        .executableTarget(name: "PatchwrightApp", dependencies: ["PatchwrightCore"]),
+        .executableTarget(
+            name: "PatchwrightApp",
+            dependencies: [
+                "PatchwrightCore",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "@executable_path/../Frameworks",
+                ]),
+            ]
+        ),
         .testTarget(name: "PatchwrightCoreTests", dependencies: ["PatchwrightCore"]),
     ]
 )
-
