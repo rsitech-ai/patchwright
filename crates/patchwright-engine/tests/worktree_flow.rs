@@ -63,6 +63,7 @@ fn ephemeral_transport_pushes_only_the_exact_checked_out_head() {
         &repository,
         "patchwright/test-task",
         &head,
+        remote.to_str().unwrap(),
         fixture.path().join("state").as_path(),
         "fixture-token",
     )
@@ -83,11 +84,55 @@ fn ephemeral_transport_pushes_only_the_exact_checked_out_head() {
             &repository,
             "patchwright/test-task",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            remote.to_str().unwrap(),
             fixture.path().join("state").as_path(),
             "fixture-token",
         )
         .is_err()
     );
+
+    let other_remote = fixture.path().join("other.git");
+    git(
+        fixture.path(),
+        &["init", "--bare", other_remote.to_str().unwrap()],
+    );
+    git(
+        &repository,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            other_remote.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        GitTransport::push_branch(
+            &repository,
+            "patchwright/test-task",
+            &head,
+            remote.to_str().unwrap(),
+            fixture.path().join("state").as_path(),
+            "fixture-token",
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn managed_clone_rejects_a_clone_url_outside_the_bound_github_repository() {
+    let fixture = tempfile::tempdir().unwrap();
+    let destination = fixture.path().join("repository");
+    assert!(
+        GitTransport::clone_repository(
+            "https://evil.example/octo/fixture.git",
+            "octo/fixture",
+            &destination,
+            fixture.path().join("state").as_path(),
+            "fixture-token",
+        )
+        .is_err()
+    );
+    assert!(!destination.exists());
 }
 
 #[tokio::test]

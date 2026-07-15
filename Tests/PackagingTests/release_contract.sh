@@ -27,6 +27,7 @@ for required in \
   Packaging/patchwright-relay.entitlements \
   script/validate_bundle.sh \
   script/build_release_components.sh \
+  script/assert_release_assembly.sh \
   script/sign_release.sh \
   script/verify_signing.sh \
   script/create_dmg.sh \
@@ -35,6 +36,16 @@ for required in \
   script/release_readiness.sh; do
   [[ -f "$ROOT_DIR/$required" ]] || fail "missing $required"
 done
+
+ASSEMBLY="$TMP_ROOT/assembly.json"
+jq -n '{dirty:false,candidate:true}' >"$ASSEMBLY"
+"$ROOT_DIR/script/assert_release_assembly.sh" "$ASSEMBLY"
+jq -n '{dirty:true,candidate:false}' >"$ASSEMBLY"
+if "$ROOT_DIR/script/assert_release_assembly.sh" "$ASSEMBLY" >"$TMP_ROOT/assembly.out" 2>&1; then
+  fail "dirty non-candidate assembly was accepted for release"
+fi
+grep -q 'release assembly is not a clean candidate' "$TMP_ROOT/assembly.out" \
+  || fail "dirty assembly rejection was not explicit"
 
 APP="$TMP_ROOT/Patchwright.app"
 make_fixture "$APP"

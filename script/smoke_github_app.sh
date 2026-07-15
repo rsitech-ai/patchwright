@@ -7,6 +7,7 @@ TARGET_REPOSITORY="${PATCHWRIGHT_GITHUB_E2E_REPOSITORY:-}"
 TARGET_REPOSITORY_ID="${PATCHWRIGHT_GITHUB_E2E_REPOSITORY_ID:-}"
 TARGET_INSTALLATION_ID="${PATCHWRIGHT_GITHUB_E2E_INSTALLATION_ID:-}"
 TARGET="$TARGET_OWNER/$TARGET_REPOSITORY"
+NORMALIZED_TARGET="$(printf '%s' "$TARGET" | tr '[:upper:]' '[:lower:]')"
 ALLOWLIST="${PATCHWRIGHT_GITHUB_E2E_ALLOWLIST:-}"
 CONFIRMATION="${PATCHWRIGHT_GITHUB_E2E_CONFIRM:-}"
 CONFIGURATION="${PATCHWRIGHT_GITHUB_APP_CONFIG:-$HOME/.patchwright/github-app.json}"
@@ -29,7 +30,7 @@ die() {
 }
 
 [[ -n "$TARGET_OWNER" && -n "$TARGET_REPOSITORY" ]] || fail "set the disposable owner and repository"
-[[ "$TARGET" != "s1korrrr/patchwright" ]] || fail "the Patchwright production repository is forbidden"
+[[ "$NORMALIZED_TARGET" != "s1korrrr/patchwright" ]] || fail "the Patchwright production repository is forbidden"
 [[ "$TARGET" == "$ALLOWLIST" ]] || fail "PATCHWRIGHT_GITHUB_E2E_ALLOWLIST must exactly equal $TARGET"
 [[ "$CONFIRMATION" == "authorize:$TARGET" ]] || fail "set PATCHWRIGHT_GITHUB_E2E_CONFIRM=authorize:$TARGET for this one run"
 [[ "$TARGET_REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]] || fail "set the numeric disposable repository ID"
