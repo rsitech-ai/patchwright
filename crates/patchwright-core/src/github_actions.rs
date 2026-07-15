@@ -49,6 +49,8 @@ pub enum GitHubAction {
     Review {
         #[serde(alias = "pull_request_number")]
         pull_request_number: u64,
+        #[serde(alias = "expected_head_sha")]
+        expected_head_sha: String,
         event: ReviewEvent,
         body: String,
         #[serde(alias = "inline_comments")]
@@ -134,6 +136,7 @@ impl GitHubAction {
 
     pub fn review(
         pull_request_number: u64,
+        expected_head_sha: &str,
         event: ReviewEvent,
         body: &str,
         inline_comments: Vec<InlineReviewComment>,
@@ -148,6 +151,7 @@ impl GitHubAction {
         }
         Ok(Self::Review {
             pull_request_number,
+            expected_head_sha: validate_sha(expected_head_sha)?,
             event,
             body,
             inline_comments,

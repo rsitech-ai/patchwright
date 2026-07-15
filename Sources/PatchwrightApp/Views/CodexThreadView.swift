@@ -42,7 +42,11 @@ struct CodexThreadView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            if isBusy { ProgressView().controlSize(.small) }
+            if isBusy {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Codex is working")
+            }
             if let approval = store.codexApprovalsByTask[task.id]?.first(where: { $0.state == .pending }) {
                 Button("Review Request", systemImage: "checkmark.shield") { selectedApproval = approval }
                     .buttonStyle(.borderedProminent)

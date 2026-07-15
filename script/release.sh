@@ -6,6 +6,7 @@ ASSEMBLY_OUTPUT="$("$ROOT_DIR/script/build_release_components.sh")"
 RELEASE_ROOT="$(printf '%s\n' "$ASSEMBLY_OUTPUT" | sed -n 's/^PATCHWRIGHT_RELEASE_ROOT=//p')"
 APP_PATH="$(printf '%s\n' "$ASSEMBLY_OUTPUT" | sed -n 's/^PATCHWRIGHT_APP_PATH=//p')"
 [[ -d "$APP_PATH" && -d "$RELEASE_ROOT" ]] || { echo "release assembly did not return valid paths" >&2; exit 65; }
+"$ROOT_DIR/script/assert_release_assembly.sh" "$RELEASE_ROOT/evidence/assembly.json"
 
 PATCHWRIGHT_REPO_VERIFIED=1 "$ROOT_DIR/script/sign_release.sh" "$APP_PATH"
 PATCHWRIGHT_REPO_VERIFIED=1 "$ROOT_DIR/script/notarize_release.sh" "$APP_PATH" "$RELEASE_ROOT/evidence"

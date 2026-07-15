@@ -101,6 +101,7 @@ async fn emits_exact_branch_comment_review_check_draft_and_merge_requests() {
         GitHubAction::comment(4, "bounded comment").unwrap(),
         GitHubAction::review(
             4,
+            sha,
             ReviewEvent::Approve,
             "review body",
             vec![InlineReviewComment::new("src/lib.rs", 9, "inline body").unwrap()],
@@ -136,6 +137,7 @@ async fn emits_exact_branch_comment_review_check_draft_and_merge_requests() {
         )
     );
     assert_eq!(requests[2].1, "/repos/octo/fixture/pulls/4/reviews");
+    assert_eq!(requests[2].2["commit_id"], sha);
     assert_eq!(requests[2].2["event"], "APPROVE");
     assert_eq!(
         requests[2].2["comments"][0],

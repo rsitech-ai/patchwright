@@ -21,7 +21,7 @@ fn every_delivery_and_merge_action_has_stable_exact_identity() {
         GitHubAction::create_branch("feat/fix", SHA_A).unwrap(),
         GitHubAction::push_intent("feat/fix", SHA_B).unwrap(),
         GitHubAction::comment(12, "Applied the verified fix.").unwrap(),
-        GitHubAction::review(12, ReviewEvent::Approve, "Verified.", vec![]).unwrap(),
+        GitHubAction::review(12, SHA_A, ReviewEvent::Approve, "Verified.", vec![]).unwrap(),
         GitHubAction::resolve_review_thread(12, "PRRT_kwDOExample", SHA_B).unwrap(),
         GitHubAction::check_run("Patchwright", SHA_B, "completed", Some("success")).unwrap(),
         GitHubAction::draft_pull_request("Fix", "feat/fix", "main", "Body").unwrap(),

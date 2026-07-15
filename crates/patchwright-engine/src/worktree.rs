@@ -15,12 +15,17 @@ pub struct GitTransport;
 impl GitTransport {
     pub fn clone_repository(
         clone_url: &str,
+        repository_full_name: &str,
         destination: &Path,
         state_root: &Path,
         token: &str,
     ) -> Result<()> {
         if token.is_empty() {
             bail!("GitHub installation token is empty");
+        }
+        let canonical_clone_url = format!("https://github.com/{repository_full_name}.git");
+        if clone_url != canonical_clone_url {
+            bail!("managed clone URL does not match the bound GitHub repository");
         }
         if destination.exists() {
             bail!("managed clone destination already exists");
@@ -57,6 +62,7 @@ impl GitTransport {
         repository: &Path,
         branch: &str,
         expected_head_sha: &str,
+        expected_origin_url: &str,
         state_root: &Path,
         token: &str,
     ) -> Result<()> {
@@ -79,6 +85,17 @@ impl GitTransport {
         }
         if inspection.head_sha != expected_head_sha {
             bail!("task worktree head changed before push");
+        }
+        let origin = Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args(["remote", "get-url", "origin"])
+            .output()
+            .context("inspect task worktree origin")?;
+        if !origin.status.success()
+            || String::from_utf8_lossy(&origin.stdout).trim() != expected_origin_url
+        {
+            bail!("task worktree origin does not match the approved repository");
         }
         let askpass = prepare_askpass(state_root)?;
         let output = Command::new("git")
