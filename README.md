@@ -2,6 +2,18 @@
 
 Patchwright is a local-first, macOS-native engineering control plane for GitHub. It separates private language-model assistance from a durable coding-agent runtime and makes every approval, command, diff, test, and remote mutation auditable.
 
+Build Patchwright from [source](#build-and-verify). When published, official
+Developer ID-signed and Apple-notarized downloads will be available from
+[GitHub Releases](https://github.com/s1korrrr/patchwright/releases), outside the
+Mac App Store.
+
+Project policies: [Contributing](CONTRIBUTING.md) ·
+[Security](SECURITY.md) · [Privacy](PRIVACY.md) · [Support](SUPPORT.md) ·
+[Code of Conduct](CODE_OF_CONDUCT.md)
+
+Patchwright is available under your choice of the
+[MIT License](LICENSE-MIT) or [Apache License 2.0](LICENSE-APACHE).
+
 This repository contains the Stage 1–3 MVP:
 
 - `Patchwright`: native SwiftUI review and task client with Apple Foundation Models availability handling.
