@@ -2,6 +2,7 @@
 /target/
 /dist/
 /.worktrees/
+/.superpowers/
 /.patchwright/
 *.sqlite3*
 *.sock
