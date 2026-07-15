@@ -29,6 +29,18 @@ if [[ -z "$IDENTITY" ]]; then
 fi
 "$ROOT_DIR/script/validate_bundle.sh" "$APP_PATH"
 /usr/bin/xattr -cr "$APP_PATH"
+SPARKLE="$APP_PATH/Contents/Frameworks/Sparkle.framework"
+/usr/bin/codesign --force --sign "$IDENTITY" --options runtime --timestamp \
+  "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
+/usr/bin/codesign --force --sign "$IDENTITY" --options runtime --timestamp \
+  --preserve-metadata=entitlements \
+  "$SPARKLE/Versions/B/XPCServices/Downloader.xpc"
+/usr/bin/codesign --force --sign "$IDENTITY" --options runtime --timestamp \
+  "$SPARKLE/Versions/B/Autoupdate"
+/usr/bin/codesign --force --sign "$IDENTITY" --options runtime --timestamp \
+  "$SPARKLE/Versions/B/Updater.app"
+/usr/bin/codesign --force --sign "$IDENTITY" --options runtime --timestamp \
+  "$SPARKLE"
 /usr/bin/codesign --force --sign "$IDENTITY" --options runtime --timestamp \
   --entitlements "$ROOT_DIR/Packaging/patchwright-engine.entitlements" \
   "$APP_PATH/Contents/Helpers/patchwright-engine"
