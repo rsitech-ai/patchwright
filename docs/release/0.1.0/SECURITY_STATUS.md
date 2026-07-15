@@ -18,7 +18,7 @@ twice by the platform's cyber-safety classifier. The governing workflow forbids
 silently replacing those required sub-agent write-ups with a main-agent draft.
 Accordingly, no canonical `report.md` projection is claimed.
 
-## Remediation in commit `2918423`
+## Remediation in commits `2918423` and `53aa639`
 
 - Added clean-candidate assertion before any production signing step.
 - Bound managed clone URLs to the enrolled public GitHub repository.
@@ -29,7 +29,7 @@ Accordingly, no canonical `report.md` projection is claimed.
 - Added accessibility labels to unlabeled progress and delivery input controls.
 
 The three medium findings covering clone origin, push origin, and review head
-binding have direct regression tests, but the fixed commit has not received a
+binding have direct regression tests, but the fixed commits have not received a
 fresh completed Codex Security scan. Treat them as remediated-pending-rescan.
 
 ## Remaining release-relevant findings

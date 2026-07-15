@@ -9,7 +9,7 @@
 - Swift: 6.3.3
 - Rust/Cargo: 1.91.0
 - Codex CLI: 0.144.2, signed in
-- Release commit tested: `2918423`
+- Release commit tested: `53aa639`
 
 The host is newer than the declared macOS 26 minimum, so this is launch proof,
 not minimum-OS compatibility proof.
@@ -40,11 +40,11 @@ Focused regression coverage added or strengthened:
 
 Clean unsigned candidate:
 
-`/Users/s1kor/.patchwright/release-work/Patchwright-0.1.0-1.1kCS7V/Patchwright.app`
+`/Users/s1kor/.patchwright/release-work/Patchwright-0.1.0-1.gTCdAd/Patchwright.app`
 
 Assembly record:
 
-`/Users/s1kor/.patchwright/release-work/Patchwright-0.1.0-1.1kCS7V/evidence/assembly.json`
+`/Users/s1kor/.patchwright/release-work/Patchwright-0.1.0-1.gTCdAd/evidence/assembly.json`
 
 The record states version `0.1.0`, build `1`, `dirty=false`, and
 `candidate=true`.
@@ -58,7 +58,7 @@ during inspection, and shut down cleanly on SIGTERM.
 
 Inspection screenshot:
 
-`/var/folders/g6/mrhqfgk15_d2gjj52991r1jr0000gn/T/codex-shot-2026-07-15_14-56-36.png`
+`/var/folders/g6/mrhqfgk15_d2gjj52991r1jr0000gn/T/codex-shot-2026-07-15_15-04-35.png`
 
 Observed host-log qualifications:
 
