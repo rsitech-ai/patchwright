@@ -10,6 +10,59 @@ fail() {
   exit 1
 }
 
+require_file() {
+  local path="$1"
+  [[ -f "$ROOT_DIR/$path" ]] || fail "missing $path"
+}
+
+require_text() {
+  local path="$1"
+  local expected="$2"
+  grep -Fq "$expected" "$ROOT_DIR/$path" || fail "$path is missing required text: $expected"
+}
+
+for required in \
+  LICENSE-MIT \
+  LICENSE-APACHE \
+  CONTRIBUTING.md \
+  SECURITY.md \
+  CODE_OF_CONDUCT.md \
+  PRIVACY.md \
+  SUPPORT.md; do
+  require_file "$required"
+done
+
+require_text LICENSE-MIT "Permission is hereby granted, free of charge"
+require_text LICENSE-APACHE "Apache License"
+require_text LICENSE-APACHE "Version 2.0, January 2004"
+require_text CONTRIBUTING.md "Developer Certificate of Origin"
+require_text CONTRIBUTING.md "Signed-off-by:"
+require_text SECURITY.md "security/advisories/new"
+require_text CODE_OF_CONDUCT.md "Contributor Covenant"
+require_text CODE_OF_CONDUCT.md "version 2.1"
+require_text PRIVACY.md "local-first"
+require_text SUPPORT.md "best-effort"
+
+grep -Eq '^license = "MIT OR Apache-2\.0"$' "$ROOT_DIR/Cargo.toml" \
+  || fail 'Cargo.toml must declare license = "MIT OR Apache-2.0"'
+
+BUNDLE_COPYRIGHT="$(/usr/libexec/PlistBuddy -c 'Print :NSHumanReadableCopyright' "$ROOT_DIR/Packaging/Info.plist")"
+[[ "$BUNDLE_COPYRIGHT" != *"All rights reserved"* ]] \
+  || fail "bundle copyright must not claim All rights reserved"
+
+for target in \
+  '#build-and-verify' \
+  'https://github.com/s1korrrr/patchwright/releases' \
+  'LICENSE-MIT' \
+  'LICENSE-APACHE' \
+  'CONTRIBUTING.md' \
+  'SECURITY.md' \
+  'PRIVACY.md' \
+  'SUPPORT.md' \
+  'CODE_OF_CONDUCT.md'; do
+  grep -Fq "]($target)" "$ROOT_DIR/README.md" || fail "README.md is missing link to $target"
+done
+
 make_fixture() {
   local app="$1"
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers"
