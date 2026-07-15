@@ -24,7 +24,7 @@ if [[ -e "$APP_BUNDLE" || -L "$APP_BUNDLE" ]]; then
   /usr/bin/trash "$APP_BUNDLE"
 fi
 mkdir -p "$STAGING_ROOT" "$ROOT_DIR/dist" "$APP_MACOS"
-mkdir -p "$APP_BUNDLE/Contents/Helpers" "$APP_BUNDLE/Contents/Frameworks"
+mkdir -p "$APP_BUNDLE/Contents/Helpers" "$APP_BUNDLE/Contents/Frameworks" "$APP_BUNDLE/Contents/Resources"
 SWIFT_BIN_DIR="$(swift build -c release --show-bin-path)"
 SPARKLE_FRAMEWORK="$SWIFT_BIN_DIR/Sparkle.framework"
 [[ -d "$SPARKLE_FRAMEWORK" && ! -L "$SPARKLE_FRAMEWORK" ]] \
@@ -36,6 +36,7 @@ cp "$ROOT_DIR/target/release/patchwright-relay" "$APP_BUNDLE/Contents/Helpers/pa
 chmod +x "$APP_MACOS/$APP_NAME"
 chmod +x "$APP_BUNDLE/Contents/Helpers/patchwright-engine" "$APP_BUNDLE/Contents/Helpers/patchwright-relay"
 cp "$ROOT_DIR/Packaging/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
+cp "$ROOT_DIR/Packaging/Patchwright.icns" "$APP_BUNDLE/Contents/Resources/Patchwright.icns"
 clean_bundle_metadata() {
   /usr/bin/xattr -cr "$APP_BUNDLE"
   # File Provider can retain these root attributes even after `xattr -cr`.

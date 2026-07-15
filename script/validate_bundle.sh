@@ -18,6 +18,7 @@ MAIN="$APP_PATH/Contents/MacOS/Patchwright"
 ENGINE="$APP_PATH/Contents/Helpers/patchwright-engine"
 RELAY="$APP_PATH/Contents/Helpers/patchwright-relay"
 SPARKLE="$APP_PATH/Contents/Frameworks/Sparkle.framework"
+ICON="$APP_PATH/Contents/Resources/Patchwright.icns"
 SPARKLE_BINARY="$SPARKLE/Versions/B/Sparkle"
 SPARKLE_AUTOUPDATE="$SPARKLE/Versions/B/Autoupdate"
 SPARKLE_UPDATER="$SPARKLE/Versions/B/Updater.app"
@@ -27,6 +28,8 @@ SPARKLE_DOWNLOADER_BINARY="$SPARKLE_DOWNLOADER/Contents/MacOS/Downloader"
 SPARKLE_INSTALLER="$SPARKLE/Versions/B/XPCServices/Installer.xpc"
 SPARKLE_INSTALLER_BINARY="$SPARKLE_INSTALLER/Contents/MacOS/Installer"
 [[ -d "$SPARKLE" && ! -L "$SPARKLE" ]] || die "missing Contents/Frameworks/Sparkle.framework"
+[[ -e "$ICON" || -L "$ICON" ]] || die "missing Contents/Resources/Patchwright.icns"
+[[ -f "$ICON" && ! -L "$ICON" ]] || die "icon resource must be a regular non-symlink file"
 [[ -d "$SPARKLE_UPDATER" && ! -L "$SPARKLE_UPDATER" ]] || die "missing Sparkle Updater.app"
 [[ -d "$SPARKLE_DOWNLOADER" && ! -L "$SPARKLE_DOWNLOADER" ]] || die "missing Sparkle Downloader.xpc"
 [[ -d "$SPARKLE_INSTALLER" && ! -L "$SPARKLE_INSTALLER" ]] || die "missing Sparkle Installer.xpc"
@@ -45,9 +48,14 @@ plist_value() { /usr/libexec/PlistBuddy -c "Print :$1" "$PLIST" 2>/dev/null || t
 [[ "$(plist_value CFBundleIdentifier)" == "$EXPECTED_BUNDLE_ID" ]] || die "bundle identifier mismatch"
 [[ "$(plist_value CFBundleExecutable)" == "Patchwright" ]] || die "bundle executable mismatch"
 [[ "$(plist_value CFBundlePackageType)" == "APPL" ]] || die "bundle package type mismatch"
+[[ "$(plist_value CFBundleIconFile)" == "Patchwright.icns" ]] || die "bundle icon declaration mismatch"
 [[ "$(plist_value LSMinimumSystemVersion)" == "$EXPECTED_MINIMUM" ]] || die "minimum system mismatch"
 [[ "$(plist_value CFBundleShortVersionString)" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$ ]] || die "invalid marketing version"
 [[ "$(plist_value CFBundleVersion)" =~ ^[1-9][0-9]*$ ]] || die "invalid build number"
+ICON_VERIFY_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/patchwright-icon-verify.XXXXXX")"
+trap 'rm -rf "$ICON_VERIFY_ROOT"' EXIT
+/usr/bin/iconutil --convert iconset --output "$ICON_VERIFY_ROOT/Patchwright.iconset" "$ICON" >/dev/null 2>&1 \
+  || die "malformed Contents/Resources/Patchwright.icns"
 
 EXPECTED_SPARKLE_LINKS="$(cat <<'EOF'
 Autoupdate|Versions/Current/Autoupdate
