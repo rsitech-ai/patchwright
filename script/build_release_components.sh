@@ -50,22 +50,20 @@ generate_compliance() {
     --output-dir "$WORK_ROOT/evidence" \
     --app "$APP_PATH" \
     --engine "$APP_PATH/Contents/Helpers/patchwright-engine" \
-    --relay "$APP_PATH/Contents/Helpers/patchwright-relay"
+    --relay "$APP_PATH/Contents/Helpers/patchwright-relay" \
+    --license-overrides "$ROOT_DIR/Packaging/ThirdPartyLicenseOverrides"
 }
 generate_compliance
 cp "$WORK_ROOT/evidence/third-party-notices.md" "$APP_PATH/Contents/Resources/THIRD_PARTY_NOTICES.md"
+[[ ! -e "$APP_PATH/Contents/Resources/third-party-licenses" ]] \
+  || { echo "license resource destination already exists" >&2; exit 65; }
+/usr/bin/ditto "$WORK_ROOT/evidence/third-party-licenses" "$APP_PATH/Contents/Resources/third-party-licenses"
 # Regenerate once after embedding the deterministic notice so the app tree hash is exact.
 generate_compliance
 
 "$ROOT_DIR/script/validate_bundle.sh" "$APP_PATH"
-"$ROOT_DIR/script/scan_publication_secrets.sh" \
-  --repo "$ROOT_DIR" \
-  --artifact-root "$WORK_ROOT" \
-  --output "$WORK_ROOT/evidence/secret-scan.json"
-
 SBOM_SHA256="$(shasum -a 256 "$WORK_ROOT/evidence/sbom.spdx.json" | awk '{print $1}')"
 NOTICES_SHA256="$(shasum -a 256 "$WORK_ROOT/evidence/third-party-notices.md" | awk '{print $1}')"
-SECRET_SCAN_SHA256="$(shasum -a 256 "$WORK_ROOT/evidence/secret-scan.json" | awk '{print $1}')"
 
 jq -n \
   --arg app "$APP_PATH" \
@@ -74,10 +72,18 @@ jq -n \
   --arg build "$BUILD" \
   --arg sbom_sha256 "$SBOM_SHA256" \
   --arg notices_sha256 "$NOTICES_SHA256" \
-  --arg secret_scan_sha256 "$SECRET_SCAN_SHA256" \
   --argjson dirty "$DIRTY" \
-  '{app_path:$app,release_root:$root,version:$version,build:$build,dirty:$dirty,candidate:($dirty|not),compliance:{sbom_sha256:$sbom_sha256,third_party_notices_sha256:$notices_sha256,secret_scan_sha256:$secret_scan_sha256}}' \
+  '{app_path:$app,release_root:$root,version:$version,build:$build,dirty:$dirty,candidate:($dirty|not),compliance:{sbom_sha256:$sbom_sha256,third_party_notices_sha256:$notices_sha256,secret_scan_binding:"evidence/SHA256SUMS"}}' \
   >"$WORK_ROOT/evidence/assembly.json"
+
+# Finalize every candidate input before scanning. The scanner excludes only its
+# own output and SHA256SUMS to avoid circular evidence; the final checksum pass
+# below binds secret-scan.json into the candidate.
+"$ROOT_DIR/script/generate_release_metadata.sh" "$APP_PATH" "$WORK_ROOT"
+"$ROOT_DIR/script/scan_publication_secrets.sh" \
+  --repo "$ROOT_DIR" \
+  --artifact-root "$WORK_ROOT" \
+  --output "$WORK_ROOT/evidence/secret-scan.json"
 "$ROOT_DIR/script/generate_release_metadata.sh" "$APP_PATH" "$WORK_ROOT"
 
 printf 'PATCHWRIGHT_RELEASE_ROOT=%s\nPATCHWRIGHT_APP_PATH=%s\n' "$WORK_ROOT" "$APP_PATH"
