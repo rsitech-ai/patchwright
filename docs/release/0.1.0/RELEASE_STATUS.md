@@ -12,7 +12,7 @@ or App Store Connect submission.
 
 | Gate | Status | Evidence |
 | --- | --- | --- |
-| Source and tests | Pass | Commit `2918423`; `./script/verify.sh` passed |
+| Source and tests | Pass | Commit `53aa639`; `./script/verify.sh` passed |
 | Clean assembly | Pass | `dirty=false`, `candidate=true` in assembly evidence |
 | Runtime launch | Pass with qualification | Unsigned candidate launched on macOS 27 beta; local engine connected and app shut down cleanly |
 | Developer ID signing | Blocked | Keychain-backed `codesign` did not complete; the attempted artifact is not usable |

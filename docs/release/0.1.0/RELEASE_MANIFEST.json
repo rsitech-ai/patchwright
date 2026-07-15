@@ -7,7 +7,7 @@
   "minimum_macos": "26.0",
   "release_branch": "feat/andrzej_release_hardening",
   "source_base": "34fa997b225ca32ae75256dadae5a9d05191c3fd",
-  "hardening_commit": "2918423",
+  "hardening_commit": "53aa63920b2c475adad4c86161dfb084c53f1a3e",
   "verdict": "BLOCKED",
   "readiness": {
     "repo_ready": true,
@@ -18,9 +18,9 @@
     "app_store_connect_upload_ready": false
   },
   "artifacts": {
-    "clean_unsigned_app": "/Users/s1kor/.patchwright/release-work/Patchwright-0.1.0-1.1kCS7V/Patchwright.app",
-    "assembly_evidence": "/Users/s1kor/.patchwright/release-work/Patchwright-0.1.0-1.1kCS7V/evidence/assembly.json",
-    "runtime_screenshot": "/var/folders/g6/mrhqfgk15_d2gjj52991r1jr0000gn/T/codex-shot-2026-07-15_14-56-36.png"
+    "clean_unsigned_app": "/Users/s1kor/.patchwright/release-work/Patchwright-0.1.0-1.gTCdAd/Patchwright.app",
+    "assembly_evidence": "/Users/s1kor/.patchwright/release-work/Patchwright-0.1.0-1.gTCdAd/evidence/assembly.json",
+    "runtime_screenshot": "/var/folders/g6/mrhqfgk15_d2gjj52991r1jr0000gn/T/codex-shot-2026-07-15_15-04-35.png"
   },
   "tests": {
     "swift_passed": 30,
@@ -46,5 +46,5 @@
     "Developer ID Keychain authorization and notarytool profile for direct distribution",
     "Final owner authorization for submission or public release"
   ],
-  "generated_at": "2026-07-15T14:58:00+02:00"
+  "generated_at": "2026-07-15T15:05:00+02:00"
 }
