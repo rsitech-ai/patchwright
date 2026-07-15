@@ -22,6 +22,10 @@ jq -n \
   '{version:$version,build:$build,git_commit:$commit,dirty:$dirty,swift:$swift,rust:$rust,cargo:$cargo,architecture:"arm64",minimum_macos:"26.0"}' \
   >"$OUTPUT_ROOT/evidence/build-metadata.json"
 
+"$ROOT_DIR/script/generate_symlink_manifest.py" \
+  --root "$OUTPUT_ROOT" \
+  --output "$OUTPUT_ROOT/evidence/SYMLINKS.json"
+
 (
   cd "$OUTPUT_ROOT"
   find . -type f ! -path './evidence/SHA256SUMS' -print0 \

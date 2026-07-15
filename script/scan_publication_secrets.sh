@@ -60,6 +60,17 @@ rules = [
             )
         ),
     ),
+    (
+        "pem-encrypted-private-key",
+        re.compile(
+            pattern(
+                b"-----BEGIN ",
+                b"ENCRYPTED PRIVATE KEY-----\\s+",
+                b"[A-Za-z0-9+/=\\r\\n]{40,}",
+                b"-----END ENCRYPTED PRIVATE KEY-----",
+            )
+        ),
+    ),
     ("openai-api-key", re.compile(pattern(b"sk", b"-(?:proj-|svcacct-)?", b"[A-Za-z0-9_-]{20,}"))),
     (
         "assigned-webhook-secret",
@@ -74,10 +85,21 @@ counts = {"tracked_files": 0, "history_blobs": 0, "artifact_files": 0}
 
 
 def scan_bytes(scope: str, locator: str, payload: bytes) -> None:
-    locator_hash = hashlib.sha256(f"{scope}\0{locator}".encode("utf-8", "surrogateescape")).hexdigest()
+    locator_hash = hash_locator(scope, locator)
     for rule_name, expression in rules:
         if expression.search(payload):
             findings.add((scope, locator_hash, rule_name))
+
+
+def hash_locator(scope: str, locator: str) -> str:
+    return hashlib.sha256(f"{scope}\0{locator}".encode("utf-8", "surrogateescape")).hexdigest()
+
+
+def artifact_locator(path: Path) -> str:
+    try:
+        return path.relative_to(artifact_root).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def git(*args: str, input_data: bytes | None = None) -> bytes:
@@ -115,8 +137,9 @@ try:
         scan_bytes("history", object_id, git("cat-file", "blob", object_id))
         counts["history_blobs"] += 1
 
+    checksum_manifest = artifact_root / "evidence" / "SHA256SUMS"
     for path in sorted(artifact_root.rglob("*"), key=lambda item: item.relative_to(artifact_root).as_posix()):
-        if path.resolve() == output:
+        if path == output or path == checksum_manifest:
             continue
         if path.is_symlink():
             payload = os.readlink(path).encode("utf-8", "surrogateescape")
@@ -139,6 +162,16 @@ result = {
     "schema_version": 1,
     "clean": not finding_rows,
     "scanned": counts,
+    "excluded_artifacts": [
+        {
+            "reason": "checksum-manifest-circularity",
+            "locator_sha256": hash_locator("artifact", artifact_locator(artifact_root / "evidence" / "SHA256SUMS")),
+        },
+        {
+            "reason": "self-output",
+            "locator_sha256": hash_locator("artifact", artifact_locator(output)),
+        },
+    ],
     "findings": finding_rows,
 }
 temporary = output.with_name(output.name + ".tmp")
