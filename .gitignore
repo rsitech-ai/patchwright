@@ -1,8 +1,8 @@
 /.build/
 /target/
 /dist/
+/.worktrees/
 /.patchwright/
 *.sqlite3*
 *.sock
 .DS_Store
-
