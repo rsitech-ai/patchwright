@@ -1,7 +1,7 @@
 # Third-Party Notices
 
-Patchwright includes open-source Swift and Rust dependencies resolved by `Package.resolved` where present and `Cargo.lock`.
+This repository copy documents the release process. Each assembled Patchwright app replaces it with a dependency-derived notice generated from the exact locked Rust and Swift metadata for that candidate.
 
-The Rust dependency graph contains packages distributed under permissive licenses including MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, Unicode-3.0, and Zlib. The authoritative package names, versions, checksums, and dependency edges are retained in `Cargo.lock` and the generated release metadata.
+The authoritative package names, versions, declared licenses, sources, checksums, and dependency edges are retained in `Cargo.lock`, `Package.resolved` where present, and the release evidence directory. Compliance generation fails closed when a resolved dependency lacks a declared license.
 
 Patchwright does not bundle Codex. It discovers a separately installed, signed-in Codex executable at runtime.
