@@ -31,6 +31,8 @@ for required in \
   SUPPORT.md; do
   require_file "$required"
 done
+[[ -x "$ROOT_DIR/script/generate_app_icon.sh" ]] || fail "script/generate_app_icon.sh must be executable"
+require_text Assets/PatchwrightIcon-source.svg 'viewBox="0 0 1024 1024"'
 
 require_text LICENSE-MIT "Permission is hereby granted, free of charge"
 require_text LICENSE-APACHE "Apache License"
@@ -43,12 +45,58 @@ require_text CODE_OF_CONDUCT.md "version 2.1"
 require_text PRIVACY.md "local-first"
 require_text SUPPORT.md "best-effort"
 
+for required in \
+  Assets/PatchwrightIcon-source.svg \
+  Assets/PatchwrightIcon-source.png \
+  Assets/README.md \
+  Packaging/Patchwright.icns \
+  script/generate_app_icon.sh; do
+  require_file "$required"
+done
+
+SOURCE_ICON="$ROOT_DIR/Assets/PatchwrightIcon-source.png"
+[[ "$(/usr/bin/sips -g format "$SOURCE_ICON" 2>/dev/null | awk '/format:/{print $2}')" == png ]] \
+  || fail "icon source must be PNG"
+[[ "$(/usr/bin/sips -g pixelWidth "$SOURCE_ICON" 2>/dev/null | awk '/pixelWidth:/{print $2}')" == 1024 ]] \
+  || fail "icon source width must be 1024"
+[[ "$(/usr/bin/sips -g pixelHeight "$SOURCE_ICON" 2>/dev/null | awk '/pixelHeight:/{print $2}')" == 1024 ]] \
+  || fail "icon source height must be 1024"
+/usr/bin/sips -g profile "$SOURCE_ICON" 2>/dev/null | grep -Fq 'sRGB' \
+  || fail "icon source must use an sRGB profile"
+
+ICONSET="$TMP_ROOT/Patchwright.iconset"
+/usr/bin/iconutil --convert iconset --output "$ICONSET" "$ROOT_DIR/Packaging/Patchwright.icns" \
+  || fail "Patchwright.icns is malformed"
+while IFS='|' read -r icon_name icon_size; do
+  icon_path="$ICONSET/$icon_name"
+  [[ -f "$icon_path" && ! -L "$icon_path" ]] || fail "iconset is missing $icon_name"
+  [[ "$(/usr/bin/sips -g pixelWidth "$icon_path" 2>/dev/null | awk '/pixelWidth:/{print $2}')" == "$icon_size" ]] \
+    || fail "$icon_name width mismatch"
+  [[ "$(/usr/bin/sips -g pixelHeight "$icon_path" 2>/dev/null | awk '/pixelHeight:/{print $2}')" == "$icon_size" ]] \
+    || fail "$icon_name height mismatch"
+done <<'EOF'
+icon_16x16.png|16
+icon_16x16@2x.png|32
+icon_32x32.png|32
+icon_32x32@2x.png|64
+icon_128x128.png|128
+icon_128x128@2x.png|256
+icon_256x256.png|256
+icon_256x256@2x.png|512
+icon_512x512.png|512
+icon_512x512@2x.png|1024
+EOF
+[[ "$(find "$ICONSET" -type f -name '*.png' | wc -l | tr -d ' ')" == 10 ]] \
+  || fail "iconset must contain exactly ten PNG representations"
+
 grep -Eq '^license = "MIT OR Apache-2\.0"$' "$ROOT_DIR/Cargo.toml" \
   || fail 'Cargo.toml must declare license = "MIT OR Apache-2.0"'
 
 BUNDLE_COPYRIGHT="$(/usr/libexec/PlistBuddy -c 'Print :NSHumanReadableCopyright' "$ROOT_DIR/Packaging/Info.plist")"
 [[ "$BUNDLE_COPYRIGHT" != *"All rights reserved"* ]] \
   || fail "bundle copyright must not claim All rights reserved"
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$ROOT_DIR/Packaging/Info.plist" 2>/dev/null || true)" == Patchwright.icns ]] \
+  || fail "CFBundleIconFile must be Patchwright.icns"
 
 SPARKLE_FEED="$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$ROOT_DIR/Packaging/Info.plist" 2>/dev/null || true)"
 [[ "$SPARKLE_FEED" == 'https://github.com/s1korrrr/patchwright/releases/latest/download/appcast.xml' ]] \
@@ -82,11 +130,13 @@ make_fixture() {
   local swift_bin_dir
   swift_bin_dir="$(cd "$ROOT_DIR" && swift build -c release --show-bin-path)"
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Frameworks"
+  mkdir -p "$app/Contents/Resources"
   cp "$swift_bin_dir/Patchwright" "$app/Contents/MacOS/Patchwright"
   cp /usr/bin/true "$app/Contents/Helpers/patchwright-engine"
   cp /usr/bin/true "$app/Contents/Helpers/patchwright-relay"
   chmod 755 "$app/Contents/MacOS/Patchwright" "$app/Contents/Helpers/patchwright-engine" "$app/Contents/Helpers/patchwright-relay"
   cp "$ROOT_DIR/Packaging/Info.plist" "$app/Contents/Info.plist"
+  cp "$ROOT_DIR/Packaging/Patchwright.icns" "$app/Contents/Resources/Patchwright.icns"
   /usr/bin/ditto "$swift_bin_dir/Sparkle.framework" "$app/Contents/Frameworks/Sparkle.framework"
 }
 
@@ -130,6 +180,27 @@ grep -q 'release assembly is not a clean candidate' "$TMP_ROOT/assembly.out" \
 APP="$TMP_ROOT/Patchwright.app"
 make_fixture "$APP"
 "$ROOT_DIR/script/validate_bundle.sh" "$APP"
+
+MISSING_ICON="$TMP_ROOT/missing-icon.app"
+make_fixture "$MISSING_ICON"
+rm "$MISSING_ICON/Contents/Resources/Patchwright.icns"
+assert_rejected "$MISSING_ICON" "missing Contents/Resources/Patchwright.icns" "$TMP_ROOT/missing-icon.out"
+
+SYMLINKED_ICON="$TMP_ROOT/symlinked-icon.app"
+make_fixture "$SYMLINKED_ICON"
+rm "$SYMLINKED_ICON/Contents/Resources/Patchwright.icns"
+ln -s "$ROOT_DIR/Packaging/Patchwright.icns" "$SYMLINKED_ICON/Contents/Resources/Patchwright.icns"
+assert_rejected "$SYMLINKED_ICON" "icon resource must be a regular non-symlink file" "$TMP_ROOT/symlinked-icon.out"
+
+MALFORMED_ICON="$TMP_ROOT/malformed-icon.app"
+make_fixture "$MALFORMED_ICON"
+printf 'not an icon\n' >"$MALFORMED_ICON/Contents/Resources/Patchwright.icns"
+assert_rejected "$MALFORMED_ICON" "malformed Contents/Resources/Patchwright.icns" "$TMP_ROOT/malformed-icon.out"
+
+MISMATCHED_ICON="$TMP_ROOT/mismatched-icon.app"
+make_fixture "$MISMATCHED_ICON"
+/usr/libexec/PlistBuddy -c 'Set :CFBundleIconFile Other.icns' "$MISMATCHED_ICON/Contents/Info.plist"
+assert_rejected "$MISMATCHED_ICON" "bundle icon declaration mismatch" "$TMP_ROOT/mismatched-icon.out"
 
 SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
 EXPECTED_SPARKLE_LINKS="$TMP_ROOT/expected-sparkle-links.txt"
@@ -252,6 +323,20 @@ EOF
 require_text script/build_release_components.sh 'swift build -c release --show-bin-path'
 require_text script/build_release_components.sh '/usr/bin/ditto "$SPARKLE_FRAMEWORK" "$APP_PATH/Contents/Frameworks/Sparkle.framework"'
 require_text script/build_and_run.sh '/usr/bin/ditto "$SPARKLE_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"'
+require_text script/build_release_components.sh 'cp "$ROOT_DIR/Packaging/Patchwright.icns" "$APP_PATH/Contents/Resources/Patchwright.icns"'
+require_text script/build_and_run.sh 'cp "$ROOT_DIR/Packaging/Patchwright.icns" "$APP_BUNDLE/Contents/Resources/Patchwright.icns"'
+require_text Sources/PatchwrightApp/Views/SettingsView.swift 'SetupGuidance.readOnlyGitHub'
+require_text Sources/PatchwrightApp/Views/SettingsView.swift 'SetupGuidance.maximumPermissions'
+for expected_copy in \
+  'No GitHub App or private key is required' \
+  'does not issue GitHub mutations' \
+  'Codex is not bundled' \
+  'no publisher App credential or private key'; do
+  require_text README.md "$expected_copy"
+done
+if grep -Fq 'Git, and the Codex CLI' "$ROOT_DIR/README.md"; then
+  fail "README must not call Codex a mandatory source-build requirement"
+fi
 require_text script/sign_release.sh '--preserve-metadata=entitlements'
 if grep -Eq 'codesign .*--deep|codesign --force --deep' "$ROOT_DIR/script/sign_release.sh"; then
   fail "release signing must not use codesign --deep"

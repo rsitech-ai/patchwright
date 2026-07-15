@@ -10,6 +10,8 @@
     <string>Patchwright</string>
     <key>CFBundleIdentifier</key>
     <string>ai.patchwright.app</string>
+    <key>CFBundleIconFile</key>
+    <string>Patchwright.icns</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

@@ -173,10 +173,10 @@ struct GitHubRepositoryView: View {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "exclamationmark.shield.fill").foregroundStyle(.orange)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("GitHub App access not verified yet").font(.callout.weight(.semibold))
-                        Text("Preview Task will verify this repository against your Patchwright GitHub App and refresh its installation identity.")
+                        Text("Your GitHub App is not installed for this repository").font(.callout.weight(.semibold))
+                        Text("Read-only gh data remains available. Previewing a mutation requires your App to be installed here and will refresh its installation identity.")
                             .font(.caption).foregroundStyle(.secondary)
-                        if let url = URL(string: "https://github.com/settings/installations") { Link("Manage GitHub Apps", destination: url).font(.caption) }
+                        if let url = URL(string: "https://github.com/settings/installations") { Link("Manage your GitHub App installations", destination: url).font(.caption) }
                     }
                 }
                 .padding(10)
