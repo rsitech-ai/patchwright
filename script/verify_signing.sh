@@ -3,6 +3,9 @@ set -euo pipefail
 
 APP_PATH="${1:?app path required}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# This prerequisite also discovers every Sparkle bundle, dylib, and Mach-O and
+# rejects anything outside the pinned five-object signing model before any
+# per-object or aggregate signature verification runs.
 "$ROOT_DIR/script/validate_bundle.sh" "$APP_PATH" --require-signed
 
 MAIN_DETAILS="$(/usr/bin/codesign -dvvv "$APP_PATH" 2>&1)"

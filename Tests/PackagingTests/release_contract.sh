@@ -209,6 +209,46 @@ make_fixture "$WRONG_INSTALL_NAME"
   "$WRONG_INSTALL_NAME/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle"
 assert_rejected "$WRONG_INSTALL_NAME" "Sparkle framework install name mismatch" "$TMP_ROOT/wrong-install-name.out"
 
+LEGITIMATE_RESOURCES="$TMP_ROOT/legitimate-sparkle-resources.app"
+make_fixture "$LEGITIMATE_RESOURCES"
+printf 'non-code release notes fixture\n' \
+  >"$LEGITIMATE_RESOURCES/Contents/Frameworks/Sparkle.framework/Versions/B/Resources/release-notes.txt"
+printf '#!/bin/sh\nexit 0\n' \
+  >"$LEGITIMATE_RESOURCES/Contents/Frameworks/Sparkle.framework/Versions/B/Resources/resource-helper.sh"
+chmod 755 "$LEGITIMATE_RESOURCES/Contents/Frameworks/Sparkle.framework/Versions/B/Resources/resource-helper.sh"
+"$ROOT_DIR/script/validate_bundle.sh" "$LEGITIMATE_RESOURCES"
+
+unexpected_index=0
+while IFS='|' read -r object_kind injected_relative; do
+  UNEXPECTED_CODE="$TMP_ROOT/unexpected-sparkle-code-$unexpected_index.app"
+  make_fixture "$UNEXPECTED_CODE"
+  injected="$UNEXPECTED_CODE/Contents/Frameworks/Sparkle.framework/$injected_relative"
+  case "$object_kind" in
+    app|xpc) mkdir -p "$injected" ;;
+    dylib)
+      cp "$UNEXPECTED_CODE/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" "$injected"
+      chmod 755 "$injected"
+      ;;
+    macho)
+      cp /usr/bin/true "$injected"
+      chmod 755 "$injected"
+      ;;
+    *) fail "unknown unexpected-code fixture kind: $object_kind" ;;
+  esac
+  assert_rejected "$UNEXPECTED_CODE" "unexpected Sparkle nested code object" "$TMP_ROOT/unexpected-code-$unexpected_index.out"
+  if "$ROOT_DIR/script/verify_signing.sh" "$UNEXPECTED_CODE" >"$TMP_ROOT/unexpected-signing-$unexpected_index.out" 2>&1; then
+    fail "signing verification accepted an unexpected Sparkle $object_kind object"
+  fi
+  grep -Fq "unexpected Sparkle nested code object" "$TMP_ROOT/unexpected-signing-$unexpected_index.out" \
+    || fail "signing verification did not apply the discovered-object contract for $object_kind"
+  unexpected_index=$((unexpected_index + 1))
+done <<'EOF'
+app|Versions/B/Injected.app
+xpc|Versions/B/XPCServices/Injected.xpc
+dylib|Versions/B/Injected.dylib
+macho|Versions/B/Resources/InjectedTool
+EOF
+
 require_text script/build_release_components.sh 'swift build -c release --show-bin-path'
 require_text script/build_release_components.sh '/usr/bin/ditto "$SPARKLE_FRAMEWORK" "$APP_PATH/Contents/Frameworks/Sparkle.framework"'
 require_text script/build_and_run.sh '/usr/bin/ditto "$SPARKLE_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"'
