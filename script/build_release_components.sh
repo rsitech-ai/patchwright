@@ -19,13 +19,19 @@ fi
 mkdir -p "$OUTPUT_PARENT"
 WORK_ROOT="$(mktemp -d "$OUTPUT_PARENT/Patchwright-$VERSION-$BUILD.XXXXXX")"
 APP_PATH="$WORK_ROOT/Patchwright.app"
-mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Helpers" "$APP_PATH/Contents/Resources" "$WORK_ROOT/reproducibility" "$WORK_ROOT/evidence"
+mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Helpers" "$APP_PATH/Contents/Resources" \
+  "$APP_PATH/Contents/Frameworks" "$WORK_ROOT/reproducibility" "$WORK_ROOT/evidence"
 
 cd "$ROOT_DIR"
 swift build -c release -Xswiftc -warnings-as-errors
 cargo build --locked --release -p patchwright-engine -p patchwright-relay
-SWIFT_BIN="$(swift build -c release --show-bin-path)/Patchwright"
+SWIFT_BIN_DIR="$(swift build -c release --show-bin-path)"
+SWIFT_BIN="$SWIFT_BIN_DIR/Patchwright"
+SPARKLE_FRAMEWORK="$SWIFT_BIN_DIR/Sparkle.framework"
+[[ -d "$SPARKLE_FRAMEWORK" && ! -L "$SPARKLE_FRAMEWORK" ]] \
+  || { echo "Sparkle.framework missing from the resolved release build" >&2; exit 65; }
 cp "$SWIFT_BIN" "$APP_PATH/Contents/MacOS/Patchwright"
+/usr/bin/ditto "$SPARKLE_FRAMEWORK" "$APP_PATH/Contents/Frameworks/Sparkle.framework"
 cp "$ROOT_DIR/target/release/patchwright-engine" "$APP_PATH/Contents/Helpers/patchwright-engine"
 cp "$ROOT_DIR/target/release/patchwright-relay" "$APP_PATH/Contents/Helpers/patchwright-relay"
 cp "$ROOT_DIR/Packaging/Info.plist" "$APP_PATH/Contents/Info.plist"
