@@ -22,7 +22,7 @@ This repository contains the Stage 1–3 MVP:
 
 ## Build and verify
 
-Requirements: macOS 26+, Xcode 26+, Swift 6.2+, Rust 1.85+, Git, and the Codex CLI for coding-agent sessions.
+Source builds require macOS 26+, Xcode 26+, Swift 6.2+, Rust 1.85+, and Git. GitHub CLI and Codex are optional runtime integrations described below; neither is bundled.
 
 ```bash
 ./script/verify.sh
@@ -31,6 +31,17 @@ Requirements: macOS 26+, Xcode 26+, Swift 6.2+, Rust 1.85+, Git, and the Codex C
 ```
 
 The Codex Run action executes `./script/build_and_run.sh`. It signs the app in the user-only `~/.patchwright/staged` directory and exposes it at `dist/Patchwright.app` through a stable symlink, avoiding File Provider metadata races in Documents workspaces.
+
+## Choose only the access you need
+
+| Capability | Prerequisite | Boundary |
+| --- | --- | --- |
+| Read-only GitHub sync | Install `gh`, sign in with your own GitHub account, and make sure `gh` is on PATH. | No GitHub App or private key is required. Patchwright's `gh` ingestion path does not issue GitHub mutations, even if the credential has broader scopes. |
+| Coding-agent sessions | Install the Codex CLI separately, sign in, and make sure `codex` is on PATH before launching Patchwright. | Codex is not bundled. GitHub sync and review remain available without it. Relaunch Patchwright after installing or updating Codex. |
+| GitHub mutations | Create and own a GitHub App, install it only on selected repositories, and configure its App ID, Client ID, and owner-only private-key reference in Settings. | Official downloads and source contain no publisher App credential or private key. Every write requires an exact preview, a short-lived matching approval, and a separate Execute action. |
+
+Never copy, request, or share the project publisher's GitHub App private key.
+Create a separate App under an account or organization you control.
 
 ## Ingest your GitHub workspace
 
@@ -62,7 +73,7 @@ PATCHWRIGHT_GITHUB_WEBHOOK_SECRET='runtime-secret' \
 cargo run -p patchwright-relay -- --address 127.0.0.1:8787
 ```
 
-The relay binds to loopback by default. GitHub App metadata and a Keychain or owner-only protected-key reference are operator configuration and are never committed. The engine brokers repository-scoped, short-lived installation tokens for installed-repository ingestion and every approved mutation.
+The relay binds to loopback by default. GitHub App metadata and a Keychain or owner-only protected-key reference are your configuration and are never committed. See [Choose only the access you need](#choose-only-the-access-you-need). The engine brokers repository-scoped, short-lived installation tokens for installed-repository ingestion and every approved mutation.
 
 ## Direct macOS distribution
 

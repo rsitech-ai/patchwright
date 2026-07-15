@@ -7,21 +7,35 @@ struct SettingsView: View {
     @State private var appID = ""
     @State private var clientID = ""
     @State private var keyReference = ""
-    @State private var status = "GitHub App configuration is incomplete."
+    @State private var status = "Optional GitHub App not configured. Read-only gh sync remains available."
     @State private var importing = false
 
     var body: some View {
         Form {
-            Section("Local intelligence") {
+            Section("Read-only GitHub sync") {
+                Text(SetupGuidance.readOnlyGitHub)
+                Text(SetupGuidance.readOnlyGitHubSecondary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Codex coding sessions") {
+                Text(SetupGuidance.codex)
+                Text(SetupGuidance.codexSecondary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Picker("Review provider", selection: $reviewProvider) {
                     Text("Apple Foundation Models").tag("apple")
-                    Text("Codex App Server").tag("codex")
+                    Text("Codex CLI").tag("codex")
                 }
             }
-            Section("Patchwright GitHub App") {
+            Section("Your GitHub App — mutations") {
+                Text(SetupGuidance.mutations)
                 TextField("App ID", text: $appID)
                 TextField("Client ID", text: $clientID)
                 LabeledContent("Private key", value: privateKeyLocation)
+                Text(SetupGuidance.privateKey)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 HStack {
                     Button("Import Private Key…") { importPrivateKey() }
                         .disabled(importing || UInt64(appID) == nil || clientID.isEmpty)
@@ -36,17 +50,18 @@ struct SettingsView: View {
                 }
                 Text(status).font(.caption).foregroundStyle(.secondary)
             }
-            Section("Repository permissions") {
-                LabeledContent("Read-only", value: "Actions, Administration, Metadata")
-                LabeledContent("Read & write", value: "Checks, Contents, Issues, Pull requests, Workflows")
-                Text("Every remote write still requires an exact preview, a short-lived matching approval, and a separate Execute action.")
+            Section("Maximum GitHub App permissions") {
+                ForEach(SetupGuidance.maximumPermissions, id: \.level) { permission in
+                    LabeledContent(permission.level, value: permission.capabilities)
+                }
+                Text(SetupGuidance.mutationApproval)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .padding()
-        .frame(width: 560, height: 470)
+        .frame(width: 620, height: 620)
         .task { loadMetadata() }
     }
 
@@ -81,7 +96,7 @@ struct SettingsView: View {
         appID = String(configuration.appId)
         clientID = configuration.clientId
         keyReference = configuration.keyReference
-        status = "GitHub App metadata loaded."
+        status = "Your GitHub App metadata is loaded."
     }
 
     private func saveMetadata(keyReference: String) throws {
@@ -100,7 +115,7 @@ struct SettingsView: View {
         let data = try JSONEncoder().encode(configuration)
         try data.write(to: configurationURL, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configurationURL.path)
-        status = "Metadata saved. Relaunch Patchwright to apply the configuration."
+        status = "Metadata saved. Relaunch Patchwright to apply your GitHub App configuration."
     }
 
     private func verifyConnection() async {
@@ -116,7 +131,7 @@ struct SettingsView: View {
                 executable: executable,
                 configurationURL: configurationURL
             )
-            status = "GitHub App authentication succeeded. Install it on selected repositories, then relaunch Patchwright."
+            status = "Your GitHub App authenticated. Install it only on selected repositories, then relaunch Patchwright."
         } catch {
             status = error.localizedDescription
         }
