@@ -137,6 +137,8 @@ SPARKLE_PUBLIC_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$ROOT_D
 [[ -n "$SPARKLE_PUBLIC_KEY" ]] || fail "SUPublicEDKey must be present"
 KEY_BYTES="$(printf '%s' "$SPARKLE_PUBLIC_KEY" | /usr/bin/base64 -D 2>/dev/null | /usr/bin/wc -c | /usr/bin/tr -d ' ')"
 [[ "$KEY_BYTES" == 32 ]] || fail "SUPublicEDKey must decode to exactly 32 bytes"
+[[ "$SPARKLE_PUBLIC_KEY" == 'oMzk7aUjqsQFvrRBZDd5JsXaeTh8B4pQrJ7n6YHRWUA=' ]] \
+  || fail "SUPublicEDKey must match the dedicated release Keychain account"
 
 for target in \
   '#build-and-verify' \
@@ -193,6 +195,9 @@ for required in \
   script/release_readiness.sh; do
   [[ -f "$ROOT_DIR/$required" ]] || fail "missing $required"
 done
+require_text script/package_release.sh 'TEMPORARY_KEYCHAINS=()'
+require_text script/package_release.sh 'ORIGINAL_KEYCHAINS+=("$keychain_line")'
+require_text script/package_release.sh 'TEMPORARY_KEYCHAINS+=("$keychain_line")'
 
 ASSEMBLY="$TMP_ROOT/assembly.json"
 jq -n '{dirty:false,candidate:true}' >"$ASSEMBLY"
@@ -367,6 +372,15 @@ if grep -Fq 'Git, and the Codex CLI' "$ROOT_DIR/README.md"; then
   fail "README must not call Codex a mandatory source-build requirement"
 fi
 require_text script/sign_release.sh '--preserve-metadata=entitlements'
+require_text script/sign_release.sh 'PATCHWRIGHT_SIGNING_KEYCHAIN'
+require_text script/sign_release.sh 'security find-identity -p codesigning -v "${identity_keychain_args[@]}"'
+require_text script/sign_release.sh 'CODESIGN_KEYCHAIN_ARGS=(--keychain "$SIGNING_KEYCHAIN")'
+require_text script/sign_release.sh '"${CODESIGN_KEYCHAIN_ARGS[@]}"'
+require_text script/verify_signing.sh 'grep -Eq '\''flags=.*runtime'\'' <<<"$MAIN_DETAILS"'
+require_text script/verify_signing.sh 'grep -Eq '\''flags=.*runtime'\'' <<<"$DETAILS"'
+if grep -Eq 'printf .*\| grep -[EF]*q' "$ROOT_DIR/script/verify_signing.sh"; then
+  fail "signing verification must not combine pipefail with early-exit grep"
+fi
 if grep -Eq 'codesign .*--deep|codesign --force --deep' "$ROOT_DIR/script/sign_release.sh"; then
   fail "release signing must not use codesign --deep"
 fi
@@ -378,6 +392,8 @@ import sys
 from pathlib import Path
 
 source = Path(sys.argv[1]).read_text(encoding="utf-8")
+if source.count('/usr/bin/codesign --force') != source.count('"${CODESIGN_KEYCHAIN_ARGS[@]}"'):
+    raise SystemExit("release contract failed: every release codesign call must select the configured keychain")
 positions = [
     source.index('Installer.xpc'),
     source.index('Downloader.xpc'),
@@ -449,7 +465,10 @@ for packaging_text in \
   'refs/tags/v$VERSION^{commit}' \
   'generate_appcast' \
   '--account "$SPARKLE_ACCOUNT"' \
-  'SPARKLE_ACCOUNT="ai.patchwright.app"' \
+  'SPARKLE_ACCOUNT="ai.patchwright.app.release-v1"' \
+  'PATCHWRIGHT_SIGNING_KEYCHAIN' \
+  'security list-keychains -d user -s "$SIGNING_KEYCHAIN"' \
+  'restore_keychain_search_list' \
   '--download-url-prefix "https://github.com/s1korrrr/patchwright/releases/download/v$VERSION"' \
   'sign_update' \
   '--verify "$APPCAST_PATH"' \
