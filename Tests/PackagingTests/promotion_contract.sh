@@ -291,6 +291,16 @@ def promotion_command(repo: Path, candidate: Path, external: Path, output: Path)
     ]
 
 
+def refreeze(candidate: Path) -> None:
+    release = candidate.parent.parent
+    checksum = release / "evidence" / "SHA256SUMS"
+    entries = []
+    for path in sorted(release.rglob("*"), key=lambda item: item.relative_to(release).as_posix()):
+        if path.is_file() and not path.is_symlink() and path != checksum:
+            entries.append(f"{sha(path)}  {path.relative_to(release).as_posix()}")
+    checksum.write_text("\n".join(entries) + "\n", encoding="utf-8")
+
+
 def require_rejected(name: str, mutate) -> None:
     base = temporary / f"reject-{name}"
     case_repo, case_candidate, case_external = create_fixture(base)
@@ -395,7 +405,62 @@ def nested_output(_repo, candidate, _external, _output, command):
 
 
 require_rejected("candidate-nested-output", nested_output)
-print("promotion matrix: 13 safety categories passed")
+
+
+def decoy_public_dmg(_repo, candidate, _external, _output, _command):
+    release = candidate.parent.parent
+    (release / "decoy.bin").write_bytes(b"decoy\n")
+    value = json.loads(candidate.read_text(encoding="utf-8"))
+    for asset in value["assets"]:
+        if asset["name"] == value["artifact_filename"]:
+            asset["path"] = "decoy.bin"
+            asset["sha256"] = sha(release / "decoy.bin")
+            asset["size"] = (release / "decoy.bin").stat().st_size
+    write_json(candidate, value)
+    refreeze(candidate)
+
+
+require_rejected("decoy-public-dmg", decoy_public_dmg)
+
+
+def rejected_notary(_repo, candidate, _external, _output, _command):
+    path = candidate.parent / "notary-dmg.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value.update({"status": "Rejected", "stapled": False, "stapler_validated": False})
+    write_json(path, value)
+    refreeze(candidate)
+
+
+require_rejected("rejected-notary-evidence", rejected_notary)
+
+
+def dirty_secret_scan(_repo, candidate, _external, _output, _command):
+    path = candidate.parent / "secret-scan.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["clean"] = False
+    value["findings"] = [{"kind": "private-key"}]
+    write_json(path, value)
+    refreeze(candidate)
+
+
+require_rejected("dirty-secret-evidence", dirty_secret_scan)
+
+
+leak_repo, leak_candidate, leak_external = create_fixture(temporary / "redaction")
+leak_value = json.loads(leak_candidate.read_text(encoding="utf-8"))
+leak_value["signing"]["keychain_path"] = "/Users/alice/Library/Keychains/login.keychain-db"
+leak_value["notarization"]["dmg"]["raw_log"] = "PRIVATE-NOTARY-LOG"
+write_json(leak_candidate, leak_value)
+refreeze(leak_candidate)
+leak_output = temporary / "redaction-output"
+leak_result = subprocess.run(promotion_command(leak_repo, leak_candidate, leak_external, leak_output), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+if leak_result.returncode != 0:
+    raise SystemExit(f"allowlisted redaction fixture failed: {leak_result.stderr}")
+published = (leak_output / "release-evidence.json").read_text(encoding="utf-8") + (leak_output / "release-assets.json").read_text(encoding="utf-8")
+if "/Users/" in published or "PRIVATE-NOTARY-LOG" in published:
+    raise SystemExit("public promotion outputs leaked unvalidated local fields")
+
+print("promotion matrix: 17 safety categories passed")
 PY
 
 echo "Patchwright promotion contract passed"
