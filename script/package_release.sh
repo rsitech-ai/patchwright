@@ -80,7 +80,7 @@ SPARKLE_BIN="$ROOT_DIR/.build/artifacts/sparkle/Sparkle/bin"
 APPCAST_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/patchwright-appcast.XXXXXX")"
 /usr/bin/ditto "$DMG_PATH" "$APPCAST_STAGE/$(basename "$DMG_PATH")"
 "$SPARKLE_BIN/generate_appcast" --account "$SPARKLE_ACCOUNT" \
-  --download-url-prefix "https://github.com/s1korrrr/patchwright/releases/download/v$VERSION" \
+  --download-url-prefix "https://github.com/s1korrrr/patchwright/releases/download/v$VERSION/" \
   --link "https://github.com/s1korrrr/patchwright/releases/tag/v$VERSION" --versions "$BUILD" --maximum-deltas 0 \
   -o "$APPCAST_STAGE/appcast.xml" "$APPCAST_STAGE"
 APPCAST_PATH="$RELEASE_ROOT/appcast.xml"
