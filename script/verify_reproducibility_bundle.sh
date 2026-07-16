@@ -47,7 +47,7 @@ for required in SYMLINKS.json sbom.spdx.json third-party-notices.md secret-scan.
   grep -Fq "evidence/$required" "$ROOT/evidence/SHA256SUMS" \
     || { echo "SHA256SUMS does not cover $required" >&2; exit 65; }
 done
-if rg --quiet --hidden -g '!SHA256SUMS' -e 'gh[op]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|BEGIN (ENCRYPTED |RSA |EC |OPENSSH )?PRIVATE KEY|sk-[A-Za-z0-9]{20,}' "$ROOT"; then
+if LC_ALL=C grep -ERq --exclude=SHA256SUMS 'gh[op]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|BEGIN (ENCRYPTED |RSA |EC |OPENSSH )?PRIVATE KEY|sk-[A-Za-z0-9]{20,}' "$ROOT"; then
   echo "credential-shaped material found in release root" >&2
   exit 65
 fi
