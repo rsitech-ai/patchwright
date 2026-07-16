@@ -1,0 +1,401 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/patchwright-promotion-contract.XXXXXX")"
+trap 'rm -rf "$TMP_ROOT"' EXIT
+
+fail() {
+  echo "promotion contract failed: $*" >&2
+  exit 1
+}
+
+[[ -x "$ROOT_DIR/script/verify_release_evidence.py" ]] \
+  || fail "missing executable script/verify_release_evidence.py"
+[[ -x "$ROOT_DIR/script/promote_release.sh" ]] \
+  || fail "missing executable script/promote_release.sh"
+
+if PATCHWRIGHT_REPO_VERIFIED=1 \
+  PATCHWRIGHT_CODEX_VERIFIED=1 \
+  PATCHWRIGHT_GITHUB_VERIFIED=1 \
+  PATCHWRIGHT_CLEAN_MACHINE_VERIFIED=1 \
+  "$ROOT_DIR/script/release_readiness.sh" --app missing.app --json "$TMP_ROOT/readiness.json" \
+    >"$TMP_ROOT/legacy.out" 2>&1; then
+  fail "legacy environment booleans and --app evidence were accepted"
+fi
+grep -Fq 'legacy release evidence is unsupported' "$TMP_ROOT/legacy.out" \
+  || fail "legacy evidence rejection was not explicit"
+
+python3 - "$ROOT_DIR" "$TMP_ROOT" <<'PY'
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+root = Path(sys.argv[1])
+temporary = Path(sys.argv[2])
+verifier = root / "script" / "verify_release_evidence.py"
+now = "2026-07-15T13:00:00Z"
+created = "2026-07-15T12:00:00Z"
+completed = "2026-07-15T12:10:00Z"
+
+
+def write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def initialize_repo(path: Path) -> str:
+    path.mkdir(parents=True)
+    subprocess.run(["git", "-C", str(path), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "Fixture"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "fixture@example.invalid"], check=True)
+    (path / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "README.md"], check=True)
+    environment = dict(os.environ, GIT_AUTHOR_DATE="2026-07-15T11:00:00Z", GIT_COMMITTER_DATE="2026-07-15T11:00:00Z")
+    subprocess.run(["git", "-C", str(path), "commit", "-qm", "fixture"], check=True, env=environment)
+    commit = subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
+    subprocess.run(["git", "-C", str(path), "tag", "v0.1.0"], check=True)
+    return commit
+
+
+def identity(commit: str) -> dict[str, object]:
+    return {
+        "artifact_filename": "Patchwright-0.1.0.dmg",
+        "artifact_sha256": "",
+        "git_commit": commit,
+        "tag": "v0.1.0",
+        "version": "0.1.0",
+        "build": "1",
+    }
+
+
+def gate(name: str, commit: str, digest: str, checks: list[str]) -> dict[str, object]:
+    value = identity(commit)
+    value["artifact_sha256"] = digest
+    value.update({
+        "schema_version": 1,
+        "gate": name,
+        "status": "pass",
+        "completed_at": completed,
+        "checks": {check: True for check in checks},
+    })
+    return value
+
+
+def create_fixture(base: Path) -> tuple[Path, Path, Path]:
+    repo = base / "repo"
+    release = base / "candidate"
+    evidence = release / "evidence"
+    external = base / "external"
+    commit = initialize_repo(repo)
+    evidence.mkdir(parents=True)
+    external.mkdir()
+
+    dmg = release / "Patchwright-0.1.0.dmg"
+    dmg.write_bytes(b"Patchwright signed notarized fixture DMG\n")
+    digest = sha(dmg)
+    (release / "Patchwright-0.1.0.dmg.sha256").write_text(
+        f"{digest}  Patchwright-0.1.0.dmg\n", encoding="utf-8"
+    )
+    signature = base64.b64encode(bytes(range(64))).decode("ascii")
+    (release / "appcast.xml").write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">'
+        '<channel><item><title>Patchwright 0.1.0</title>'
+        '<enclosure url="https://github.com/s1korrrr/patchwright/releases/download/v0.1.0/Patchwright-0.1.0.dmg" '
+        f'length="{dmg.stat().st_size}" type="application/x-apple-diskimage" '
+        f'sparkle:version="1" sparkle:shortVersionString="0.1.0" sparkle:edSignature="{signature}"/>'
+        f'<sparkle:signature>{signature}</sparkle:signature>'
+        '</item></channel></rss>\n',
+        encoding="utf-8",
+    )
+    component_hashes = {
+        "Patchwright.app": "1" * 64,
+        "patchwright-engine": "2" * 64,
+        "patchwright-relay": "3" * 64,
+    }
+    write_json(evidence / "sbom.spdx.json", {
+        "spdxVersion": "SPDX-2.3",
+        "dataLicense": "CC0-1.0",
+        "packages": [{"name": "Sparkle", "versionInfo": "2.9.2", "licenseDeclared": "MIT"}],
+        "files": [
+            {"fileName": name, "checksums": [{"algorithm": "SHA256", "checksumValue": value}]}
+            for name, value in component_hashes.items()
+        ],
+    })
+    (evidence / "third-party-notices.md").write_text("# Third-Party Notices\n\nSparkle 2.9.2 — MIT\n", encoding="utf-8")
+    (evidence / "third-party-licenses").mkdir()
+    (evidence / "third-party-licenses" / "Sparkle-LICENSE").write_text("MIT fixture\n", encoding="utf-8")
+
+    common = identity(commit)
+    common["artifact_sha256"] = digest
+    write_json(evidence / "assembly.json", {
+        "schema_version": 1, **common, "dirty": False, "candidate": True,
+        "compliance": {
+            "sbom_sha256": sha(evidence / "sbom.spdx.json"),
+            "third_party_notices_sha256": sha(evidence / "third-party-notices.md"),
+            "post_signing_components": component_hashes,
+        },
+    })
+    write_json(evidence / "build-metadata.json", {
+        "schema_version": 1, **common, "bundle_identifier": "ai.patchwright.app",
+        "team_id": "ABCDE12345", "architecture": "arm64", "minimum_macos": "26.0",
+        "source_date_epoch": 1752577200,
+    })
+    write_json(evidence / "SYMLINKS.json", {"schema_version": 1, "links": []})
+    write_json(evidence / "secret-scan.json", {
+        "schema_version": 1, "clean": True,
+        "scanned": {"tracked_files": 1, "history_blobs": 1, "artifact_files": 12},
+        "excluded_artifacts": [
+            {"reason": "checksum-manifest-circularity", "locator_sha256": "4" * 64},
+            {"reason": "self-output", "locator_sha256": "5" * 64},
+        ],
+        "findings": [],
+    })
+    write_json(evidence / "notary-app.json", {
+        "schema_version": 1, "kind": "app", "submission_sha256": "6" * 64,
+        "status": "Accepted", "request_id": "11111111-1111-1111-1111-111111111111",
+        "stapled": True, "stapler_validated": True, "completed_at": completed,
+    })
+    write_json(evidence / "notary-dmg.json", {
+        "schema_version": 1, "kind": "dmg", "submission_sha256": "7" * 64,
+        "final_sha256": digest, "status": "Accepted",
+        "request_id": "22222222-2222-2222-2222-222222222222",
+        "stapled": True, "stapler_validated": True, "completed_at": completed,
+    })
+    distribution_checks = [
+        "dmg_signature", "dmg_ticket", "dmg_gatekeeper", "app_signature", "app_ticket",
+        "app_gatekeeper", "bundle_layout", "team_id", "hardened_runtime", "entitlements",
+    ]
+    write_json(evidence / "distribution.json", {
+        "schema_version": 1, **common, "status": "pass",
+        "checks": {name: True for name in distribution_checks},
+    })
+
+    gate_checks = {
+        "repo": ["source_verify", "clean_source", "tag_binding"],
+        "secret_scan": ["tracked", "all_refs", "candidate_root", "no_findings"],
+        "compliance": ["spdx_2_3", "dependency_licenses", "post_signing_component_hashes"],
+        "codex": ["signed_in_runtime", "task_start", "resume", "approval", "cancel"],
+        "github": ["authorized_sandbox", "app_identity", "delivery", "exact_sha_approval", "merge", "kill_switch"],
+        "clean_machine": ["checksum", "dmg_signature", "dmg_ticket", "dmg_gatekeeper", "app_signature", "app_ticket", "app_gatekeeper", "first_launch", "relaunch"],
+    }
+    write_json(evidence / "repo.json", gate("repo", commit, digest, gate_checks["repo"]))
+    write_json(evidence / "secret-scan-gate.json", gate("secret_scan", commit, digest, gate_checks["secret_scan"]))
+    write_json(evidence / "compliance-gate.json", gate("compliance", commit, digest, gate_checks["compliance"]))
+    codex = gate("codex", commit, digest, gate_checks["codex"])
+    github = gate("github", commit, digest, gate_checks["github"])
+    clean_machine = gate("clean_machine", commit, digest, gate_checks["clean_machine"])
+    clean_machine["guest"] = {
+        "product_version": "26.5", "build_version": "25F71", "architecture": "arm64",
+        "gatekeeper_enabled": True, "source": "apple-ipsw:26.5:25F71:fixture-image-sha256",
+    }
+    write_json(external / "codex.json", codex)
+    write_json(external / "github.json", github)
+    write_json(external / "clean-machine.json", clean_machine)
+
+    asset_paths = [
+        "Patchwright-0.1.0.dmg", "Patchwright-0.1.0.dmg.sha256", "appcast.xml",
+        "evidence/sbom.spdx.json", "evidence/third-party-notices.md",
+    ]
+    candidate = {
+        "schema_version": 1,
+        "kind": "patchwright.notarized-candidate",
+        "product": "Patchwright",
+        "artifact_filename": "Patchwright-0.1.0.dmg",
+        "artifact_path": "Patchwright-0.1.0.dmg",
+        "artifact_sha256": digest,
+        "artifact_size": dmg.stat().st_size,
+        "git_commit": commit,
+        "tag": "v0.1.0",
+        "version": "0.1.0",
+        "build": "1",
+        "bundle_identifier": "ai.patchwright.app",
+        "created_at": created,
+        "signing": {
+            "identity_class": "Developer ID Application", "team_id": "ABCDE12345",
+            "hardened_runtime": True, "secure_timestamp": True,
+        },
+        "notarization": {
+            "app": {"status": "Accepted", "request_id": "11111111-1111-1111-1111-111111111111", "stapled": True},
+            "dmg": {"status": "Accepted", "request_id": "22222222-2222-2222-2222-222222222222", "stapled": True},
+        },
+        "gatekeeper": {"app": True, "dmg": True},
+        "assets": [
+            {"name": Path(relative).name, "path": relative, "sha256": sha(release / relative), "size": (release / relative).stat().st_size}
+            for relative in asset_paths
+        ],
+        "evidence": {
+            "assembly": "evidence/assembly.json",
+            "build_metadata": "evidence/build-metadata.json",
+            "checksums": "evidence/SHA256SUMS",
+            "symlinks": "evidence/SYMLINKS.json",
+            "secret_scan": "evidence/secret-scan.json",
+            "repo_gate": "evidence/repo.json",
+            "secret_scan_gate": "evidence/secret-scan-gate.json",
+            "compliance_gate": "evidence/compliance-gate.json",
+            "notary_app": "evidence/notary-app.json",
+            "notary_dmg": "evidence/notary-dmg.json",
+            "distribution": "evidence/distribution.json",
+        },
+    }
+    write_json(evidence / "notarized-candidate.json", candidate)
+    entries = []
+    for path in sorted(release.rglob("*"), key=lambda item: item.relative_to(release).as_posix()):
+        if path.is_file() and path != evidence / "SHA256SUMS":
+            entries.append(f"{sha(path)}  {path.relative_to(release).as_posix()}")
+    (evidence / "SHA256SUMS").write_text("\n".join(entries) + "\n", encoding="utf-8")
+    return repo, evidence / "notarized-candidate.json", external
+
+
+repo, candidate, external = create_fixture(temporary / "happy")
+output = temporary / "promotion"
+command = [
+    sys.executable, str(verifier), "promotion",
+    "--candidate", str(candidate), "--repo", str(repo),
+    "--codex", str(external / "codex.json"),
+    "--github", str(external / "github.json"),
+    "--clean-machine", str(external / "clean-machine.json"),
+    "--output-dir", str(output), "--now", now,
+]
+result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+if result.returncode != 0:
+    raise SystemExit(f"promotion happy path failed: {result.stderr}")
+for name in ("release-evidence.json", "release-assets.json", "promotion-readiness.json"):
+    if not (output / name).is_file():
+        raise SystemExit(f"promotion output missing: {name}")
+readiness = json.loads((output / "promotion-readiness.json").read_text(encoding="utf-8"))
+if readiness.get("ready") is not True:
+    raise SystemExit("promotion readiness did not report ready=true")
+
+
+def promotion_command(repo: Path, candidate: Path, external: Path, output: Path) -> list[str]:
+    return [
+        sys.executable, str(verifier), "promotion",
+        "--candidate", str(candidate), "--repo", str(repo),
+        "--codex", str(external / "codex.json"),
+        "--github", str(external / "github.json"),
+        "--clean-machine", str(external / "clean-machine.json"),
+        "--output-dir", str(output), "--now", now,
+    ]
+
+
+def require_rejected(name: str, mutate) -> None:
+    base = temporary / f"reject-{name}"
+    case_repo, case_candidate, case_external = create_fixture(base)
+    case_output = base / "promotion"
+    command = promotion_command(case_repo, case_candidate, case_external, case_output)
+    mutate(case_repo, case_candidate, case_external, case_output, command)
+    rejected = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+    if rejected.returncode == 0:
+        raise SystemExit(f"promotion unexpectedly accepted {name}")
+    if "release evidence rejected:" not in rejected.stderr and "usage:" not in rejected.stderr:
+        raise SystemExit(f"promotion rejection for {name} was not explicit: {rejected.stderr}")
+
+
+require_rejected("missing-candidate", lambda _r, candidate, _e, _o, command: command.__setitem__(command.index(str(candidate)), str(candidate.with_name("missing.json"))))
+require_rejected("malformed-candidate", lambda _r, candidate, _e, _o, _c: candidate.write_text("{broken\n", encoding="utf-8"))
+
+
+def duplicate_candidate(_repo, candidate, _external, _output, _command):
+    candidate.write_text('{"schema_version":1,"schema_version":1}\n', encoding="utf-8")
+
+
+require_rejected("duplicate-json-key", duplicate_candidate)
+
+
+def symlink_candidate(_repo, candidate, _external, _output, _command):
+    target = candidate.with_name("candidate-target.json")
+    candidate.rename(target)
+    candidate.symlink_to(target.name)
+
+
+require_rejected("symlink-candidate", symlink_candidate)
+
+
+def fifo_candidate(_repo, candidate, _external, _output, _command):
+    candidate.unlink()
+    os.mkfifo(candidate)
+
+
+require_rejected("fifo-candidate", fifo_candidate)
+
+
+def artifact_digest_mismatch(_repo, candidate, _external, _output, _command):
+    value = json.loads(candidate.read_text(encoding="utf-8"))
+    artifact = candidate.parent.parent / value["artifact_path"]
+    artifact.write_bytes(artifact.read_bytes() + b"tampered")
+
+
+require_rejected("artifact-digest-mismatch", artifact_digest_mismatch)
+
+
+def gate_digest_mismatch(_repo, _candidate, external, _output, _command):
+    gate_path = external / "github.json"
+    value = json.loads(gate_path.read_text(encoding="utf-8"))
+    value["artifact_sha256"] = "f" * 64
+    write_json(gate_path, value)
+
+
+require_rejected("gate-digest-mismatch", gate_digest_mismatch)
+
+
+def false_gate_check(_repo, _candidate, external, _output, _command):
+    gate_path = external / "codex.json"
+    value = json.loads(gate_path.read_text(encoding="utf-8"))
+    value["checks"]["cancel"] = False
+    write_json(gate_path, value)
+
+
+require_rejected("false-required-check", false_gate_check)
+
+
+def stale_gate(_repo, _candidate, external, _output, _command):
+    gate_path = external / "clean-machine.json"
+    value = json.loads(gate_path.read_text(encoding="utf-8"))
+    value["completed_at"] = "2026-07-01T00:00:00Z"
+    write_json(gate_path, value)
+
+
+require_rejected("stale-gate", stale_gate)
+
+
+def symlink_gate(_repo, _candidate, external, _output, _command):
+    gate_path = external / "github.json"
+    target = external / "github-target.json"
+    gate_path.rename(target)
+    gate_path.symlink_to(target.name)
+
+
+require_rejected("symlink-gate", symlink_gate)
+
+
+def nonempty_output(_repo, _candidate, _external, output, _command):
+    output.mkdir()
+    (output / "existing").write_text("occupied\n", encoding="utf-8")
+
+
+require_rejected("nonempty-output", nonempty_output)
+
+
+def nested_output(_repo, candidate, _external, _output, command):
+    nested = candidate.parent.parent / "promotion"
+    command[command.index("--output-dir") + 1] = str(nested)
+
+
+require_rejected("candidate-nested-output", nested_output)
+print("promotion matrix: 13 safety categories passed")
+PY
+
+echo "Patchwright promotion contract passed"
