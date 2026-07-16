@@ -2,10 +2,11 @@
 
 Patchwright is a local-first, macOS-native engineering control plane for GitHub. It separates private language-model assistance from a durable coding-agent runtime and makes every approval, command, diff, test, and remote mutation auditable.
 
-Build Patchwright from [source](#build-and-verify). When published, official
-Developer ID-signed and Apple-notarized downloads will be available from
-[GitHub Releases](https://github.com/s1korrrr/patchwright/releases), outside the
-Mac App Store.
+Build Patchwright from [source](#build-and-verify). Official Developer ID-signed
+and Apple-notarized downloads are published through
+[GitHub Releases](https://github.com/s1korrrr/patchwright/releases). See the
+[direct-download guide](docs/direct-download.md) for installation and
+verification.
 
 Project policies: [Contributing](CONTRIBUTING.md) ·
 [Security](SECURITY.md) · [Privacy](PRIVACY.md) · [Support](SUPPORT.md) ·
@@ -22,7 +23,10 @@ This repository contains the Stage 1–3 MVP:
 
 ## Build and verify
 
-Source builds require macOS 26+, Xcode 26+, Swift 6.2+, Rust 1.85+, and Git. GitHub CLI and Codex are optional runtime integrations described below; neither is bundled.
+Source builds require macOS 26+, Xcode 26+, Swift 6.2+, Rust 1.91.0, and Git.
+The repository's `rust-toolchain.toml` pins Rust for local and CI builds. GitHub
+CLI and Codex are optional runtime integrations described below; neither is
+bundled.
 
 ```bash
 ./script/verify.sh
@@ -77,7 +81,13 @@ The relay binds to loopback by default. GitHub App metadata and a Keychain or ow
 
 ## Direct macOS distribution
 
-`script/build_and_run.sh` is the ad-hoc local-development path. Direct distribution uses `script/release.sh`, which refuses dirty source and refuses Apple Development, Apple Distribution, or ad-hoc signing identities. See `docs/release-readiness.md` and `docs/clean-machine-test-plan.md` for the Developer ID, notarization, Gatekeeper, and clean-machine gates.
+`script/build_and_run.sh` is the ad-hoc local-development path. Direct
+distribution uses `script/release.sh`, which refuses dirty source and refuses
+Apple Development, Apple Distribution, or ad-hoc signing identities. Packaging
+creates a digest-bound `notarized-candidate`; publication is a separate,
+explicit promotion step. See the [direct-download guide](docs/direct-download.md),
+[release readiness](docs/release-readiness.md), and
+[clean-machine test plan](docs/clean-machine-test-plan.md).
 
 ## Safety
 
