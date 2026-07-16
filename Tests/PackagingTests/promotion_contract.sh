@@ -120,9 +120,11 @@ def appcast_content(archive_signature: str) -> str:
         '<?xml version="1.0" encoding="utf-8"?>\n'
         '<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">'
         '<channel><item><title>Patchwright 0.1.0</title>'
+        '<sparkle:version>1</sparkle:version>'
+        '<sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>'
         '<enclosure url="https://github.com/s1korrrr/patchwright/releases/download/v0.1.0/Patchwright-0.1.0.dmg" '
-        f'length="{len(DMG_BYTES)}" type="application/x-apple-diskimage" '
-        f'sparkle:version="1" sparkle:shortVersionString="0.1.0" sparkle:edSignature="{archive_signature}"/>'
+        f'length="{len(DMG_BYTES)}" type="application/octet-stream" '
+        f'sparkle:edSignature="{archive_signature}"/>'
         '</item></channel></rss>\n'
     )
 
