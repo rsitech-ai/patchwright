@@ -112,7 +112,7 @@ Assert exact dependency pin, feed URL, 32-byte base64 public key, `SUVerifyUpdat
 
 - [ ] **Step 2: Resolve Sparkle and create the Keychain update key**
 
-Fetch Sparkle 2.9.2 from its official repository. Run its `generate_keys` tool once so the private key stays in login Keychain; capture only the printed public key. Never export the private key into the workspace.
+Fetch Sparkle 2.9.2 from its official repository. Create the signing item in an owner-only dedicated release Keychain with access restricted to the pinned Sparkle tools; capture only the printed public key. Never export the private key into the workspace.
 
 - [ ] **Step 3: Implement the updater lifecycle**
 
@@ -347,4 +347,3 @@ Download the public DMG without authentication, verify checksum/signature/notari
 - [ ] **Step 6: Record final truth**
 
 Update the audit with public URLs, tag/commit/digest, notarization status, clean-machine evidence, remaining external limitations, and rollback/incident procedure. Do not claim support beyond the documented beta boundary.
-
