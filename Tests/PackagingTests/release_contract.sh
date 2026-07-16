@@ -470,7 +470,7 @@ for packaging_text in \
   'PATCHWRIGHT_SIGNING_KEYCHAIN' \
   'security list-keychains -d user -s "$SIGNING_KEYCHAIN"' \
   'restore_keychain_search_list' \
-  '--download-url-prefix "https://github.com/s1korrrr/patchwright/releases/download/v$VERSION"' \
+  '--download-url-prefix "https://github.com/s1korrrr/patchwright/releases/download/v$VERSION/"' \
   'sign_update' \
   '--verify "$APPCAST_PATH"' \
   'generate_candidate_evidence.py' \
