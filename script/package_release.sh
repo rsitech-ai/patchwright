@@ -10,6 +10,7 @@ SIGNING_KEYCHAIN="${PATCHWRIGHT_SIGNING_KEYCHAIN:-}"
 APPCAST_STAGE=""
 KEYCHAIN_SEARCH_LIST_CHANGED=0
 ORIGINAL_KEYCHAINS=()
+TEMPORARY_KEYCHAINS=()
 
 restore_keychain_search_list() {
   if [[ "$KEYCHAIN_SEARCH_LIST_CHANGED" == 1 && "${#ORIGINAL_KEYCHAINS[@]}" -gt 0 ]]; then
@@ -40,12 +41,15 @@ if [[ -n "$SIGNING_KEYCHAIN" ]]; then
     keychain_line="${keychain_line#"${keychain_line%%[![:space:]]*}"}"
     keychain_line="${keychain_line#\"}"
     keychain_line="${keychain_line%\"}"
-    [[ -z "$keychain_line" || "$keychain_line" == "$SIGNING_KEYCHAIN" ]] \
-      || ORIGINAL_KEYCHAINS+=("$keychain_line")
+    if [[ -n "$keychain_line" ]]; then
+      ORIGINAL_KEYCHAINS+=("$keychain_line")
+      [[ "$keychain_line" == "$SIGNING_KEYCHAIN" ]] \
+        || TEMPORARY_KEYCHAINS+=("$keychain_line")
+    fi
   done < <(security list-keychains -d user)
   [[ "${#ORIGINAL_KEYCHAINS[@]}" -gt 0 ]] \
     || { echo "blocked:external — no existing user Keychain search list to preserve" >&2; exit 78; }
-  security list-keychains -d user -s "$SIGNING_KEYCHAIN" "${ORIGINAL_KEYCHAINS[@]}"
+  security list-keychains -d user -s "$SIGNING_KEYCHAIN" "${TEMPORARY_KEYCHAINS[@]}"
   KEYCHAIN_SEARCH_LIST_CHANGED=1
 fi
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$BUILD" =~ ^[1-9][0-9]*$ ]] || { echo "invalid release version or build" >&2; exit 64; }
