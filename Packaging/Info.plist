@@ -35,7 +35,7 @@
     <key>SUFeedURL</key>
     <string>https://github.com/s1korrrr/patchwright/releases/latest/download/appcast.xml</string>
     <key>SUPublicEDKey</key>
-    <string>htmrpoa1FW+5XpjtoRDemtHvmp77ic0ok18a4rPZ6XE=</string>
+    <string>oMzk7aUjqsQFvrRBZDd5JsXaeTh8B4pQrJ7n6YHRWUA=</string>
     <key>SURequireSignedFeed</key>
     <true/>
     <key>SUVerifyUpdateBeforeExtraction</key>
