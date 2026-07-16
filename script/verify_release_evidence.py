@@ -9,6 +9,7 @@ import binascii
 import hashlib
 import json
 import os
+import plistlib
 import re
 import shutil
 import stat
@@ -181,6 +182,20 @@ def compare_identity(expected: dict[str, str], actual: dict[str, str], label: st
             raise VerificationError(f"{label}.{key} does not match candidate")
 
 
+def verify_ed25519(public_key: str, signature: str, path: Path, signed_length: int | None, label: str) -> None:
+    helper = Path(__file__).resolve(strict=True).with_name("verify_ed25519.swift")
+    regular_file(helper, "Ed25519 verifier")
+    swift = shutil.which("swift")
+    if swift is None:
+        raise VerificationError("Swift is required for Ed25519 verification")
+    command = [swift, str(helper), public_key, signature, str(path)]
+    if signed_length is not None:
+        command.append(str(signed_length))
+    result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30, check=False)
+    if result.returncode != 0:
+        raise VerificationError(f"{label} Ed25519 signature is invalid")
+
+
 def verify_gate(path: Path, expected_gate: str, identity: dict[str, str], now: datetime, candidate_time: datetime) -> tuple[dict[str, Any], str]:
     before = regular_file(path, f"{expected_gate} gate")
     gate = load_json(path, f"{expected_gate} gate")
@@ -300,6 +315,24 @@ def verify_candidate(candidate_path: Path, repo: Path, now: datetime) -> tuple[d
             raise VerificationError("signed appcast contains invalid base64 signature") from error
         if len(decoded) != 64:
             raise VerificationError("signed appcast signature must be 64 bytes")
+    info_path = release_root / "Patchwright.app" / "Contents" / "Info.plist"
+    try:
+        info = plistlib.loads(read_bytes(info_path, "final app Info.plist", MAX_JSON_BYTES))
+    except plistlib.InvalidFileException as error:
+        raise VerificationError("final app Info.plist is malformed") from error
+    if not isinstance(info, dict):
+        raise VerificationError("final app Info.plist root is invalid")
+    public_key = info.get("SUPublicEDKey")
+    if info.get("CFBundleIdentifier") != "ai.patchwright.app" or info.get("SUVerifyUpdateBeforeExtraction") is not True or info.get("SURequireSignedFeed") is not True or not isinstance(public_key, str):
+        raise VerificationError("final app Sparkle trust configuration is invalid")
+    try:
+        public_bytes = base64.b64decode(public_key, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise VerificationError("final app Sparkle public key is malformed") from error
+    if len(public_bytes) != 32:
+        raise VerificationError("final app Sparkle public key must be 32 bytes")
+    verify_ed25519(public_key, signatures[0] or "", artifact, None, "archive")
+    verify_ed25519(public_key, signatures[1], appcast, feed_match.start(), "feed")
 
     evidence = candidate.get("evidence")
     if not isinstance(evidence, dict):
@@ -528,7 +561,7 @@ def main() -> int:
         write_json(readiness_output, {"schema_version": 1, "kind": "patchwright.promotion-readiness", "ready": True, "identity": identity, "evidence_sha256": evidence_hashes, "release_assets_sha256": digest(asset_output, "release asset manifest")})
         os.rename(temporary_output, resolved_output)
         temporary_output = None
-        print(f"PATCHWRIGHT_PROMOTION_READINESS={resolved_output / readiness_output.name}\nPATCHWRIGHT_RELEASE_ASSET_MANIFEST={resolved_output / asset_output.name}\nPATCHWRIGHT_STATUS=release-assets-ready")
+        print(f"PATCHWRIGHT_PROMOTION_READINESS={resolved_output / readiness_output.name}\nPATCHWRIGHT_RELEASE_ASSET_MANIFEST={resolved_output / asset_output.name}\nPATCHWRIGHT_STATUS=promoted-release")
         return 0
     except (VerificationError, OSError, KeyError, subprocess.SubprocessError) as error:
         if temporary_output is not None:

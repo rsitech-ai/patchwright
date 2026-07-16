@@ -186,6 +186,7 @@ for required in \
   script/verify_signing.sh \
   script/create_dmg.sh \
   script/generate_candidate_evidence.py \
+  script/verify_ed25519.swift \
   script/notarize_release.sh \
   script/package_release.sh \
   script/verify_distribution.sh \
