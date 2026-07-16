@@ -296,8 +296,8 @@ PR_HEAD_SHA="$(jq -er --argjson number "$PR_NUMBER" \
   '.workItems[] | select(.number == $number and .kind == "pullRequest") | .headSha' \
   <<<"$SNAPSHOT")" || die "qualification pull request head SHA is missing"
 
-REVIEW_RESULT="$(deliver "$PR_TASK_ID" "$(jq -cn --argjson pullRequestNumber "$PR_NUMBER" --arg body "$MARKER" \
-  '{kind:"review",pullRequestNumber:$pullRequestNumber,event:"comment",body:$body,inlineComments:[]}')" \
+REVIEW_RESULT="$(deliver "$PR_TASK_ID" "$(jq -cn --argjson pullRequestNumber "$PR_NUMBER" --arg expectedHeadSha "$PR_HEAD_SHA" --arg body "$MARKER" \
+  '{kind:"review",pullRequestNumber:$pullRequestNumber,expectedHeadSha:$expectedHeadSha,event:"comment",body:$body,inlineComments:[]}')" \
   "$PR_BASE_SHA" "$PR_HEAD_SHA" 2)" || die "approval-gated review delivery failed"
 MERGE_RESULT="$(deliver "$PR_TASK_ID" "$(jq -cn --argjson pullRequestNumber "$PR_NUMBER" --arg expectedHeadSha "$PR_HEAD_SHA" \
   '{kind:"mergePullRequest",pullRequestNumber:$pullRequestNumber,expectedHeadSha:$expectedHeadSha,method:"squash"}')" \

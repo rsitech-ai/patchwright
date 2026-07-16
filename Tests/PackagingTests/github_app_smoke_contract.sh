@@ -45,4 +45,13 @@ assert_blocked \
   PATCHWRIGHT_GITHUB_E2E_REPOSITORY=qualification \
   PATCHWRIGHT_GITHUB_E2E_ALLOWLIST=example/qualification
 
+grep -Fq -- '--arg expectedHeadSha "$PR_HEAD_SHA"' "$SMOKE" || {
+  echo "live review smoke must bind the review action to the captured head SHA" >&2
+  exit 1
+}
+grep -Fq 'kind:"review",pullRequestNumber:$pullRequestNumber,expectedHeadSha:$expectedHeadSha' "$SMOKE" || {
+  echo "live review smoke must include expectedHeadSha inside the review action" >&2
+  exit 1
+}
+
 printf 'GitHub App smoke safety contract passed\n'
