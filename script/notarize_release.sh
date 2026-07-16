@@ -12,7 +12,12 @@ PROFILE="${PATCHWRIGHT_NOTARY_PROFILE:-}"
 [[ -n "$PROFILE" ]] || { echo "blocked:external — PATCHWRIGHT_NOTARY_PROFILE must name a Keychain notarytool profile" >&2; exit 78; }
 mkdir -p "$PRIVATE_DIR" "$(dirname "$PUBLIC_RESULT")"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/patchwright-notary.XXXXXX")"
-trap '/usr/bin/trash "$TEMP_ROOT" >/dev/null 2>&1 || true' EXIT
+PUBLIC_TEMP=""
+cleanup() {
+  [[ -z "$PUBLIC_TEMP" || ! -e "$PUBLIC_TEMP" ]] || /usr/bin/trash "$PUBLIC_TEMP" >/dev/null 2>&1 || true
+  /usr/bin/trash "$TEMP_ROOT" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
 SUBMIT_TARGET="$TARGET"
 if [[ "$KIND" == app ]]; then
   SUBMIT_TARGET="$TEMP_ROOT/Patchwright.zip"
@@ -28,9 +33,10 @@ xcrun notarytool log "$ID" --keychain-profile "$PROFILE" "$PRIVATE_DIR/notary-$I
 xcrun stapler staple "$TARGET"
 xcrun stapler validate "$TARGET"
 FINAL_SHA256=""; [[ -f "$TARGET" ]] && FINAL_SHA256="$(shasum -a 256 "$TARGET" | awk '{print $1}')"
-TEMP_PUBLIC="$PUBLIC_RESULT.tmp"
+PUBLIC_TEMP="$(mktemp "$(dirname "$PUBLIC_RESULT")/.notary-public.XXXXXX")"
 jq -n --arg kind "$KIND" --arg submission_sha256 "$SUBMISSION_SHA256" --arg final_sha256 "$FINAL_SHA256" \
   --arg status "$STATUS" --arg request_id "$ID" --arg completed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  '{schema_version:1,kind:$kind,submission_sha256:$submission_sha256,final_sha256:$final_sha256,status:$status,request_id:$request_id,stapled:true,stapler_validated:true,completed_at:$completed_at}' >"$TEMP_PUBLIC"
-mv "$TEMP_PUBLIC" "$PUBLIC_RESULT"
+  '{schema_version:1,kind:$kind,submission_sha256:$submission_sha256,final_sha256:$final_sha256,status:$status,request_id:$request_id,stapled:true,stapler_validated:true,completed_at:$completed_at}' >"$PUBLIC_TEMP"
+mv "$PUBLIC_TEMP" "$PUBLIC_RESULT"
+PUBLIC_TEMP=""
 echo "notarized and stapled: $TARGET"
