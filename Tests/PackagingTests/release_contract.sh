@@ -195,6 +195,9 @@ for required in \
   script/release_readiness.sh; do
   [[ -f "$ROOT_DIR/$required" ]] || fail "missing $required"
 done
+require_text script/package_release.sh 'TEMPORARY_KEYCHAINS=()'
+require_text script/package_release.sh 'ORIGINAL_KEYCHAINS+=("$keychain_line")'
+require_text script/package_release.sh 'TEMPORARY_KEYCHAINS+=("$keychain_line")'
 
 ASSEMBLY="$TMP_ROOT/assembly.json"
 jq -n '{dirty:false,candidate:true}' >"$ASSEMBLY"
