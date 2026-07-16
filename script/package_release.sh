@@ -5,7 +5,53 @@ umask 077
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${PATCHWRIGHT_VERSION:-0.1.0}"
 BUILD="${PATCHWRIGHT_BUILD:-1}"
-SPARKLE_ACCOUNT="ai.patchwright.app"
+SPARKLE_ACCOUNT="ai.patchwright.app.release-v1"
+SIGNING_KEYCHAIN="${PATCHWRIGHT_SIGNING_KEYCHAIN:-}"
+APPCAST_STAGE=""
+KEYCHAIN_SEARCH_LIST_CHANGED=0
+ORIGINAL_KEYCHAINS=()
+TEMPORARY_KEYCHAINS=()
+
+restore_keychain_search_list() {
+  if [[ "$KEYCHAIN_SEARCH_LIST_CHANGED" == 1 && "${#ORIGINAL_KEYCHAINS[@]}" -gt 0 ]]; then
+    security list-keychains -d user -s "${ORIGINAL_KEYCHAINS[@]}"
+  fi
+}
+
+cleanup() {
+  if [[ -n "$APPCAST_STAGE" && -e "$APPCAST_STAGE" ]]; then
+    /usr/bin/trash "$APPCAST_STAGE" >/dev/null 2>&1 || true
+  fi
+  restore_keychain_search_list
+}
+trap cleanup EXIT
+
+if [[ -n "$SIGNING_KEYCHAIN" ]]; then
+  keychain_parent="$(cd "$(dirname "$SIGNING_KEYCHAIN")" 2>/dev/null && pwd -P || true)"
+  canonical_keychain="$keychain_parent/$(basename "$SIGNING_KEYCHAIN")"
+  keychain_mode="$(stat -f '%Lp' "$SIGNING_KEYCHAIN" 2>/dev/null || true)"
+  keychain_owner="$(stat -f '%u' "$SIGNING_KEYCHAIN" 2>/dev/null || true)"
+  if [[ "$SIGNING_KEYCHAIN" != /* || ! -f "$SIGNING_KEYCHAIN" || -L "$SIGNING_KEYCHAIN" \
+      || "$canonical_keychain" != "$SIGNING_KEYCHAIN" || "$keychain_owner" != "$(id -u)" \
+      || ! "$keychain_mode" =~ ^[0-7]{3,4}$ || $((8#$keychain_mode & 077)) -ne 0 ]]; then
+    echo "blocked:external — PATCHWRIGHT_SIGNING_KEYCHAIN must be an owner-only absolute keychain file" >&2
+    exit 78
+  fi
+  while IFS= read -r keychain_line; do
+    keychain_line="${keychain_line#"${keychain_line%%[![:space:]]*}"}"
+    keychain_line="${keychain_line#\"}"
+    keychain_line="${keychain_line%\"}"
+    if [[ -n "$keychain_line" ]]; then
+      ORIGINAL_KEYCHAINS+=("$keychain_line")
+      [[ "$keychain_line" == "$SIGNING_KEYCHAIN" ]] \
+        || TEMPORARY_KEYCHAINS+=("$keychain_line")
+    fi
+  done < <(security list-keychains -d user)
+  [[ "${#ORIGINAL_KEYCHAINS[@]}" -gt 0 ]] \
+    || { echo "blocked:external — no existing user Keychain search list to preserve" >&2; exit 78; }
+  security list-keychains -d user -s "$SIGNING_KEYCHAIN" "${TEMPORARY_KEYCHAINS[@]}"
+  KEYCHAIN_SEARCH_LIST_CHANGED=1
+fi
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$BUILD" =~ ^[1-9][0-9]*$ ]] || { echo "invalid release version or build" >&2; exit 64; }
 COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 TAG_COMMIT="$(git -C "$ROOT_DIR" rev-parse "refs/tags/v$VERSION^{commit}" 2>/dev/null || true)"
@@ -32,7 +78,6 @@ TEAM_ID="$(/usr/bin/codesign -dv --verbose=4 "$APP_PATH" 2>&1 | sed -n 's/^TeamI
 
 SPARKLE_BIN="$ROOT_DIR/.build/artifacts/sparkle/Sparkle/bin"
 APPCAST_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/patchwright-appcast.XXXXXX")"
-trap '/usr/bin/trash "$APPCAST_STAGE" >/dev/null 2>&1 || true' EXIT
 /usr/bin/ditto "$DMG_PATH" "$APPCAST_STAGE/$(basename "$DMG_PATH")"
 "$SPARKLE_BIN/generate_appcast" --account "$SPARKLE_ACCOUNT" \
   --download-url-prefix "https://github.com/s1korrrr/patchwright/releases/download/v$VERSION" \

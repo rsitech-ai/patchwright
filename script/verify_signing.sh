@@ -16,16 +16,16 @@ case "$AUTHORITY" in
   *) echo "signing verification failed: wrong identity class" >&2; exit 65 ;;
 esac
 [[ -n "$TEAM" && "$TEAM" != not\ set ]] || { echo "signing verification failed: Team ID missing" >&2; exit 65; }
-printf '%s\n' "$MAIN_DETAILS" | grep -Eq '^Timestamp=' || { echo "signing verification failed: secure timestamp missing" >&2; exit 65; }
-printf '%s\n' "$MAIN_DETAILS" | grep -Eq 'flags=.*runtime' || { echo "signing verification failed: Hardened Runtime missing" >&2; exit 65; }
+grep -Eq '^Timestamp=' <<<"$MAIN_DETAILS" || { echo "signing verification failed: secure timestamp missing" >&2; exit 65; }
+grep -Eq 'flags=.*runtime' <<<"$MAIN_DETAILS" || { echo "signing verification failed: Hardened Runtime missing" >&2; exit 65; }
 
 SPARKLE="$APP_PATH/Contents/Frameworks/Sparkle.framework"
 while IFS= read -r nested; do
   DETAILS="$(/usr/bin/codesign -dvvv "$nested" 2>&1)"
-  printf '%s\n' "$DETAILS" | grep -Fq "Authority=$AUTHORITY" || { echo "signing verification failed: nested Developer ID authority mismatch" >&2; exit 65; }
-  printf '%s\n' "$DETAILS" | grep -Fq "TeamIdentifier=$TEAM" || { echo "signing verification failed: nested Team ID mismatch" >&2; exit 65; }
-  printf '%s\n' "$DETAILS" | grep -Eq 'flags=.*runtime' || { echo "signing verification failed: nested runtime missing" >&2; exit 65; }
-  printf '%s\n' "$DETAILS" | grep -Eq '^Timestamp=' || { echo "signing verification failed: nested timestamp missing" >&2; exit 65; }
+  grep -Fq "Authority=$AUTHORITY" <<<"$DETAILS" || { echo "signing verification failed: nested Developer ID authority mismatch" >&2; exit 65; }
+  grep -Fq "TeamIdentifier=$TEAM" <<<"$DETAILS" || { echo "signing verification failed: nested Team ID mismatch" >&2; exit 65; }
+  grep -Eq 'flags=.*runtime' <<<"$DETAILS" || { echo "signing verification failed: nested runtime missing" >&2; exit 65; }
+  grep -Eq '^Timestamp=' <<<"$DETAILS" || { echo "signing verification failed: nested timestamp missing" >&2; exit 65; }
   ENTITLEMENTS="$(/usr/bin/codesign -d --entitlements :- "$nested" 2>/dev/null || true)"
   if [[ -n "$ENTITLEMENTS" ]] && ! printf '%s' "$ENTITLEMENTS" \
     | plutil -convert json -o - - 2>/dev/null \
