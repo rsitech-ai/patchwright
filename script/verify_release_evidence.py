@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -13,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -94,6 +97,30 @@ def load_json(path: Path, label: str) -> dict[str, Any]:
 
 def digest(path: Path, label: str) -> str:
     return hashlib.sha256(read_bytes(path, label)).hexdigest()
+
+
+def component_digest(path: Path, label: str) -> str:
+    if path.is_symlink():
+        raise VerificationError(f"{label} must not be a symlink")
+    if path.is_file():
+        return digest(path, label)
+    if not path.is_dir():
+        raise VerificationError(f"missing or unsupported {label}: {path}")
+    result = hashlib.sha256()
+    for entry in sorted(path.rglob("*"), key=lambda item: item.relative_to(path).as_posix()):
+        relative = entry.relative_to(path).as_posix().encode("utf-8")
+        metadata = entry.lstat()
+        mode = stat.S_IMODE(metadata.st_mode)
+        if stat.S_ISLNK(metadata.st_mode):
+            kind, payload = b"L", os.readlink(entry).encode("utf-8")
+        elif stat.S_ISREG(metadata.st_mode):
+            kind, payload = b"F", bytes.fromhex(digest(entry, f"{label} entry"))
+        elif stat.S_ISDIR(metadata.st_mode):
+            kind, payload = b"D", b""
+        else:
+            raise VerificationError(f"unsupported {label} entry: {entry}")
+        result.update(kind + b"\0" + relative + b"\0" + str(mode).encode("ascii") + b"\0" + payload)
+    return result.hexdigest()
 
 
 def parse_time(value: Any, label: str, now: datetime) -> datetime:
@@ -232,6 +259,48 @@ def verify_candidate(candidate_path: Path, repo: Path, now: datetime) -> tuple[d
     if asset_paths.get(identity["artifact_filename"]) != artifact:
         raise VerificationError("public DMG asset must be the canonical candidate artifact")
 
+    sidecar_name = f"{identity['artifact_filename']}.sha256"
+    sidecar = asset_paths.get(sidecar_name)
+    if sidecar is None:
+        raise VerificationError("portable DMG checksum asset is missing")
+    try:
+        sidecar_text = read_bytes(sidecar, "portable DMG checksum", 512).decode("ascii")
+    except UnicodeDecodeError as error:
+        raise VerificationError("portable DMG checksum is not ASCII") from error
+    if sidecar_text != f"{identity['artifact_sha256']}  {identity['artifact_filename']}\n":
+        raise VerificationError("portable DMG checksum content mismatch")
+
+    appcast = asset_paths.get("appcast.xml")
+    if appcast is None:
+        raise VerificationError("signed appcast asset is missing")
+    try:
+        appcast_root = ET.fromstring(read_bytes(appcast, "signed appcast", MAX_JSON_BYTES))
+    except ET.ParseError as error:
+        raise VerificationError(f"malformed signed appcast: {error}") from error
+    sparkle = "{http://www.andymatuschak.org/xml-namespaces/sparkle}"
+    enclosures = appcast_root.findall(".//enclosure")
+    if len(enclosures) != 1:
+        raise VerificationError("signed appcast must contain exactly one enclosure")
+    enclosure = enclosures[0]
+    expected_url = f"https://github.com/s1korrrr/patchwright/releases/download/{identity['tag']}/{identity['artifact_filename']}"
+    if enclosure.get("url") != expected_url or enclosure.get("length") != str(artifact_stat.st_size) or enclosure.get("type") != "application/x-apple-diskimage" or enclosure.get(f"{sparkle}version") != identity["build"] or enclosure.get(f"{sparkle}shortVersionString") != identity["version"]:
+        raise VerificationError("signed appcast enclosure does not match candidate")
+    appcast_bytes = read_bytes(appcast, "signed appcast", MAX_JSON_BYTES)
+    feed_match = re.search(
+        rb"<!-- sparkle-signatures:\nedSignature: ([A-Za-z0-9+/=]+)\nlength: ([0-9]+)\n-->\n?\Z",
+        appcast_bytes,
+    )
+    if feed_match is None or int(feed_match.group(2)) != feed_match.start():
+        raise VerificationError("signed appcast is missing archive or feed signature")
+    signatures = [enclosure.get(f"{sparkle}edSignature"), feed_match.group(1).decode("ascii")]
+    for signature in signatures:
+        try:
+            decoded = base64.b64decode(signature or "", validate=True)
+        except (binascii.Error, ValueError) as error:
+            raise VerificationError("signed appcast contains invalid base64 signature") from error
+        if len(decoded) != 64:
+            raise VerificationError("signed appcast signature must be 64 bytes")
+
     evidence = candidate.get("evidence")
     if not isinstance(evidence, dict):
         raise VerificationError("candidate evidence map is missing")
@@ -243,6 +312,45 @@ def verify_candidate(candidate_path: Path, repo: Path, now: datetime) -> tuple[d
     compare_identity(identity, require_identity(assembly, "assembly evidence"), "assembly evidence")
     if assembly.get("schema_version") != 1 or assembly.get("dirty") is not False or assembly.get("candidate") is not True:
         raise VerificationError("assembly evidence is not a clean candidate")
+    sbom_path = asset_paths.get("sbom.spdx.json")
+    notices_path = asset_paths.get("third-party-notices.md")
+    if sbom_path is None or notices_path is None:
+        raise VerificationError("public compliance assets are missing")
+    sbom = load_json(sbom_path, "SPDX evidence")
+    packages = sbom.get("packages")
+    if sbom.get("spdxVersion") != "SPDX-2.3" or sbom.get("dataLicense") != "CC0-1.0" or not isinstance(packages, list) or not packages or any(not isinstance(package, dict) or not isinstance(package.get("licenseDeclared"), str) or not package["licenseDeclared"].strip() for package in packages) or not isinstance(sbom.get("files"), list):
+        raise VerificationError("SPDX evidence is invalid")
+    license_root = release_root / "evidence" / "third-party-licenses"
+    if license_root.is_symlink() or not license_root.is_dir():
+        raise VerificationError("bundled third-party license directory is missing")
+    license_entries = list(license_root.rglob("*"))
+    if not license_entries or any(path.is_symlink() or (not path.is_dir() and not path.is_file()) for path in license_entries) or not any(path.is_file() for path in license_entries):
+        raise VerificationError("bundled third-party license evidence is incomplete")
+    recorded_components: dict[str, str] = {}
+    for row in sbom["files"]:
+        if not isinstance(row, dict) or not isinstance(row.get("fileName"), str):
+            raise VerificationError("SPDX component evidence is malformed")
+        checksums = row.get("checksums")
+        if not isinstance(checksums, list) or len(checksums) != 1 or checksums[0].get("algorithm") != "SHA256" or not HEX64.fullmatch(checksums[0].get("checksumValue", "")):
+            raise VerificationError("SPDX component checksum is malformed")
+        if row["fileName"] in recorded_components:
+            raise VerificationError("SPDX component evidence contains a duplicate")
+        recorded_components[row["fileName"]] = checksums[0]["checksumValue"]
+    component_paths = {
+        "Patchwright.app": release_root / "Patchwright.app",
+        "patchwright-engine": release_root / "Patchwright.app" / "Contents" / "Helpers" / "patchwright-engine",
+        "patchwright-relay": release_root / "Patchwright.app" / "Contents" / "Helpers" / "patchwright-relay",
+    }
+    actual_components = {name: component_digest(path, name) for name, path in component_paths.items()}
+    if recorded_components != actual_components:
+        raise VerificationError("SPDX component hashes do not match the final signed app")
+    notices = read_bytes(notices_path, "third-party notices", MAX_JSON_BYTES)
+    if not notices.startswith(b"# Third-Party Notices"):
+        raise VerificationError("third-party notices are invalid")
+    compliance = assembly.get("compliance")
+    post_signing = compliance.get("post_signing_components") if isinstance(compliance, dict) else None
+    if not isinstance(compliance, dict) or compliance.get("sbom_sha256") != digest(sbom_path, "SPDX evidence") or compliance.get("third_party_notices_sha256") != digest(notices_path, "third-party notices") or post_signing != actual_components:
+        raise VerificationError("assembly is not bound to post-signing compliance")
     build_metadata = load_json(evidence_paths["build_metadata"], "build metadata")
     compare_identity(identity, require_identity(build_metadata, "build metadata"), "build metadata")
     secret_scan = load_json(evidence_paths["secret_scan"], "secret scan evidence")

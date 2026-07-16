@@ -8,6 +8,8 @@ bash -n script/smoke_github_app.sh
 Tests/PackagingTests/github_app_smoke_contract.sh
 Tests/PackagingTests/release_contract.sh
 Tests/PackagingTests/compliance_contract.sh
+Tests/PackagingTests/candidate_evidence_contract.sh
+Tests/PackagingTests/promotion_contract.sh
 cargo test -p patchwright-core --test sorting_contract
 cargo test -p patchwright-engine --test task_conversion
 cargo test -p patchwright-engine --test rpc_conversion

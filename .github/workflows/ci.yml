@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Verify toolchains
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          swift --version
+          rustc --version
+          cargo --version
+
+      - name: Resolve locked dependencies
+        run: |
+          set -euo pipefail
+          swift package resolve
+          cargo fetch --locked
+          git diff --exit-code -- Package.resolved Cargo.lock
+
+      - name: Run verification
+        run: ./script/verify.sh
+
+      - name: Run smoke suite
+        run: ./script/smoke.sh
