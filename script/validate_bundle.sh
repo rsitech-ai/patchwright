@@ -40,7 +40,8 @@ done
 for executable in "$MAIN" "$ENGINE" "$RELAY" "$SPARKLE_BINARY" "$SPARKLE_AUTOUPDATE" \
   "$SPARKLE_UPDATER_BINARY" "$SPARKLE_DOWNLOADER_BINARY" "$SPARKLE_INSTALLER_BINARY"; do
   [[ -x "$executable" ]] || die "not executable: ${executable#"$APP_PATH/"}"
-  /usr/bin/lipo -archs "$executable" 2>/dev/null | tr ' ' '\n' | grep -Eq '^arm64(e)?$' \
+  executable_arches="$(/usr/bin/lipo -archs "$executable" 2>/dev/null)"
+  tr ' ' '\n' <<<"$executable_arches" | grep -Eq '^arm64(e)?$' \
     || die "arm64 architecture missing: ${executable#"$APP_PATH/"}"
 done
 
@@ -103,7 +104,8 @@ while IFS= read -r -d '' candidate; do
   relative="${candidate#"$SPARKLE/"}"
   is_code=false
   [[ "$relative" == *.dylib ]] && is_code=true
-  /usr/bin/file -b "$candidate" 2>/dev/null | grep -Eq '(^| )Mach-O( |$)' && is_code=true
+  file_description="$(/usr/bin/file -b "$candidate" 2>/dev/null)"
+  grep -Eq '(^| )Mach-O( |$)' <<<"$file_description" && is_code=true
   [[ "$is_code" == true ]] || continue
   case "$relative" in
     Versions/B/Sparkle|Versions/B/Autoupdate|Versions/B/Updater.app/Contents/MacOS/Updater|Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader|Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer) ;;
@@ -127,14 +129,16 @@ validate_sparkle_plist "$SPARKLE_UPDATER/Contents/Info.plist" org.sparkle-projec
 validate_sparkle_plist "$SPARKLE_DOWNLOADER/Contents/Info.plist" org.sparkle-project.DownloaderService
 validate_sparkle_plist "$SPARKLE_INSTALLER/Contents/Info.plist" org.sparkle-project.InstallerLauncher
 
-/usr/bin/otool -L "$MAIN" | grep -Fq '@rpath/Sparkle.framework/Versions/B/Sparkle' \
+MAIN_LINKS="$(/usr/bin/otool -L "$MAIN")"
+grep -Fq '@rpath/Sparkle.framework/Versions/B/Sparkle' <<<"$MAIN_LINKS" \
   || die "Patchwright executable is missing the Sparkle install-name reference"
 /usr/bin/otool -l "$MAIN" | awk '
   $1 == "cmd" && $2 == "LC_RPATH" { in_rpath = 1; next }
   in_rpath && $1 == "path" { print $2; in_rpath = 0 }
 ' | grep -Fqx '@executable_path/../Frameworks' \
   || die "Patchwright executable is missing the app Frameworks rpath"
-/usr/bin/otool -D "$SPARKLE_BINARY" | grep -Fqx '@rpath/Sparkle.framework/Versions/B/Sparkle' \
+SPARKLE_INSTALL_NAMES="$(/usr/bin/otool -D "$SPARKLE_BINARY")"
+grep -Fqx '@rpath/Sparkle.framework/Versions/B/Sparkle' <<<"$SPARKLE_INSTALL_NAMES" \
   || die "Sparkle framework install name mismatch"
 if [[ -n "$(find "$APP_PATH" -perm -002 -print -quit)" ]]; then
   die "world-writable bundle content"

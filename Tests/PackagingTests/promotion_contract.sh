@@ -34,6 +34,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
 import stat
 import subprocess
 import sys
@@ -45,6 +46,7 @@ verifier = root / "script" / "verify_release_evidence.py"
 now = "2026-07-15T13:00:00Z"
 created = "2026-07-15T12:00:00Z"
 completed = "2026-07-15T12:10:00Z"
+DMG_BYTES = b"Patchwright signed notarized fixture DMG\n"
 
 
 def write_json(path: Path, value: object) -> None:
@@ -113,6 +115,36 @@ def gate(name: str, commit: str, digest: str, checks: list[str]) -> dict[str, ob
     return value
 
 
+def appcast_content(archive_signature: str) -> str:
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">'
+        '<channel><item><title>Patchwright 0.1.0</title>'
+        '<enclosure url="https://github.com/s1korrrr/patchwright/releases/download/v0.1.0/Patchwright-0.1.0.dmg" '
+        f'length="{len(DMG_BYTES)}" type="application/x-apple-diskimage" '
+        f'sparkle:version="1" sparkle:shortVersionString="0.1.0" sparkle:edSignature="{archive_signature}"/>'
+        '</item></channel></rss>\n'
+    )
+
+
+signature_root = temporary / "signature-fixture"
+signature_root.mkdir()
+signature_dmg = signature_root / "Patchwright-0.1.0.dmg"
+signature_template = signature_root / "appcast-template.xml"
+signature_dmg.write_bytes(DMG_BYTES)
+signature_template.write_text(appcast_content("__ARCHIVE_SIGNATURE__"), encoding="utf-8")
+signature_result = subprocess.run(
+    ["swift", str(root / "Tests/PackagingTests/generate_ed25519_fixture.swift"), str(signature_dmg), str(signature_template)],
+    check=True, stdout=subprocess.PIPE, text=True,
+)
+SIGNATURES = json.loads(signature_result.stdout)
+FIXTURE_APPCAST_CONTENT = appcast_content(SIGNATURES["archive_signature"])
+FIXTURE_APPCAST = (
+    FIXTURE_APPCAST_CONTENT
+    + f'<!-- sparkle-signatures:\nedSignature: {SIGNATURES["feed_signature"]}\nlength: {len(FIXTURE_APPCAST_CONTENT.encode("utf-8"))}\n-->\n'
+)
+
+
 def create_fixture(base: Path) -> tuple[Path, Path, Path]:
     repo = base / "repo"
     release = base / "candidate"
@@ -130,26 +162,21 @@ def create_fixture(base: Path) -> tuple[Path, Path, Path]:
     (app / "Contents" / "MacOS" / "Patchwright").write_bytes(b"signed app executable\n")
     engine.write_bytes(b"signed engine\n")
     relay.write_bytes(b"signed relay\n")
+    with (app / "Contents" / "Info.plist").open("wb") as handle:
+        plistlib.dump({
+            "CFBundleIdentifier": "ai.patchwright.app",
+            "SUPublicEDKey": SIGNATURES["public_key"],
+            "SUVerifyUpdateBeforeExtraction": True,
+            "SURequireSignedFeed": True,
+        }, handle)
 
     dmg = release / "Patchwright-0.1.0.dmg"
-    dmg.write_bytes(b"Patchwright signed notarized fixture DMG\n")
+    dmg.write_bytes(DMG_BYTES)
     digest = sha(dmg)
     (release / "Patchwright-0.1.0.dmg.sha256").write_text(
         f"{digest}  Patchwright-0.1.0.dmg\n", encoding="utf-8"
     )
-    signature = base64.b64encode(bytes(range(64))).decode("ascii")
-    appcast_content = (
-        '<?xml version="1.0" encoding="utf-8"?>\n'
-        '<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">'
-        '<channel><item><title>Patchwright 0.1.0</title>'
-        '<enclosure url="https://github.com/s1korrrr/patchwright/releases/download/v0.1.0/Patchwright-0.1.0.dmg" '
-        f'length="{dmg.stat().st_size}" type="application/x-apple-diskimage" '
-        f'sparkle:version="1" sparkle:shortVersionString="0.1.0" sparkle:edSignature="{signature}"/>'
-        '</item></channel></rss>\n',
-    )
-    appcast_content = "".join(appcast_content)
-    appcast_signature = f"<!-- sparkle-signatures:\nedSignature: {signature}\nlength: {len(appcast_content.encode('utf-8'))}\n-->\n"
-    (release / "appcast.xml").write_text(appcast_content + appcast_signature, encoding="utf-8")
+    (release / "appcast.xml").write_text(FIXTURE_APPCAST, encoding="utf-8")
     component_hashes = {
         "Patchwright.app": component_digest(app),
         "patchwright-engine": component_digest(engine),
@@ -302,6 +329,8 @@ command = [
 result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 if result.returncode != 0:
     raise SystemExit(f"promotion happy path failed: {result.stderr}")
+if "PATCHWRIGHT_STATUS=promoted-release" not in result.stdout:
+    raise SystemExit("promotion happy path did not emit promoted-release status")
 for name in ("release-evidence.json", "release-assets.json", "promotion-readiness.json"):
     if not (output / name).is_file():
         raise SystemExit(f"promotion output missing: {name}")
@@ -491,6 +520,31 @@ def rebind_asset(candidate: Path, name: str) -> None:
     refreeze(candidate)
 
 
+def flip_base64(value: str) -> str:
+    return ("A" if value[0] != "A" else "B") + value[1:]
+
+
+def rebind_components(candidate: Path) -> None:
+    release = candidate.parent.parent
+    app = release / "Patchwright.app"
+    components = {
+        "Patchwright.app": component_digest(app),
+        "patchwright-engine": component_digest(app / "Contents/Helpers/patchwright-engine"),
+        "patchwright-relay": component_digest(app / "Contents/Helpers/patchwright-relay"),
+    }
+    sbom_path = candidate.parent / "sbom.spdx.json"
+    sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
+    for row in sbom["files"]:
+        row["checksums"][0]["checksumValue"] = components[row["fileName"]]
+    write_json(sbom_path, sbom)
+    assembly_path = candidate.parent / "assembly.json"
+    assembly = json.loads(assembly_path.read_text(encoding="utf-8"))
+    assembly["compliance"]["sbom_sha256"] = sha(sbom_path)
+    assembly["compliance"]["post_signing_components"] = components
+    write_json(assembly_path, assembly)
+    rebind_asset(candidate, "sbom.spdx.json")
+
+
 def malformed_sidecar(_repo, candidate, _external, _output, _command):
     name = "Patchwright-0.1.0.dmg.sha256"
     (candidate.parent.parent / name).write_text("not-a-portable-checksum\n", encoding="utf-8")
@@ -506,6 +560,91 @@ def malformed_appcast(_repo, candidate, _external, _output, _command):
 
 
 require_rejected("malformed-appcast", malformed_appcast)
+
+
+def invalid_feed_signature(_repo, candidate, _external, _output, _command):
+    appcast = candidate.parent.parent / "appcast.xml"
+    content = appcast.read_text(encoding="utf-8")
+    content = content.replace(
+        f'edSignature: {SIGNATURES["feed_signature"]}',
+        f'edSignature: {flip_base64(SIGNATURES["feed_signature"])}',
+        1,
+    )
+    appcast.write_text(content, encoding="utf-8")
+    rebind_asset(candidate, "appcast.xml")
+
+
+require_rejected("invalid-feed-ed25519-signature", invalid_feed_signature)
+
+
+def invalid_archive_signature(_repo, candidate, _external, _output, _command):
+    appcast = candidate.parent.parent / "appcast.xml"
+    content = appcast.read_text(encoding="utf-8")
+    content = content.replace(
+        f'sparkle:edSignature="{SIGNATURES["archive_signature"]}"',
+        f'sparkle:edSignature="{flip_base64(SIGNATURES["archive_signature"])}"',
+        1,
+    )
+    appcast.write_text(content, encoding="utf-8")
+    rebind_asset(candidate, "appcast.xml")
+
+
+require_rejected("invalid-archive-ed25519-signature", invalid_archive_signature)
+
+
+def wrong_sparkle_public_key(_repo, candidate, _external, _output, _command):
+    info_path = candidate.parent.parent / "Patchwright.app/Contents/Info.plist"
+    with info_path.open("rb") as handle:
+        info = plistlib.load(handle)
+    info["SUPublicEDKey"] = base64.b64encode(bytes([0xA5]) * 32).decode("ascii")
+    with info_path.open("wb") as handle:
+        plistlib.dump(info, handle)
+    rebind_components(candidate)
+
+
+require_rejected("wrong-sparkle-public-key", wrong_sparkle_public_key)
+
+
+def rebind_tampered_dmg(_repo, candidate, external, _output, _command):
+    release = candidate.parent.parent
+    dmg = release / "Patchwright-0.1.0.dmg"
+    mutated = bytearray(dmg.read_bytes())
+    mutated[0] ^= 1
+    dmg.write_bytes(mutated)
+    new_digest = sha(dmg)
+    sidecar = release / "Patchwright-0.1.0.dmg.sha256"
+    sidecar.write_text(f"{new_digest}  Patchwright-0.1.0.dmg\n", encoding="utf-8")
+    identity_paths = [
+        candidate,
+        candidate.parent / "assembly.json",
+        candidate.parent / "build-metadata.json",
+        candidate.parent / "distribution.json",
+        candidate.parent / "repo.json",
+        candidate.parent / "secret-scan-gate.json",
+        candidate.parent / "compliance-gate.json",
+        external / "codex.json",
+        external / "github.json",
+        external / "clean-machine.json",
+    ]
+    for path in identity_paths:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["artifact_sha256"] = new_digest
+        if path == candidate:
+            value["artifact_size"] = dmg.stat().st_size
+            for asset in value["assets"]:
+                asset_path = release / asset["path"]
+                if asset["name"] in {"Patchwright-0.1.0.dmg", "Patchwright-0.1.0.dmg.sha256"}:
+                    asset["sha256"] = sha(asset_path)
+                    asset["size"] = asset_path.stat().st_size
+        write_json(path, value)
+    notary_path = candidate.parent / "notary-dmg.json"
+    notary = json.loads(notary_path.read_text(encoding="utf-8"))
+    notary["final_sha256"] = new_digest
+    write_json(notary_path, notary)
+    refreeze(candidate)
+
+
+require_rejected("rebound-tampered-dmg-signature", rebind_tampered_dmg)
 
 
 def invalid_spdx(_repo, candidate, _external, _output, _command):
@@ -549,7 +688,7 @@ published = (leak_output / "release-evidence.json").read_text(encoding="utf-8") 
 if "/Users/" in published or "PRIVATE-NOTARY-LOG" in published:
     raise SystemExit("public promotion outputs leaked unvalidated local fields")
 
-print("promotion matrix: 21 safety categories passed")
+print("promotion matrix: 25 safety categories passed")
 PY
 
 echo "Patchwright promotion contract passed"
