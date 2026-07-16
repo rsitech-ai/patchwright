@@ -54,7 +54,7 @@ require_text docs/direct-download.md 'Apple notarization'
 require_text docs/direct-download.md 'GitHub Releases'
 require_text docs/release-checklist.md 'notarized-candidate'
 require_text docs/release-checklist.md 'promoted-release'
-if rg -n 'App Store|App Store Connect|Mac App Store' README.md docs/release-checklist.md docs/release-readiness.md docs/production-plan.md; then
+if grep -En 'App Store|App Store Connect|Mac App Store' README.md docs/release-checklist.md docs/release-readiness.md docs/production-plan.md; then
   fail "direct-distribution documentation must not claim an App Store release lane"
 fi
 [[ -x "$ROOT_DIR/script/generate_app_icon.sh" ]] || fail "script/generate_app_icon.sh must be executable"
@@ -153,17 +153,15 @@ done
 
 make_fixture() {
   local app="$1"
-  local swift_bin_dir
-  swift_bin_dir="$(cd "$ROOT_DIR" && swift build -c release --show-bin-path)"
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Frameworks"
   mkdir -p "$app/Contents/Resources"
-  cp "$swift_bin_dir/Patchwright" "$app/Contents/MacOS/Patchwright"
+  cp "$SWIFT_BIN_DIR/Patchwright" "$app/Contents/MacOS/Patchwright"
   cp /usr/bin/true "$app/Contents/Helpers/patchwright-engine"
   cp /usr/bin/true "$app/Contents/Helpers/patchwright-relay"
   chmod 755 "$app/Contents/MacOS/Patchwright" "$app/Contents/Helpers/patchwright-engine" "$app/Contents/Helpers/patchwright-relay"
   cp "$ROOT_DIR/Packaging/Info.plist" "$app/Contents/Info.plist"
   cp "$ROOT_DIR/Packaging/Patchwright.icns" "$app/Contents/Resources/Patchwright.icns"
-  /usr/bin/ditto "$swift_bin_dir/Sparkle.framework" "$app/Contents/Frameworks/Sparkle.framework"
+  /usr/bin/ditto "$SWIFT_BIN_DIR/Sparkle.framework" "$app/Contents/Frameworks/Sparkle.framework"
 }
 
 assert_rejected() {
@@ -206,6 +204,8 @@ grep -q 'release assembly is not a clean candidate' "$TMP_ROOT/assembly.out" \
   || fail "dirty assembly rejection was not explicit"
 
 APP="$TMP_ROOT/Patchwright.app"
+(cd "$ROOT_DIR" && swift build -c release --product Patchwright)
+SWIFT_BIN_DIR="$(cd "$ROOT_DIR" && swift build -c release --show-bin-path)"
 make_fixture "$APP"
 "$ROOT_DIR/script/validate_bundle.sh" "$APP"
 
@@ -478,7 +478,7 @@ positions = [source.index(marker) for marker in ordered]
 if positions != sorted(positions):
     raise SystemExit("candidate packaging order is not sign -> compliance -> preliminary scan -> evidence -> final scan -> freeze -> verify")
 PY
-if rg -n --hidden -e 'security[[:space:]]+export|SecItemExport|\.p12|export_selected_identity|--ed-key-file|private.?key' \
+if grep -En 'security[[:space:]]+export|SecItemExport|\.p12|export_selected_identity|--ed-key-file|private.?key' \
     "$ROOT_DIR/script/package_release.sh" "$ROOT_DIR/script/notarize_release.sh"; then
   fail "candidate packaging must never export or accept private signing key material"
 fi
