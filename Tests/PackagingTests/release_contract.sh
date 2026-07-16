@@ -162,6 +162,7 @@ for required in \
   script/verify_signing.sh \
   script/create_dmg.sh \
   script/notarize_release.sh \
+  script/package_release.sh \
   script/verify_distribution.sh \
   script/release_readiness.sh; do
   [[ -f "$ROOT_DIR/$required" ]] || fail "missing $required"
@@ -402,17 +403,63 @@ if "$ROOT_DIR/script/verify_signing.sh" "$APP" >"$TMP_ROOT/adhoc.out" 2>&1; then
 fi
 grep -q 'wrong identity class' "$TMP_ROOT/adhoc.out" || fail "ad-hoc rejection was not explicit"
 
-if PATCHWRIGHT_NOTARY_PROFILE= "$ROOT_DIR/script/notarize_release.sh" "$APP" "$TMP_ROOT/notary" >"$TMP_ROOT/notary.out" 2>&1; then
+if PATCHWRIGHT_NOTARY_PROFILE= "$ROOT_DIR/script/notarize_release.sh" \
+    "$APP" "$TMP_ROOT/notary-app.json" "$TMP_ROOT/private-notary" app >"$TMP_ROOT/notary.out" 2>&1; then
   fail "notarization succeeded without a Keychain profile"
 fi
 grep -q 'blocked:external.*PATCHWRIGHT_NOTARY_PROFILE' "$TMP_ROOT/notary.out" || fail "notary blocker was not explicit"
+
+[[ -x "$ROOT_DIR/script/package_release.sh" ]] || fail "script/package_release.sh must be executable"
+require_text script/release.sh 'exec "$ROOT_DIR/script/package_release.sh" "$@"'
+if grep -Eq 'release_readiness|promote_release|PATCHWRIGHT_(REPO|CODEX|GITHUB|CLEAN_MACHINE)_VERIFIED' \
+    "$ROOT_DIR/script/release.sh"; then
+  fail "release.sh must only delegate to candidate packaging"
+fi
+
+for packaging_text in \
+  'refs/tags/v$VERSION^{commit}' \
+  'generate_appcast' \
+  '--account "$SPARKLE_ACCOUNT"' \
+  'SPARKLE_ACCOUNT="ai.patchwright.app"' \
+  '--download-url-prefix "https://github.com/s1korrrr/patchwright/releases/download/v$VERSION"' \
+  'sign_update' \
+  '--verify "$APPCAST_PATH"' \
+  'verify_release_evidence.py" candidate' \
+  'PATCHWRIGHT_CANDIDATE_MANIFEST=' \
+  'PATCHWRIGHT_STATUS=notarized-candidate'; do
+  require_text script/package_release.sh "$packaging_text"
+done
+if rg -n --hidden -e 'security[[:space:]]+export|SecItemExport|\.p12|export_selected_identity|--ed-key-file|private.?key' \
+    "$ROOT_DIR/script/package_release.sh" "$ROOT_DIR/script/notarize_release.sh"; then
+  fail "candidate packaging must never export or accept private signing key material"
+fi
+
+CHECKSUM_ROOT="$TMP_ROOT/checksum-root"
+mkdir -p "$CHECKSUM_ROOT/evidence" "$CHECKSUM_ROOT/nested"
+printf 'alpha\n' >"$CHECKSUM_ROOT/nested/a.txt"
+"$ROOT_DIR/script/generate_release_metadata.sh" --phase checksums --output-root "$CHECKSUM_ROOT"
+EXPECTED_DIGEST="$(shasum -a 256 "$CHECKSUM_ROOT/nested/a.txt" | awk '{print $1}')"
+grep -Fxq "$EXPECTED_DIGEST  nested/a.txt" "$CHECKSUM_ROOT/evidence/SHA256SUMS" \
+  || fail "SHA256SUMS must contain portable release-root-relative paths"
+if grep -Fq "$CHECKSUM_ROOT" "$CHECKSUM_ROOT/evidence/SHA256SUMS"; then
+  fail "SHA256SUMS leaked an absolute operator path"
+fi
+
+NONREGULAR_ROOT="$TMP_ROOT/nonregular-root"
+mkdir -p "$NONREGULAR_ROOT/evidence"
+mkfifo "$NONREGULAR_ROOT/unsupported.fifo"
+if "$ROOT_DIR/script/generate_release_metadata.sh" --phase checksums --output-root "$NONREGULAR_ROOT" \
+    >"$TMP_ROOT/nonregular.out" 2>&1; then
+  fail "checksum freeze accepted a non-regular candidate entry"
+fi
+grep -Fq 'unsupported candidate file type' "$TMP_ROOT/nonregular.out" \
+  || fail "checksum freeze did not report the non-regular entry"
 
 READINESS="$TMP_ROOT/readiness.json"
 if "$ROOT_DIR/script/release_readiness.sh" --app "$APP" --json "$READINESS" >/dev/null 2>&1; then
   fail "readiness succeeded for an unsigned fixture"
 fi
-jq -e '.repo_ready == false and .developer_id == false and .release_candidate_ready == false' "$READINESS" >/dev/null \
-  || fail "readiness JSON overstated the fixture"
+[[ ! -e "$READINESS" ]] || fail "legacy readiness arguments must not create evidence"
 
 if PATCHWRIGHT_CLEAN_MACHINE= "$ROOT_DIR/script/clean_machine_probe.sh" missing.dmg "$TMP_ROOT/clean" >"$TMP_ROOT/clean.out" 2>&1; then
   fail "clean-machine probe ran without its explicit clean-VM gate"
