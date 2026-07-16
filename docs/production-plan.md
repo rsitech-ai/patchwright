@@ -2,7 +2,10 @@
 
 ## Release target
 
-Ship a reviewable Stage 1–3 MVP that runs locally on macOS, exposes a durable Rust engine, accepts verified GitHub App webhooks, and demonstrates the complete prepare/verify/deliver/monitor lifecycle without automatic merge.
+Ship a reviewable Stage 1–3 MVP that runs locally on macOS, exposes a durable
+Rust engine, accepts verified GitHub App webhooks, and demonstrates the complete
+prepare/verify/deliver/monitor lifecycle. Publish source openly and distribute
+only Developer ID-signed, Apple-notarized binaries through GitHub Releases.
 
 ## Quality gates
 
@@ -29,6 +32,5 @@ Ship a reviewable Stage 1–3 MVP that runs locally on macOS, exposes a durable 
 - `repo-ready`: source, tests, build, and local smoke are green.
 - `package-ready`: a signed local `.app` bundle and engine/relay binaries are assembled and inspected.
 - `release-candidate ready`: clean-machine launch and full lifecycle smoke are green.
-- `ready for App Store Connect upload`: distribution identity, profile, archive validation, privacy metadata, and owner authorization are green.
+- `promoted-release`: the frozen notarized candidate and clean-machine evidence passed independent promotion checks and are eligible for GitHub Releases.
 - `blocked:external`: an Apple, GitHub, network, or owner action remains.
-

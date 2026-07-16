@@ -31,6 +31,32 @@ for required in \
   SUPPORT.md; do
   require_file "$required"
 done
+
+for required in \
+  .github/workflows/ci.yml \
+  .github/release.yml \
+  rust-toolchain.toml \
+  docs/direct-download.md; do
+  require_file "$required"
+done
+if find "$ROOT_DIR/docs/release/0.1.0" -type f -print -quit 2>/dev/null | grep -q .; then
+  fail "obsolete App Store 0.1.0 release dossier must be removed"
+fi
+require_text .github/workflows/ci.yml 'permissions:'
+require_text .github/workflows/ci.yml 'contents: read'
+require_text .github/workflows/ci.yml 'persist-credentials: false'
+require_text .github/workflows/ci.yml './script/verify.sh'
+require_text .github/workflows/ci.yml './script/smoke.sh'
+require_text rust-toolchain.toml 'channel = "1.91.0"'
+require_text README.md 'docs/direct-download.md'
+require_text docs/direct-download.md 'Developer ID Application'
+require_text docs/direct-download.md 'Apple notarization'
+require_text docs/direct-download.md 'GitHub Releases'
+require_text docs/release-checklist.md 'notarized-candidate'
+require_text docs/release-checklist.md 'promoted-release'
+if rg -n 'App Store|App Store Connect|Mac App Store' README.md docs/release-checklist.md docs/release-readiness.md docs/production-plan.md; then
+  fail "direct-distribution documentation must not claim an App Store release lane"
+fi
 [[ -x "$ROOT_DIR/script/generate_app_icon.sh" ]] || fail "script/generate_app_icon.sh must be executable"
 require_text Assets/PatchwrightIcon-source.svg 'viewBox="0 0 1024 1024"'
 
@@ -161,6 +187,7 @@ for required in \
   script/sign_release.sh \
   script/verify_signing.sh \
   script/create_dmg.sh \
+  script/generate_candidate_evidence.py \
   script/notarize_release.sh \
   script/package_release.sh \
   script/verify_distribution.sh \
@@ -410,6 +437,7 @@ fi
 grep -q 'blocked:external.*PATCHWRIGHT_NOTARY_PROFILE' "$TMP_ROOT/notary.out" || fail "notary blocker was not explicit"
 
 [[ -x "$ROOT_DIR/script/package_release.sh" ]] || fail "script/package_release.sh must be executable"
+[[ -x "$ROOT_DIR/script/generate_candidate_evidence.py" ]] || fail "script/generate_candidate_evidence.py must be executable"
 require_text script/release.sh 'exec "$ROOT_DIR/script/package_release.sh" "$@"'
 if grep -Eq 'release_readiness|promote_release|PATCHWRIGHT_(REPO|CODEX|GITHUB|CLEAN_MACHINE)_VERIFIED' \
     "$ROOT_DIR/script/release.sh"; then
@@ -424,11 +452,32 @@ for packaging_text in \
   '--download-url-prefix "https://github.com/s1korrrr/patchwright/releases/download/v$VERSION"' \
   'sign_update' \
   '--verify "$APPCAST_PATH"' \
+  'generate_candidate_evidence.py' \
+  'generate_release_compliance.py' \
+  'scan_publication_secrets.sh' \
   'verify_release_evidence.py" candidate' \
   'PATCHWRIGHT_CANDIDATE_MANIFEST=' \
   'PATCHWRIGHT_STATUS=notarized-candidate'; do
   require_text script/package_release.sh "$packaging_text"
 done
+python3 - "$ROOT_DIR/script/package_release.sh" <<'PY'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+ordered = [
+    '"$ROOT_DIR/script/sign_release.sh"',
+    'generate_release_compliance.py',
+    '# Preliminary scan',
+    'generate_candidate_evidence.py',
+    '# Final scan',
+    '--phase checksums',
+    'verify_release_evidence.py" candidate',
+]
+positions = [source.index(marker) for marker in ordered]
+if positions != sorted(positions):
+    raise SystemExit("candidate packaging order is not sign -> compliance -> preliminary scan -> evidence -> final scan -> freeze -> verify")
+PY
 if rg -n --hidden -e 'security[[:space:]]+export|SecItemExport|\.p12|export_selected_identity|--ed-key-file|private.?key' \
     "$ROOT_DIR/script/package_release.sh" "$ROOT_DIR/script/notarize_release.sh"; then
   fail "candidate packaging must never export or accept private signing key material"

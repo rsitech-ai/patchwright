@@ -34,6 +34,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 
@@ -53,6 +54,25 @@ def write_json(path: Path, value: object) -> None:
 
 def sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def component_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    if path.is_file():
+        return sha(path)
+    for entry in sorted(path.rglob("*"), key=lambda item: item.relative_to(path).as_posix()):
+        relative = entry.relative_to(path).as_posix().encode("utf-8")
+        mode = stat.S_IMODE(entry.lstat().st_mode)
+        if entry.is_symlink():
+            kind, payload = b"L", os.readlink(entry).encode("utf-8")
+        elif entry.is_file():
+            kind, payload = b"F", hashlib.sha256(entry.read_bytes()).digest()
+        elif entry.is_dir():
+            kind, payload = b"D", b""
+        else:
+            raise SystemExit(f"unsupported fixture component entry: {entry}")
+        digest.update(kind + b"\0" + relative + b"\0" + str(mode).encode("ascii") + b"\0" + payload)
+    return digest.hexdigest()
 
 
 def initialize_repo(path: Path) -> str:
@@ -102,6 +122,15 @@ def create_fixture(base: Path) -> tuple[Path, Path, Path]:
     evidence.mkdir(parents=True)
     external.mkdir()
 
+    app = release / "Patchwright.app"
+    engine = app / "Contents" / "Helpers" / "patchwright-engine"
+    relay = app / "Contents" / "Helpers" / "patchwright-relay"
+    engine.parent.mkdir(parents=True)
+    (app / "Contents" / "MacOS").mkdir()
+    (app / "Contents" / "MacOS" / "Patchwright").write_bytes(b"signed app executable\n")
+    engine.write_bytes(b"signed engine\n")
+    relay.write_bytes(b"signed relay\n")
+
     dmg = release / "Patchwright-0.1.0.dmg"
     dmg.write_bytes(b"Patchwright signed notarized fixture DMG\n")
     digest = sha(dmg)
@@ -109,21 +138,22 @@ def create_fixture(base: Path) -> tuple[Path, Path, Path]:
         f"{digest}  Patchwright-0.1.0.dmg\n", encoding="utf-8"
     )
     signature = base64.b64encode(bytes(range(64))).decode("ascii")
-    (release / "appcast.xml").write_text(
+    appcast_content = (
         '<?xml version="1.0" encoding="utf-8"?>\n'
         '<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">'
         '<channel><item><title>Patchwright 0.1.0</title>'
         '<enclosure url="https://github.com/s1korrrr/patchwright/releases/download/v0.1.0/Patchwright-0.1.0.dmg" '
         f'length="{dmg.stat().st_size}" type="application/x-apple-diskimage" '
         f'sparkle:version="1" sparkle:shortVersionString="0.1.0" sparkle:edSignature="{signature}"/>'
-        f'<sparkle:signature>{signature}</sparkle:signature>'
         '</item></channel></rss>\n',
-        encoding="utf-8",
     )
+    appcast_content = "".join(appcast_content)
+    appcast_signature = f"<!-- sparkle-signatures:\nedSignature: {signature}\nlength: {len(appcast_content.encode('utf-8'))}\n-->\n"
+    (release / "appcast.xml").write_text(appcast_content + appcast_signature, encoding="utf-8")
     component_hashes = {
-        "Patchwright.app": "1" * 64,
-        "patchwright-engine": "2" * 64,
-        "patchwright-relay": "3" * 64,
+        "Patchwright.app": component_digest(app),
+        "patchwright-engine": component_digest(engine),
+        "patchwright-relay": component_digest(relay),
     }
     write_json(evidence / "sbom.spdx.json", {
         "spdxVersion": "SPDX-2.3",
@@ -446,6 +476,65 @@ def dirty_secret_scan(_repo, candidate, _external, _output, _command):
 require_rejected("dirty-secret-evidence", dirty_secret_scan)
 
 
+def rebind_asset(candidate: Path, name: str) -> None:
+    release = candidate.parent.parent
+    value = json.loads(candidate.read_text(encoding="utf-8"))
+    for asset in value["assets"]:
+        if asset["name"] == name:
+            path = release / asset["path"]
+            asset["sha256"] = sha(path)
+            asset["size"] = path.stat().st_size
+            break
+    else:
+        raise SystemExit(f"fixture asset missing: {name}")
+    write_json(candidate, value)
+    refreeze(candidate)
+
+
+def malformed_sidecar(_repo, candidate, _external, _output, _command):
+    name = "Patchwright-0.1.0.dmg.sha256"
+    (candidate.parent.parent / name).write_text("not-a-portable-checksum\n", encoding="utf-8")
+    rebind_asset(candidate, name)
+
+
+require_rejected("malformed-portable-checksum", malformed_sidecar)
+
+
+def malformed_appcast(_repo, candidate, _external, _output, _command):
+    (candidate.parent.parent / "appcast.xml").write_text("<rss/>\n", encoding="utf-8")
+    rebind_asset(candidate, "appcast.xml")
+
+
+require_rejected("malformed-appcast", malformed_appcast)
+
+
+def invalid_spdx(_repo, candidate, _external, _output, _command):
+    path = candidate.parent / "sbom.spdx.json"
+    write_json(path, {"spdxVersion": "SPDX-0.0", "dataLicense": "NONE"})
+    rebind_asset(candidate, "sbom.spdx.json")
+
+
+require_rejected("invalid-spdx", invalid_spdx)
+
+
+def forged_component_hashes(_repo, candidate, _external, _output, _command):
+    sbom_path = candidate.parent / "sbom.spdx.json"
+    assembly_path = candidate.parent / "assembly.json"
+    sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
+    forged = {row["fileName"]: "f" * 64 for row in sbom["files"]}
+    for row in sbom["files"]:
+        row["checksums"][0]["checksumValue"] = forged[row["fileName"]]
+    write_json(sbom_path, sbom)
+    assembly = json.loads(assembly_path.read_text(encoding="utf-8"))
+    assembly["compliance"]["sbom_sha256"] = sha(sbom_path)
+    assembly["compliance"]["post_signing_components"] = forged
+    write_json(assembly_path, assembly)
+    rebind_asset(candidate, "sbom.spdx.json")
+
+
+require_rejected("forged-post-signing-component-hashes", forged_component_hashes)
+
+
 leak_repo, leak_candidate, leak_external = create_fixture(temporary / "redaction")
 leak_value = json.loads(leak_candidate.read_text(encoding="utf-8"))
 leak_value["signing"]["keychain_path"] = "/Users/alice/Library/Keychains/login.keychain-db"
@@ -460,7 +549,7 @@ published = (leak_output / "release-evidence.json").read_text(encoding="utf-8") 
 if "/Users/" in published or "PRIVATE-NOTARY-LOG" in published:
     raise SystemExit("public promotion outputs leaked unvalidated local fields")
 
-print("promotion matrix: 17 safety categories passed")
+print("promotion matrix: 21 safety categories passed")
 PY
 
 echo "Patchwright promotion contract passed"
