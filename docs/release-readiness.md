@@ -8,11 +8,12 @@ Run `./script/release.sh` only from a clean commit. It builds immutable Swift an
 
 ## Current external prerequisites
 
-- Exactly one `Developer ID Application: ...` identity must be installed in the login Keychain. Apple Development and Apple Distribution identities are deliberately rejected.
+- Exactly one `Developer ID Application: ...` identity must be available in the selected signing Keychain. Apple Development and Apple Distribution identities are deliberately rejected.
+- `PATCHWRIGHT_SIGNING_KEYCHAIN` may point to an owner-only, absolute dedicated release Keychain. Packaging adds it to the user Keychain search list only for the release process and restores the prior list on exit.
 - `PATCHWRIGHT_NOTARY_PROFILE` must name a `notarytool` Keychain profile. Raw Apple credentials are never accepted by the release scripts.
 - Final clean-machine evidence must come from the notarized DMG on the documented disposable VM, not from a source-built or ad-hoc app.
 
-After installing the Developer ID Application certificate, verify it with `security find-identity -p codesigning -v`.
+After installing the Developer ID Application certificate, verify it with `security find-identity -p codesigning -v "$PATCHWRIGHT_SIGNING_KEYCHAIN"`. Unlock a dedicated release Keychain before packaging; its password belongs in operator-local secret storage, never in the repository or shell history.
 
 Create the notary profile interactively without putting secrets in shell history:
 
@@ -25,6 +26,7 @@ Then run:
 
 ```sh
 export PATCHWRIGHT_DEVELOPER_ID='Developer ID Application: Exact Name (TEAMID)'
+export PATCHWRIGHT_SIGNING_KEYCHAIN='/absolute/path/to/Release.keychain-db'
 export PATCHWRIGHT_NOTARY_PROFILE=Patchwright
 PATCHWRIGHT_VERSION=0.1.0 PATCHWRIGHT_BUILD=1 ./script/release.sh
 ```

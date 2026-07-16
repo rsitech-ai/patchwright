@@ -3,6 +3,7 @@
 ## Repository gate
 
 - [ ] Final source is committed, tagged as `v<version>`, and the tag resolves to HEAD.
+- [ ] The dedicated release Keychain is unlocked, owner-only, and selected through `PATCHWRIGHT_SIGNING_KEYCHAIN`; the previous user Keychain search list is restored after packaging.
 - [ ] CI, `./script/verify.sh`, `./script/smoke.sh`, and `./script/smoke_codex.sh` pass.
 - [ ] Publication secret scan, license inventory, SBOM, notices, and reproducibility evidence pass.
 - [ ] The approval-gated GitHub lifecycle and automation kill switch are exercised only in an authorized disposable repository.
