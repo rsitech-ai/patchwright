@@ -297,8 +297,14 @@ def verify_candidate(candidate_path: Path, repo: Path, now: datetime) -> tuple[d
     if len(enclosures) != 1:
         raise VerificationError("signed appcast must contain exactly one enclosure")
     enclosure = enclosures[0]
+    enclosure_items = [item for item in appcast_root.findall(".//item") if item.find("enclosure") is enclosure]
+    if len(enclosure_items) != 1:
+        raise VerificationError("signed appcast enclosure must belong to exactly one item")
+    item = enclosure_items[0]
+    versions = item.findall(f"{sparkle}version")
+    short_versions = item.findall(f"{sparkle}shortVersionString")
     expected_url = f"https://github.com/s1korrrr/patchwright/releases/download/{identity['tag']}/{identity['artifact_filename']}"
-    if enclosure.get("url") != expected_url or enclosure.get("length") != str(artifact_stat.st_size) or enclosure.get("type") != "application/x-apple-diskimage" or enclosure.get(f"{sparkle}version") != identity["build"] or enclosure.get(f"{sparkle}shortVersionString") != identity["version"]:
+    if enclosure.get("url") != expected_url or enclosure.get("length") != str(artifact_stat.st_size) or enclosure.get("type") != "application/octet-stream" or len(versions) != 1 or versions[0].text != identity["build"] or len(short_versions) != 1 or short_versions[0].text != identity["version"]:
         raise VerificationError("signed appcast enclosure does not match candidate")
     appcast_bytes = read_bytes(appcast, "signed appcast", MAX_JSON_BYTES)
     feed_match = re.search(
