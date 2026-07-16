@@ -198,6 +198,7 @@ done
 require_text script/package_release.sh 'TEMPORARY_KEYCHAINS=()'
 require_text script/package_release.sh 'ORIGINAL_KEYCHAINS+=("$keychain_line")'
 require_text script/package_release.sh 'TEMPORARY_KEYCHAINS+=("$keychain_line")'
+require_text Tests/PackagingTests/candidate_evidence_contract.sh 'export PYTHONDONTWRITEBYTECODE=1'
 
 ASSEMBLY="$TMP_ROOT/assembly.json"
 jq -n '{dirty:false,candidate:true}' >"$ASSEMBLY"
