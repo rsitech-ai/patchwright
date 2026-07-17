@@ -11,6 +11,7 @@ mod monitoring;
 mod repository;
 mod rpc;
 mod store;
+mod verification;
 mod worktree;
 
 pub use command::{CommandOutput, CommandRunner, CommandSpec};
@@ -36,4 +37,5 @@ pub use monitoring::{
 pub use repository::{RepositoryInspection, RepositoryService};
 pub use rpc::{serve, serve_until, serve_with_codex};
 pub use store::EventStore;
+pub use verification::{VerificationError, VerificationEvidence, verify_task_for_delivery};
 pub use worktree::{GitTransport, WorktreeService};

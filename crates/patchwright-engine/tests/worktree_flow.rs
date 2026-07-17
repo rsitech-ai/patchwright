@@ -276,7 +276,6 @@ async fn repository_to_isolated_worktree_preserves_base_and_uses_argv() {
         ],
         working_directory: worktree,
         timeout: Duration::from_secs(2),
-        environment: vec![],
     })
     .await
     .unwrap();
