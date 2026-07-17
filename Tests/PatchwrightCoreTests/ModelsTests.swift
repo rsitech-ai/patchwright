@@ -2,6 +2,16 @@ import XCTest
 @testable import PatchwrightCore
 
 final class ModelsTests: XCTestCase {
+    func testDecodesExactPreparationPreviewAndApprovalBoundary() throws {
+        let previewData = Data(#"{"taskId":"5A8F17C3-733B-46EE-AE48-015D091A0B91","repositoryBindingId":"11111111-1111-1111-1111-111111111111","repositoryFullName":"acme/widget","repositoryPath":"/tmp/repository","sourceSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","worktreePath":"/tmp/worktrees/task","branch":"patchwright/task","invalidationGeneration":7,"policySha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","instructionSha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","fingerprint":{"taskId":"5A8F17C3-733B-46EE-AE48-015D091A0B91","githubRepositoryId":42,"repositoryFullName":"acme/widget","actionKind":"prepareWorktree","pullRequestNumber":null,"branch":"patchwright/task","headSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseSha":null,"payloadSha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","policySha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","instructionSha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","invalidationGeneration":7}}"#.utf8)
+        let preview = try JSONDecoder.patchwright.decode(PreparationPreview.self, from: previewData)
+
+        XCTAssertEqual(preview.repositoryFullName, "acme/widget")
+        XCTAssertEqual(preview.sourceSha, String(repeating: "a", count: 40))
+        XCTAssertEqual(preview.fingerprint.actionKind, "prepareWorktree")
+        XCTAssertEqual(preview.invalidationGeneration, 7)
+    }
+
     func testDecodesEngineTask() throws {
         let data = Data(#"{"id":"5A8F17C3-733B-46EE-AE48-015D091A0B91","title":"Fix issue","repositoryPath":"/tmp/repo","state":"awaitingPreparationApproval","createdAt":"2026-07-13T10:00:00Z","updatedAt":"2026-07-13T10:01:00Z"}"#.utf8)
         let task = try JSONDecoder.patchwright.decode(EngineeringTask.self, from: data)

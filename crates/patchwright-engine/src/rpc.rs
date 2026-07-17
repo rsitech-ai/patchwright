@@ -2,13 +2,13 @@ use crate::{
     CancellationState, ConversionError, ConversionRequest, EventStore, GhCliCredentialBroker,
     GitHubAccount, GitHubRepository, GitHubSource, GitHubSyncSummary, GitHubToken, Job, JobId,
     JobKind, JobState, MonitorRecord, RemoteObservation, TaskConversionService, approve_delivery,
-    authorize_execution,
+    approve_preparation, authorize_execution, authorize_preparation,
     codex::{
         process::{CodexExecutable, CodexProcessConfig, CodexProcessFactory},
         service::{CodexRuntimeStatus, CodexService, CodexServiceError, CodexServiceState},
     },
     lease::DatabaseLease,
-    preview_delivery,
+    preview_delivery, preview_preparation,
 };
 use anyhow::{Context, Result, bail};
 use patchwright_core::{
@@ -303,6 +303,8 @@ async fn dispatch(request: Request, state: &ServerState) -> Value {
         "task.timeline" => task_timeline(request.id, &request.params, store),
         "task.worktree" => task_worktree(request.id, &request.params, store),
         "task.plan" => task_plan(request.id, &request.params, store),
+        "task.preparation.preview" => task_preparation_preview(request.id, &request.params, store),
+        "task.preparation.approve" => task_preparation_approve(request.id, &request.params, store),
         "task.prepare" => task_prepare(request.id, &request.params, store).await,
         "task.readyForDelivery" => {
             task_ready_for_delivery(request.id, &request.params, store).await
@@ -1314,14 +1316,125 @@ fn task_plan(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
     rpc_result(id, json!(task))
 }
 
+fn task_preparation_preview(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let task_id = match required_task_id(params) {
+        Ok(task_id) => task_id,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    match preview_preparation(&store.lock().expect("event store lock poisoned"), task_id) {
+        Ok(preview) => rpc_result(id, json!(preview)),
+        Err(error) => rpc_error(
+            id,
+            -32042,
+            "preparation preview failed",
+            Some(error.to_string()),
+        ),
+    }
+}
+
+fn task_preparation_approve(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let preview = match encoded_parameter(params, "preview") {
+        Ok(preview) => preview,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let approved_by = params
+        .get("approvedBy")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match approve_preparation(
+        &store.lock().expect("event store lock poisoned"),
+        &preview,
+        approved_by,
+    ) {
+        Ok(approval) => rpc_result(id, json!(approval)),
+        Err(error) => rpc_error(
+            id,
+            -32045,
+            "preparation approval failed",
+            Some(error.to_string()),
+        ),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn task_prepare(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
     let task_id = match required_task_id(params) {
         Ok(task_id) => task_id,
         Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
     };
-    let (mut task, binding, contract) = {
+    let preview: crate::PreparationPreview = match encoded_parameter(params, "preview") {
+        Ok(preview) => preview,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    if preview.task_id != task_id {
+        return rpc_error(
+            id,
+            -32602,
+            "invalid parameters",
+            Some("preview taskId does not match taskId".into()),
+        );
+    }
+    let Some(approval_id) = params
+        .get("approvalId")
+        .and_then(Value::as_str)
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+    else {
+        return rpc_error(
+            id,
+            -32602,
+            "invalid parameters",
+            Some("approvalId is required".into()),
+        );
+    };
+    if let Err(error) = authorize_preparation(
+        &store.lock().expect("event store lock poisoned"),
+        &preview,
+        approval_id,
+    ) {
+        return rpc_error(
+            id,
+            -32046,
+            "preparation authorization failed",
+            Some(error.to_string()),
+        );
+    }
+    let response = task_prepare_claimed(id.clone(), task_id, &preview, store).await;
+    let result = if response.get("error").is_some() {
+        "failed"
+    } else {
+        "succeeded"
+    };
+    if let Err(error) = store
+        .lock()
+        .expect("event store lock poisoned")
+        .complete_preparation_claim(approval_id, result)
+    {
+        return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+    }
+    response
+}
+
+#[allow(clippy::too_many_lines)]
+async fn task_prepare_claimed(
+    id: Value,
+    task_id: TaskId,
+    preview: &crate::PreparationPreview,
+    store: &Mutex<EventStore>,
+) -> Value {
+    let (mut task, binding) = {
         let store = store.lock().expect("event store lock poisoned");
+        match preview_preparation(&store, task_id) {
+            Ok(fresh) if fresh == *preview => {}
+            Ok(_) => return rpc_error(id, -32046, "preparation preview is stale", None),
+            Err(error) => {
+                return rpc_error(
+                    id,
+                    -32046,
+                    "preparation preview is stale",
+                    Some(error.to_string()),
+                );
+            }
+        }
         let task = match store.load_task(task_id) {
             Ok(Some(task)) => task,
             Ok(None) => return rpc_error(id, -32040, "task is missing", None),
@@ -1329,9 +1442,6 @@ async fn task_prepare(id: Value, params: &Value, store: &Mutex<EventStore>) -> V
                 return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
             }
         };
-        if task.state == TaskState::Preparing {
-            return rpc_result(id, json!(task));
-        }
         if task.state != TaskState::AwaitingPreparationApproval {
             return rpc_error(
                 id,
@@ -1350,19 +1460,9 @@ async fn task_prepare(id: Value, params: &Value, store: &Mutex<EventStore>) -> V
                 return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
             }
         };
-        let contract = match store.task_contract(task_id) {
-            Ok(Some(contract)) => contract,
-            Ok(None) => return rpc_error(id, -32042, "task contract is missing", None),
-            Err(error) => {
-                return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
-            }
-        };
-        (task, binding, contract)
+        (task, binding)
     };
-    let Some(repository_path) = binding.managed_clone().or_else(|| binding.user_checkout()) else {
-        return rpc_error(id, -32043, "managed repository is unavailable", None);
-    };
-    let repository = Path::new(repository_path);
+    let repository = Path::new(&preview.repository_path);
     if !repository.is_dir() {
         let token = match github_app_installation_token(
             binding.full_name(),
@@ -1404,13 +1504,13 @@ async fn task_prepare(id: Value, params: &Value, store: &Mutex<EventStore>) -> V
             );
         }
     }
-    let worktree = Path::new(binding.worktree_root()).join(task.id.to_string());
-    let branch = format!("patchwright/{}", task.id);
-    let start_sha = contract.head_sha().or_else(|| contract.base_sha());
+    let worktree = Path::new(&preview.worktree_path);
+    let branch = &preview.branch;
+    let start_sha = Some(preview.source_sha.as_str());
     if worktree.exists() {
-        match crate::RepositoryService::inspect(&worktree) {
+        match crate::RepositoryService::inspect(worktree) {
             Ok(inspection)
-                if inspection.branch == branch
+                if inspection.branch == *branch
                     && start_sha.is_none_or(|expected| inspection.head_sha == expected) => {}
             Ok(_) => {
                 return rpc_error(id, -32043, "existing task worktree does not match", None);
@@ -1425,7 +1525,7 @@ async fn task_prepare(id: Value, params: &Value, store: &Mutex<EventStore>) -> V
             }
         }
     } else if let Err(error) =
-        crate::WorktreeService::prepare_at(repository, &worktree, &branch, start_sha)
+        crate::WorktreeService::prepare_at(repository, worktree, branch, start_sha)
     {
         return rpc_error(
             id,
@@ -1434,7 +1534,7 @@ async fn task_prepare(id: Value, params: &Value, store: &Mutex<EventStore>) -> V
             Some(error.to_string()),
         );
     }
-    task.repository_path = worktree.to_string_lossy().into_owned();
+    task.repository_path.clone_from(&preview.worktree_path);
     if let Err(error) = task.transition(TaskState::Preparing) {
         return rpc_error(
             id,

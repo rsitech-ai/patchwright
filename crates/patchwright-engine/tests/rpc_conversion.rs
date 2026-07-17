@@ -171,6 +171,7 @@ async fn rpc_binds_repository_then_previews_and_creates_idempotently() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn rpc_plans_and_prepares_an_isolated_worktree_before_codex() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -241,9 +242,60 @@ async fn rpc_plans_and_prepares_an_isolated_worktree_before_codex() {
     .await;
     assert_eq!(planned["result"]["state"], "awaitingPreparationApproval");
 
-    let prepared = call(
+    let unapproved = call(
         &mut stream,
         json!({"jsonrpc":"2.0","id":4,"method":"task.prepare","params":{"taskId":task_id}}),
+    )
+    .await;
+    assert_eq!(unapproved["error"]["code"], -32602);
+
+    let preview = call(
+        &mut stream,
+        json!({"jsonrpc":"2.0","id":5,"method":"task.preparation.preview","params":{"taskId":task_id}}),
+    )
+    .await;
+    assert_eq!(preview["result"]["repositoryFullName"], "acme/widget");
+    assert_eq!(preview["result"]["sourceSha"], base_sha);
+    assert_eq!(
+        preview["result"]["worktreePath"],
+        worktree_root.join(task_id).to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        preview["result"]["fingerprint"]["actionKind"],
+        "prepareWorktree"
+    );
+
+    let encoded_preview = serde_json::to_string(&preview["result"]).unwrap();
+    let approval = call(
+        &mut stream,
+        json!({"jsonrpc":"2.0","id":6,"method":"task.preparation.approve","params":{
+            "preview":encoded_preview,"approvedBy":"Patchwright operator"
+        }}),
+    )
+    .await;
+    assert_eq!(approval["result"]["class"], "preparation");
+    assert_eq!(approval["result"]["capability"], "prepareWorktree");
+
+    let mut wrong_preview = preview["result"].clone();
+    wrong_preview["worktreePath"] = json!(directory.path().join("wrong").to_string_lossy());
+    let rejected = call(
+        &mut stream,
+        json!({"jsonrpc":"2.0","id":7,"method":"task.prepare","params":{
+            "taskId":task_id,
+            "preview":serde_json::to_string(&wrong_preview).unwrap(),
+            "approvalId":approval["result"]["id"].as_str().unwrap()
+        }}),
+    )
+    .await;
+    assert_eq!(rejected["error"]["code"], -32046);
+
+    let prepared = call(
+        &mut stream,
+        json!({"jsonrpc":"2.0","id":8,"method":"task.prepare","params":{
+            "taskId":task_id,
+            "preview":serde_json::to_string(&preview["result"]).unwrap(),
+            "approvalId":approval["result"]["id"].as_str().unwrap()
+        }}),
     )
     .await;
     assert_eq!(prepared["result"]["state"], "preparing");
@@ -256,10 +308,24 @@ async fn rpc_plans_and_prepares_an_isolated_worktree_before_codex() {
     );
     let inspection = call(
         &mut stream,
-        json!({"jsonrpc":"2.0","id":5,"method":"task.worktree","params":{"taskId":task_id}}),
+        json!({"jsonrpc":"2.0","id":9,"method":"task.worktree","params":{"taskId":task_id}}),
     )
     .await;
     assert_eq!(inspection["result"]["headSha"], base_sha);
     assert_eq!(inspection["result"]["dirty"], false);
+
+    let replay = call(
+        &mut stream,
+        json!({"jsonrpc":"2.0","id":10,"method":"task.prepare","params":{
+            "taskId":task_id,
+            "preview":serde_json::to_string(&preview["result"]).unwrap(),
+            "approvalId":approval["result"]["id"].as_str().unwrap()
+        }}),
+    )
+    .await;
+    assert!(
+        replay.get("error").is_some(),
+        "replayed approval must fail: {replay}"
+    );
     server.abort();
 }

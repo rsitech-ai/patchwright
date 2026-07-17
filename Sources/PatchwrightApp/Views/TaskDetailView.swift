@@ -7,6 +7,7 @@ struct TaskDetailView: View {
     @SceneStorage("patchwright.taskWorkbenchTab") private var tabRaw = TaskWorkbenchTab.overview.rawValue
     @State private var deliveryBody = ""
     @State private var deliveryApprovalRequest: DeliveryApprovalRequest?
+    @State private var preparationApprovalRequest: PreparationPreview?
     @State private var mergeMethod = GitHubMergeMethod.squash
     @State private var reviewEvent = GitHubReviewEvent.comment
 
@@ -27,6 +28,9 @@ struct TaskDetailView: View {
         }
         .sheet(item: $deliveryApprovalRequest) { request in
             DeliveryApprovalSheet(store: store, task: task, preview: request.preview)
+        }
+        .sheet(item: $preparationApprovalRequest) { preview in
+            PreparationApprovalSheet(store: store, preview: preview)
         }
         .task(id: task.id) {
             while !Task.isCancelled {
@@ -148,8 +152,11 @@ struct TaskDetailView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(busy)
             } else if task.state == .awaitingPreparationApproval {
-                Button("Approve & Prepare Worktree", systemImage: "checkmark.shield.fill") {
-                    Task { await store.prepareTask(taskID: task.id) }
+                Button("Review Worktree Preparation", systemImage: "checkmark.shield.fill") {
+                    Task {
+                        await store.previewPreparation(taskID: task.id)
+                        preparationApprovalRequest = store.preparationPreviews[task.id]
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(busy)

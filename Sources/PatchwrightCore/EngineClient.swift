@@ -150,10 +150,36 @@ public extension EngineServing {
         )
     }
 
-    func prepareTask(taskID: UUID) async throws -> EngineeringTask {
+    func previewPreparation(taskID: UUID) async throws -> PreparationPreview {
+        try await call(
+            method: "task.preparation.preview",
+            params: ["taskId": taskID.uuidString],
+            as: PreparationPreview.self
+        )
+    }
+
+    func approvePreparation(
+        _ preview: PreparationPreview,
+        approvedBy: String
+    ) async throws -> PreparationApproval {
+        try await call(
+            method: "task.preparation.approve",
+            params: ["preview": try encodeRPCParameter(preview), "approvedBy": approvedBy],
+            as: PreparationApproval.self
+        )
+    }
+
+    func prepareTask(
+        preview: PreparationPreview,
+        approvalID: UUID
+    ) async throws -> EngineeringTask {
         try await call(
             method: "task.prepare",
-            params: ["taskId": taskID.uuidString],
+            params: [
+                "taskId": preview.taskId.uuidString,
+                "preview": try encodeRPCParameter(preview),
+                "approvalId": approvalID.uuidString,
+            ],
             as: EngineeringTask.self
         )
     }

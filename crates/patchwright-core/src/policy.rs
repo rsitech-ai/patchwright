@@ -11,6 +11,7 @@ const MAX_APPROVAL_DURATION: Duration = Duration::minutes(30);
 #[serde(rename_all = "camelCase")]
 pub enum Capability {
     ReadRepository,
+    PrepareWorktree,
     ModifyWorktree,
     RunKnownCommand,
     AccessNetwork,
@@ -37,6 +38,7 @@ impl Capability {
     pub const fn action_kind(self) -> &'static str {
         match self {
             Self::ReadRepository => "readRepository",
+            Self::PrepareWorktree => "prepareWorktree",
             Self::ModifyWorktree => "modifyWorktree",
             Self::RunKnownCommand => "runKnownCommand",
             Self::AccessNetwork => "accessNetwork",
@@ -63,6 +65,7 @@ impl Capability {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ApprovalClass {
+    Preparation,
     CodexRuntime,
     LocalCapability,
     GitHubDelivery,
@@ -384,6 +387,7 @@ pub enum ApprovalError {
 
 const fn required_class(capability: Capability) -> ApprovalClass {
     match capability {
+        Capability::PrepareWorktree => ApprovalClass::Preparation,
         Capability::MergePullRequest | Capability::EnqueuePullRequest => ApprovalClass::Merge,
         Capability::AccessNetwork | Capability::InstallDependency | Capability::ModifyWorkflow => {
             ApprovalClass::LocalCapability
@@ -408,6 +412,7 @@ const fn required_class(capability: Capability) -> ApprovalClass {
 
 const fn class_supports(class: ApprovalClass, capability: Capability) -> bool {
     match class {
+        ApprovalClass::Preparation => matches!(capability, Capability::PrepareWorktree),
         ApprovalClass::CodexRuntime => matches!(
             capability,
             Capability::ModifyWorktree | Capability::RunKnownCommand
