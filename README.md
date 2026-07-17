@@ -73,11 +73,18 @@ cargo run -p patchwright-engine -- serve \
   --socket "$HOME/.patchwright/engine.sock" \
   --database "$HOME/.patchwright/patchwright.sqlite3"
 
-PATCHWRIGHT_GITHUB_WEBHOOK_SECRET='runtime-secret' \
-cargo run -p patchwright-relay -- --address 127.0.0.1:8787
+PATCHWRIGHT_GITHUB_WEBHOOK_SECRET_FILE="$HOME/.patchwright/webhook-secret" \
+cargo run -p patchwright-relay -- serve --address 127.0.0.1:8787
 ```
 
-The relay binds to loopback by default. GitHub App metadata and a Keychain or owner-only protected-key reference are your configuration and are never committed. See [Choose only the access you need](#choose-only-the-access-you-need). The engine brokers repository-scoped, short-lived installation tokens for installed-repository ingestion and every approved mutation.
+The relay binds to loopback by default. Create the webhook secret file outside
+the checkout with owner-only mode `0600`; the file contains the raw webhook
+secret and must never be committed or passed as a command-line argument. GitHub
+App metadata and a Keychain or owner-only protected-key reference are your
+configuration and are never committed. See [Choose only the access you
+need](#choose-only-the-access-you-need). The engine brokers repository-scoped,
+short-lived installation tokens for installed-repository ingestion and every
+approved mutation.
 
 ## Direct macOS distribution
 

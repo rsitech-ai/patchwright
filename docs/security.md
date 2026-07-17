@@ -2,7 +2,13 @@
 
 GitHub issue text, comments, repository files, branch names, diffs, and command output are untrusted data. Only configured policy and an unexpired action-specific approval can authorize a mutation. Commands cross the RPC boundary as executable plus argv; shell strings are not accepted.
 
-The webhook relay verifies `X-Hub-Signature-256` against the raw bounded body before JSON parsing and deduplicates `X-GitHub-Delivery`. Run it behind authenticated HTTPS termination. Supply webhook secrets, GitHub App private keys, and installation identifiers only through a secret manager or process environment.
+The webhook relay verifies `X-Hub-Signature-256` against the raw bounded body before JSON parsing and deduplicates `X-GitHub-Delivery`. Run it behind authenticated HTTPS termination with the required `serve` subcommand. Pass `PATCHWRIGHT_GITHUB_WEBHOOK_SECRET_FILE` as an absolute path to a regular, non-symlink secret file owned by the operator with owner-only mode `0600`; never put the raw secret in an environment variable, command line, repository file, or log. Supply GitHub App private keys and installation identifiers only through the documented protected reference and runtime configuration boundaries.
+
+GitHub does not automatically redeliver a failed webhook after the relay
+restarts. An authorized GitHub App owner must request redelivery from the App's
+Recent deliveries page or through GitHub's authenticated redelivery API. Treat
+that as an operator action and preserve the original delivery ID for relay
+deduplication.
 
 Read-only desktop ingestion obtains a short-lived credential view from `gh auth token` at sync time. The engine never logs or persists that token, follows pagination only on the configured API origin, bounds repository/resource fan-out, and atomically replaces completed snapshots. The local SQLite database is forced to mode `0600`; `~/.patchwright` is forced to mode `0700` by the app supervisor. GitHub content remains untrusted data even though it is authenticated.
 
