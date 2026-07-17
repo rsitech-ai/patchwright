@@ -22,7 +22,7 @@ use uuid::Uuid;
 use super::protocol::MAX_LINE_BYTES;
 
 const COMPATIBLE_VERSION_PREFIX: &str = "codex-cli 0.144.";
-const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const ALLOWED_ENVIRONMENT_KEYS: &[&str] = &[
     "CODEX_HOME",
     "HOME",
