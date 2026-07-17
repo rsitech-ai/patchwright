@@ -1,6 +1,6 @@
 use crate::{
     CancellationState, GitHubAccount, GitHubRepository, GitHubRepositorySnapshot, Job,
-    JobCheckpoint, JobId, JobState, MonitorRecord, TaskCheckpoint,
+    JobCheckpoint, JobId, JobState, MonitorRecord, TaskCheckpoint, VerificationEvidence,
     codex::service::CodexRuntimeApproval,
     codex::session::{CodexEventDraft, CodexEventRecord, CodexSessionRecord, CodexSessionStatus},
     jobs::validate_summary,
@@ -111,6 +111,33 @@ impl EventStore {
         )?;
         let rows = statement.query_map([task_id.to_string()], |row| row.get::<_, String>(0))?;
         rows.map(|row| decode_json_row(row, "task checkpoint"))
+            .collect::<Result<Vec<_>>>()
+    }
+
+    pub fn save_verification_evidence(&self, evidence: &VerificationEvidence) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO verification_evidence(
+                 task_id, run_id, ordinal, success, payload, completed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                evidence.task_id.to_string(),
+                evidence.run_id.to_string(),
+                evidence.ordinal,
+                evidence.success,
+                serde_json::to_string(evidence)?,
+                evidence.completed_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn verification_evidence(&self, task_id: TaskId) -> Result<Vec<VerificationEvidence>> {
+        let mut statement = self.connection.prepare(
+            "SELECT payload FROM verification_evidence
+             WHERE task_id = ?1 ORDER BY completed_at, run_id, ordinal",
+        )?;
+        let rows = statement.query_map([task_id.to_string()], |row| row.get::<_, String>(0))?;
+        rows.map(|row| decode_json_row(row, "verification evidence"))
             .collect::<Result<Vec<_>>>()
     }
 
@@ -1324,5 +1351,19 @@ const MIGRATIONS: &[(u32, &str)] = &[
              updated_at TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS monitors_task ON monitors(task_id, updated_at);
-         CREATE INDEX IF NOT EXISTS monitors_due ON monitors(state, next_attempt_at);")
+         CREATE INDEX IF NOT EXISTS monitors_due ON monitors(state, next_attempt_at);"),
+    (
+        8,
+        "CREATE TABLE IF NOT EXISTS verification_evidence (
+             task_id TEXT NOT NULL,
+             run_id TEXT NOT NULL,
+             ordinal INTEGER NOT NULL,
+             success INTEGER NOT NULL,
+             payload TEXT NOT NULL,
+             completed_at TEXT NOT NULL,
+             PRIMARY KEY(task_id, run_id, ordinal)
+         );
+         CREATE INDEX IF NOT EXISTS verification_evidence_task
+             ON verification_evidence(task_id, completed_at);",
+    ),
 ];

@@ -304,7 +304,9 @@ async fn dispatch(request: Request, state: &ServerState) -> Value {
         "task.worktree" => task_worktree(request.id, &request.params, store),
         "task.plan" => task_plan(request.id, &request.params, store),
         "task.prepare" => task_prepare(request.id, &request.params, store).await,
-        "task.readyForDelivery" => task_ready_for_delivery(request.id, &request.params, store),
+        "task.readyForDelivery" => {
+            task_ready_for_delivery(request.id, &request.params, store).await
+        }
         "task.previewFromGitHub" => preview_task_from_github(request.id, &request.params, store),
         "task.createFromGitHub" => create_task_from_github(request.id, &request.params, store),
         "task.reconcileGitHub" => task_reconcile_github(request.id, &request.params, store).await,
@@ -1467,76 +1469,15 @@ async fn task_prepare(id: Value, params: &Value, store: &Mutex<EventStore>) -> V
     rpc_result(id, json!(task))
 }
 
-fn task_ready_for_delivery(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+async fn task_ready_for_delivery(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
     let task_id = match required_task_id(params) {
         Ok(task_id) => task_id,
         Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
     };
-    let store = store.lock().expect("event store lock poisoned");
-    let mut task = match store.load_task(task_id) {
-        Ok(Some(task)) => task,
-        Ok(None) => return rpc_error(id, -32040, "task is missing", None),
-        Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
-    };
-    if task.state == TaskState::AwaitingDeliveryApproval {
-        return rpc_result(id, json!(task));
+    match crate::verify_task_for_delivery(task_id, store).await {
+        Ok(task) => rpc_result(id, json!(task)),
+        Err(error) => rpc_error(id, -32045, "verification failed", Some(error.to_string())),
     }
-    if task.state == TaskState::Implementing {
-        if let Err(error) = task.transition(TaskState::Verifying) {
-            return rpc_error(id, -32045, "verification failed", Some(error.to_string()));
-        }
-        if let Err(error) = store.save_task(&task, "Implementation submitted for verification") {
-            return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
-        }
-    }
-    if task.state != TaskState::Verifying {
-        return rpc_error(
-            id,
-            -32045,
-            "task is not ready for verification",
-            Some(task.state.to_string()),
-        );
-    }
-    let inspection = match crate::RepositoryService::inspect(Path::new(&task.repository_path)) {
-        Ok(inspection) => inspection,
-        Err(error) => return rpc_error(id, -32045, "verification failed", Some(error.to_string())),
-    };
-    if inspection.dirty {
-        return rpc_error(
-            id,
-            -32045,
-            "verification failed",
-            Some("task worktree has uncommitted changes".into()),
-        );
-    }
-    if let Err(error) = task.transition(TaskState::Reviewing) {
-        return rpc_error(id, -32045, "review failed", Some(error.to_string()));
-    }
-    if let Err(error) = store.save_task(&task, "Clean task worktree reviewed") {
-        return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
-    }
-    if let Err(error) = task.transition(TaskState::AwaitingDeliveryApproval) {
-        return rpc_error(id, -32045, "delivery gate failed", Some(error.to_string()));
-    }
-    let checkpoint = match crate::TaskCheckpoint::new(
-        task.id,
-        task.state,
-        "Verified clean commit is awaiting exact GitHub delivery approval",
-    ) {
-        Ok(checkpoint) => checkpoint,
-        Err(error) => {
-            return rpc_error(id, -32045, "delivery gate failed", Some(error.to_string()));
-        }
-    };
-    task.checkpoint_id = Some(checkpoint.id());
-    if let Err(error) = store.save_task_with_checkpoint(
-        &task,
-        "Task is ready for approval-bound GitHub delivery",
-        &checkpoint,
-    ) {
-        return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
-    }
-    rpc_result(id, json!(task))
 }
 
 fn github_status(id: Value, store: &Mutex<EventStore>) -> Value {
