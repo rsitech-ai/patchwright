@@ -70,7 +70,6 @@ impl RelayState {
             .inbox
             .lock()
             .map_err(|_| anyhow::anyhow!("relay inbox lock poisoned"))?;
-        let payload_digest = sha256_hex(&delivery.payload);
         let inserted = connection.execute(
             "INSERT OR IGNORE INTO webhook_deliveries
                 (delivery_id, event, action, payload, payload_sha256, received_at)
@@ -80,7 +79,7 @@ impl RelayState {
                 delivery.event,
                 delivery.action,
                 delivery.payload,
-                payload_digest,
+                delivery.payload_sha256,
                 chrono::Utc::now().to_rfc3339(),
             ],
         )?;
@@ -96,6 +95,7 @@ struct WebhookDelivery {
     event: String,
     action: String,
     payload: Vec<u8>,
+    payload_sha256: String,
 }
 
 enum RecordOutcome {
@@ -155,11 +155,22 @@ async fn github_webhook(
         }
     };
 
+    let sanitized_payload = match sanitized_payload(&event, &action, &body) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to sanitize verified webhook delivery");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "webhook inbox unavailable",
+            );
+        }
+    };
     let delivery = WebhookDelivery {
         delivery_id: delivery,
         event,
         action,
-        payload: body.to_vec(),
+        payload: sanitized_payload,
+        payload_sha256: sha256_hex(&body),
     };
     match tokio::task::spawn_blocking(move || state.record(&delivery)).await {
         Ok(Ok(RecordOutcome::Accepted)) => (StatusCode::ACCEPTED, "accepted"),
@@ -179,6 +190,38 @@ async fn github_webhook(
             )
         }
     }
+}
+
+fn sanitized_payload(event: &str, action: &str, body: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let value: serde_json::Value = serde_json::from_slice(body)?;
+    let repository = value.get("repository");
+    let (entity_number, entity_id) = match event {
+        "pull_request" => (value.pointer("/pull_request/number"), None),
+        "issue_comment" => (value.pointer("/issue/number"), value.pointer("/comment/id")),
+        "pull_request_review" => (
+            value.pointer("/pull_request/number"),
+            value.pointer("/review/id"),
+        ),
+        "pull_request_review_comment" => (
+            value.pointer("/pull_request/number"),
+            value.pointer("/comment/id"),
+        ),
+        "check_run" => (None, value.pointer("/check_run/id")),
+        "check_suite" => (None, value.pointer("/check_suite/id")),
+        "workflow_run" => (None, value.pointer("/workflow_run/id")),
+        "ping" => (None, value.get("hook_id")),
+        _ => (None, None),
+    };
+    serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 1,
+        "event": event,
+        "action": action,
+        "repositoryId": repository.and_then(|item| item.get("id")),
+        "repositoryFullName": repository.and_then(|item| item.get("full_name")),
+        "entityNumber": entity_number,
+        "entityId": entity_id,
+    }))
+    .map_err(Into::into)
 }
 
 #[derive(Deserialize)]
