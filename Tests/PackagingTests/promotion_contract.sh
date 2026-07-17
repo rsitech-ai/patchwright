@@ -135,9 +135,11 @@ signature_dmg = signature_root / "Patchwright-0.1.0.dmg"
 signature_template = signature_root / "appcast-template.xml"
 signature_dmg.write_bytes(DMG_BYTES)
 signature_template.write_text(appcast_content("__ARCHIVE_SIGNATURE__"), encoding="utf-8")
+swift_environment = os.environ.copy()
+swift_environment.pop("SDKROOT", None)
 signature_result = subprocess.run(
     ["swift", str(root / "Tests/PackagingTests/generate_ed25519_fixture.swift"), str(signature_dmg), str(signature_template)],
-    check=True, stdout=subprocess.PIPE, text=True,
+    check=True, env=swift_environment, stdout=subprocess.PIPE, text=True,
 )
 SIGNATURES = json.loads(signature_result.stdout)
 FIXTURE_APPCAST_CONTENT = appcast_content(SIGNATURES["archive_signature"])

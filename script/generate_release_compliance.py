@@ -302,7 +302,7 @@ def created_timestamp() -> str:
         raise ComplianceError("SOURCE_DATE_EPOCH must be an integer") from error
     if epoch < 0:
         raise ComplianceError("SOURCE_DATE_EPOCH must not be negative")
-    return dt.datetime.fromtimestamp(epoch, tz=dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return dt.datetime.fromtimestamp(epoch, tz=dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def build_documents(
