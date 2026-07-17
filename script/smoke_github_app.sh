@@ -297,8 +297,8 @@ COMMENT_RESULT="$(deliver "$ISSUE_TASK_ID" "$(jq -cn --argjson issueNumber "$ISS
   || die "approval-gated comment delivery failed"
 PR_RESULT="$(deliver "$ISSUE_TASK_ID" "$(jq -cn \
   --arg title "[Patchwright E2E] Approval-gated draft" \
-  --arg head "$BRANCH" --arg base "$BASE_BRANCH" --arg body "$MARKER" \
-  '{kind:"draftPullRequest",title:$title,head:$head,base:$base,body:$body}')" "$BASE_SHA" "" 1)" \
+  --arg head "$BRANCH" --arg base "$BASE_BRANCH" --arg expectedBaseSha "$BASE_SHA" --arg body "$MARKER" \
+  '{kind:"draftPullRequest",title:$title,head:$head,base:$base,expectedBaseSha:$expectedBaseSha,body:$body}')" "$BASE_SHA" "" 1)" \
   || die "approval-gated draft pull request delivery failed"
 PR_NUMBER="$(jq -er '.result.number' <<<"$PR_RESULT")" || die "draft pull request number is missing"
 PR_URL="$(jq -er '.result.htmlUrl' <<<"$PR_RESULT")" || die "draft pull request URL is missing"
