@@ -11,7 +11,7 @@ pub use contract::{
     GitHubPullRequestSource, GitHubPullRequestSourceInput, InstructionDigest, RepositoryBinding,
     RepositoryBindingDraft, RepositoryBindingId, RepositoryPermissionLevel,
     RepositoryPermissionSnapshot, RiskClass, SensitivePath, TaskContract, TaskContractDraft,
-    TaskSource, VerificationCommand,
+    TaskContractSnapshot, TaskSource, VerificationCommand,
 };
 pub use domain::{
     Evidence, Finding, FindingSeverity, Task, TaskEvent, TaskId, TaskInterruption, TaskState,

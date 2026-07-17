@@ -79,6 +79,52 @@ struct WorkspaceTableView: View {
     }
 
     private var pullRequestTable: some View {
+        GeometryReader { geometry in
+            switch PullRequestTableDensity.resolve(availableWidth: geometry.size.width) {
+            case .compact:
+                compactPullRequestTable
+            case .expanded:
+                expandedPullRequestTable
+            }
+        }
+        .onChange(of: store.selectedWorkItemID) { _, selectedID in
+            selectWorkItem(selectedID)
+        }
+    }
+
+    private var compactPullRequestTable: some View {
+        Table(pullRequests, selection: $store.selectedWorkItemID) {
+            TableColumn("Pull Request") { item in
+                let decision = store.queueDecision(for: item)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 5) {
+                        Text(decision?.tier.label ?? store.queueState(for: item).label)
+                            .font(.caption.weight(.semibold))
+                        Text("#\(item.number) \(item.title)").lineLimit(1)
+                    }
+                    Text("\(item.repositoryFullName) · \(item.author)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .help(decision?.reasons.joined(separator: "\n") ?? "No workflow decision")
+                .accessibilityElement(children: .combine)
+            }
+            .width(min: 190, ideal: 360)
+            TableColumn("Status") { item in
+                VStack(alignment: .leading, spacing: 2) {
+                    StatusText(value: item.ciHealth ?? "unknown")
+                    StatusText(value: item.reviewDecision ?? "required")
+                        .font(.caption)
+                }
+            }
+            .width(min: 90, ideal: 110)
+            TableColumn("Updated") { item in TimestampText(date: item.updatedAt) }
+                .width(min: 85, ideal: 105)
+        }
+    }
+
+    private var expandedPullRequestTable: some View {
         Table(pullRequests, selection: $store.selectedWorkItemID) {
             TableColumn("Priority") { item in
                 let decision = store.queueDecision(for: item)
@@ -117,10 +163,12 @@ struct WorkspaceTableView: View {
             }
             .width(min: 95, ideal: 120)
         }
-        .onChange(of: store.selectedWorkItemID) { _, selectedID in
-            guard let selectedID, let item = store.githubWorkItems.first(where: { $0.id == selectedID }) else { return }
-            Task { await store.selectWorkItem(item) }
-        }
+    }
+
+    private func selectWorkItem(_ selectedID: GitHubWorkItem.ID?) {
+        guard let selectedID,
+              let item = store.githubWorkItems.first(where: { $0.id == selectedID }) else { return }
+        Task { await store.selectWorkItem(item) }
     }
 
     private var repositoryTable: some View {

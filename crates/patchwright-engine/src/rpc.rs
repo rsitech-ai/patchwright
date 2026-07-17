@@ -1687,7 +1687,7 @@ fn task_contract(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value 
     match store
         .lock()
         .expect("event store lock poisoned")
-        .task_contract(task_id)
+        .task_contract_snapshot(task_id)
     {
         Ok(Some(contract)) => rpc_result(id, json!(contract)),
         Ok(None) => rpc_error(id, -32045, "task contract is missing", None),

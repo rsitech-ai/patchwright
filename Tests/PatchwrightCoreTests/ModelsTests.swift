@@ -2,6 +2,33 @@ import XCTest
 @testable import PatchwrightCore
 
 final class ModelsTests: XCTestCase {
+    func testDecodesLegacyContractSnapshotForReadOnlyAudit() throws {
+        let data = Data(#"{"version":1,"taskId":"5A8F17C3-733B-46EE-AE48-015D091A0B91","source":{"kind":"localRequest"},"repositoryBindingId":"11111111-1111-1111-1111-111111111111","goal":"Historical task outcome","acceptanceCriteria":["Preserve the original audit record"],"baseSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","headSha":null,"instructionDigests":[],"verificationCommands":[],"requiredCapabilities":[],"risk":"moderate","sensitivePaths":[],"dependencies":[]}"#.utf8)
+
+        let snapshot = try JSONDecoder.patchwright.decode(TaskContractSnapshot.self, from: data)
+
+        XCTAssertTrue(snapshot.isLegacyReadOnly)
+        XCTAssertEqual(snapshot.version, 1)
+        XCTAssertEqual(snapshot.goal, "Historical task outcome")
+        XCTAssertTrue(snapshot.verificationCommands.isEmpty)
+    }
+
+    func testLegacyContractSnapshotRejectsMalformedPartialIntegrityEvidence() throws {
+        let data = Data(#"{"version":1,"taskId":"5A8F17C3-733B-46EE-AE48-015D091A0B91","source":{"kind":"localRequest"},"repositoryBindingId":"11111111-1111-1111-1111-111111111111","goal":"Historical task outcome","acceptanceCriteria":["Preserve the original audit record"],"baseSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","headSha":null,"sourceSha256":"not-a-digest","instructionDigests":[],"verificationCommands":[],"requiredCapabilities":[],"risk":"moderate","sensitivePaths":[],"dependencies":[]}"#.utf8)
+
+        XCTAssertThrowsError(
+            try JSONDecoder.patchwright.decode(TaskContractSnapshot.self, from: data)
+        )
+    }
+
+    func testLegacyContractSnapshotRejectsSingleValidIntegrityHash() throws {
+        let data = Data(#"{"version":1,"taskId":"5A8F17C3-733B-46EE-AE48-015D091A0B91","source":{"kind":"localRequest"},"repositoryBindingId":"11111111-1111-1111-1111-111111111111","goal":"Historical task outcome","acceptanceCriteria":["Preserve the original audit record"],"baseSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","headSha":null,"sourceSha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","instructionDigests":[],"verificationCommands":[],"requiredCapabilities":[],"risk":"moderate","sensitivePaths":[],"dependencies":[]}"#.utf8)
+
+        XCTAssertThrowsError(
+            try JSONDecoder.patchwright.decode(TaskContractSnapshot.self, from: data)
+        )
+    }
+
     func testDecodesExactPreparationPreviewAndApprovalBoundary() throws {
         let previewData = Data(#"{"taskId":"5A8F17C3-733B-46EE-AE48-015D091A0B91","repositoryBindingId":"11111111-1111-1111-1111-111111111111","repositoryFullName":"acme/widget","repositoryPath":"/tmp/repository","sourceSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","worktreePath":"/tmp/worktrees/task","branch":"patchwright/task","invalidationGeneration":7,"policySha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","instructionSha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","contract":{"version":1,"taskId":"5A8F17C3-733B-46EE-AE48-015D091A0B91","source":{"kind":"localRequest"},"repositoryBindingId":"11111111-1111-1111-1111-111111111111","goal":"Fix login","acceptanceCriteria":["Tests pass"],"baseSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","headSha":null,"sourceSha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","repositorySha256":"9999999999999999999999999999999999999999999999999999999999999999","instructionDigests":[{"source":"resolvedInstructions","sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","precedence":0}],"verificationCommands":[{"program":"cargo","args":["test","--workspace"]}],"requiredCapabilities":["prepareWorktree"],"risk":"moderate","sensitivePaths":[{"path":"Cargo.lock","reason":"Dependency boundary"}],"dependencies":[]},"fingerprint":{"taskId":"5A8F17C3-733B-46EE-AE48-015D091A0B91","githubRepositoryId":42,"repositoryFullName":"acme/widget","actionKind":"prepareWorktree","pullRequestNumber":null,"branch":"patchwright/task","headSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseSha":null,"payloadSha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","policySha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","instructionSha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","invalidationGeneration":7}}"#.utf8)
         let preview = try JSONDecoder.patchwright.decode(PreparationPreview.self, from: previewData)

@@ -5,6 +5,23 @@ import XCTest
 
 final class WorkspacePresentationTests: XCTestCase {
     @MainActor
+    func testRefreshPreservesLegacyContractWithoutLifecycleError() async throws {
+        let taskID = UUID(uuidString: "5A8F17C3-733B-46EE-AE48-015D091A0B91")!
+        let store = WorkspaceStore(
+            engine: LegacyContractEngine(),
+            healthRetryAttempts: 1,
+            preferences: MemoryPreferences()
+        )
+
+        await store.refreshTaskContract(taskID: taskID)
+
+        let contract = try XCTUnwrap(store.taskContracts[taskID])
+        XCTAssertTrue(contract.isLegacyReadOnly)
+        XCTAssertEqual(contract.goal, "Historical task outcome")
+        XCTAssertNil(store.taskLifecycleError)
+    }
+
+    @MainActor
     func testRefreshRestoresTasksQueueAndAttentionSections() async {
         let preferences = MemoryPreferences()
         let store = WorkspaceStore(
@@ -96,12 +113,32 @@ final class WorkspacePresentationTests: XCTestCase {
         XCTAssertTrue(value.exact.contains("2025") || value.exact.contains("2026"))
     }
 
+    func testPullRequestTableUsesCompactColumnsAtTypicalSplitWidth() {
+        XCTAssertEqual(PullRequestTableDensity.resolve(availableWidth: 870), .compact)
+        XCTAssertEqual(PullRequestTableDensity.resolve(availableWidth: 1_100), .expanded)
+    }
+
     func testExplicitEmptyPartialCancelledAndBlockedStates() throws {
         XCTAssertEqual(WorkspaceContentState.resolve(hasContent: false, loading: false, error: nil), .empty)
         XCTAssertEqual(WorkspaceContentState.resolve(hasContent: true, loading: false, error: "One repo failed"), .partial("One repo failed"))
         XCTAssertEqual(WorkspaceContentState.resolve(hasContent: false, loading: false, error: "Offline"), .blocked("Offline"))
         XCTAssertEqual(TaskSurfaceState.resolve(state: .cancelled, reason: nil), .cancelled)
         XCTAssertEqual(TaskSurfaceState.resolve(state: .blocked, reason: "Binding required"), .blocked("Binding required"))
+        XCTAssertEqual(TaskSurfaceState.resolve(state: .completed, reason: nil), .completed)
+    }
+}
+
+private actor LegacyContractEngine: EngineServing {
+    func call<Result: Decodable & Sendable>(
+        method: String,
+        params: [String: String],
+        as type: Result.Type
+    ) async throws -> Result {
+        guard method == "task.contract" else {
+            throw EngineError.remote(code: -32601, message: "method not found")
+        }
+        let json = #"{"version":1,"taskId":"5A8F17C3-733B-46EE-AE48-015D091A0B91","source":{"kind":"localRequest"},"repositoryBindingId":"11111111-1111-1111-1111-111111111111","goal":"Historical task outcome","acceptanceCriteria":["Preserve the original audit record"],"baseSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","headSha":null,"instructionDigests":[],"verificationCommands":[],"requiredCapabilities":[],"risk":"moderate","sensitivePaths":[],"dependencies":[]}"#
+        return try JSONDecoder.patchwright.decode(Result.self, from: Data(json.utf8))
     }
 }
 
