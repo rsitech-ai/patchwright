@@ -35,6 +35,7 @@ public final class WorkspaceStore: ObservableObject {
     @Published public private(set) var taskLifecycleBusyTaskIDs: Set<UUID> = []
     @Published public private(set) var taskLifecycleError: String?
     @Published public private(set) var worktreeByTask: [UUID: WorktreeInspection] = [:]
+    @Published public private(set) var taskContracts: [UUID: TaskContract] = [:]
     @Published public private(set) var preparationPreviews: [UUID: PreparationPreview] = [:]
     @Published public private(set) var preparationApprovals: [UUID: PreparationApproval] = [:]
     @Published public private(set) var repositorySnapshotByTask: [UUID: GitHubRepositorySnapshot] = [:]
@@ -186,9 +187,20 @@ public final class WorkspaceStore: ObservableObject {
         defer { taskLifecycleBusyTaskIDs.remove(taskID) }
         do {
             replaceTask(try await engine.planTask(taskID: taskID))
+            taskContracts[taskID] = try await engine.taskContract(taskID: taskID)
             taskLifecycleError = nil
             await refreshTaskTimeline(taskID: taskID)
         } catch {
+            taskLifecycleError = error.localizedDescription
+        }
+    }
+
+    public func refreshTaskContract(taskID: UUID) async {
+        do {
+            taskContracts[taskID] = try await engine.taskContract(taskID: taskID)
+            taskLifecycleError = nil
+        } catch {
+            taskContracts.removeValue(forKey: taskID)
             taskLifecycleError = error.localizedDescription
         }
     }
@@ -821,6 +833,7 @@ public final class WorkspaceStore: ObservableObject {
             var task = outcome.task
             if task.state == .discovered {
                 task = try await engine.planTask(taskID: task.id)
+                taskContracts[task.id] = try await engine.taskContract(taskID: task.id)
             }
             replaceTask(task)
             selectedTaskID = outcome.task.id

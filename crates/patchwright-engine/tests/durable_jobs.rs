@@ -283,6 +283,8 @@ fn bindings_contracts_and_approval_action_digests_survive_restart() {
         acceptance_criteria: vec!["Restart passes".into()],
         base_sha: Some("a".repeat(40)),
         head_sha: None,
+        source_sha256: "b".repeat(64),
+        repository_sha256: "c".repeat(64),
         instruction_digests: vec![InstructionDigest::new("AGENTS.md", "d".repeat(64), 1).unwrap()],
         verification_commands: vec![VerificationCommand::new("cargo", ["test"]).unwrap()],
         required_capabilities: vec![Capability::PushBranch],
@@ -331,6 +333,53 @@ fn bindings_contracts_and_approval_action_digests_survive_restart() {
         store.approval_action_digest(approval.id()).unwrap(),
         Some(fingerprint.digest_sha256())
     );
+}
+
+#[test]
+fn persisted_task_contracts_revalidate_the_verification_boundary_on_load() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("events.sqlite");
+    let store = EventStore::open(&database).unwrap();
+    let binding = binding();
+    store.save_repository_binding(&binding).unwrap();
+    let task = Task::new("Durable validation", "/tmp/repo").unwrap();
+    let contract = TaskContract::try_from(TaskContractDraft {
+        task_id: task.id,
+        source: TaskSource::LocalRequest,
+        repository_binding_id: binding.id(),
+        goal: "Reject corrupt persisted commands".into(),
+        acceptance_criteria: vec!["Reload remains fail closed".into()],
+        base_sha: Some("a".repeat(40)),
+        head_sha: None,
+        source_sha256: "b".repeat(64),
+        repository_sha256: "c".repeat(64),
+        instruction_digests: vec![
+            InstructionDigest::new("resolvedInstructions", "d".repeat(64), 0).unwrap(),
+        ],
+        verification_commands: vec![VerificationCommand::new("cargo", ["test"]).unwrap()],
+        required_capabilities: Vec::new(),
+        risk: RiskClass::Moderate,
+        sensitive_paths: Vec::new(),
+        dependencies: Vec::new(),
+    })
+    .unwrap();
+    store.save_task_contract(&contract).unwrap();
+    drop(store);
+
+    let mut payload = serde_json::to_value(&contract).unwrap();
+    payload["verificationCommands"] = serde_json::json!([]);
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "UPDATE task_contracts SET payload = ?1 WHERE task_id = ?2",
+            rusqlite::params![payload.to_string(), task.id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let reopened = EventStore::open(&database).unwrap();
+    let error = format!("{:#}", reopened.task_contract(task.id).unwrap_err());
+    assert!(error.contains("verificationCommands"), "{error}");
 }
 
 #[test]

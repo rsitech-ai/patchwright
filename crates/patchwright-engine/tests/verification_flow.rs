@@ -191,6 +191,8 @@ impl Fixture {
             acceptance_criteria: vec!["All commands pass".into()],
             base_sha: None,
             head_sha: Some(git(&self.repository, &["rev-parse", "HEAD"])),
+            source_sha256: "b".repeat(64),
+            repository_sha256: "c".repeat(64),
             instruction_digests: vec![],
             verification_commands: commands,
             required_capabilities: vec![Capability::PushBranch],

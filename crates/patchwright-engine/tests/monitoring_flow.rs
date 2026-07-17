@@ -3,6 +3,7 @@ use patchwright_core::{
     Capability, CredentialHealth, GitHubAction, GitHubActionPreview, InstructionDigest,
     RemoteIdentity, RemotePrecondition, RepositoryBinding, RepositoryBindingDraft,
     RepositoryPermissionSnapshot, RiskClass, Task, TaskContract, TaskContractDraft, TaskSource,
+    VerificationCommand,
 };
 use patchwright_engine::{
     CIState, EventStore, Mergeability, MonitorRecord, MonitorState, RemoteObservation, ReviewState,
@@ -41,10 +42,12 @@ fn fixture(store: &EventStore) -> Task {
                 acceptance_criteria: vec!["CI and review converge".into()],
                 base_sha: Some("a".repeat(40)),
                 head_sha: Some("b".repeat(40)),
+                source_sha256: "c".repeat(64),
+                repository_sha256: "e".repeat(64),
                 instruction_digests: vec![
                     InstructionDigest::new("AGENTS.md", "d".repeat(64), 1).unwrap(),
                 ],
-                verification_commands: Vec::new(),
+                verification_commands: vec![VerificationCommand::new("cargo", ["test"]).unwrap()],
                 required_capabilities: vec![Capability::PostComment],
                 risk: RiskClass::Moderate,
                 sensitive_paths: Vec::new(),

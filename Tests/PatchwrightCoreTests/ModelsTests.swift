@@ -3,13 +3,38 @@ import XCTest
 
 final class ModelsTests: XCTestCase {
     func testDecodesExactPreparationPreviewAndApprovalBoundary() throws {
-        let previewData = Data(#"{"taskId":"5A8F17C3-733B-46EE-AE48-015D091A0B91","repositoryBindingId":"11111111-1111-1111-1111-111111111111","repositoryFullName":"acme/widget","repositoryPath":"/tmp/repository","sourceSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","worktreePath":"/tmp/worktrees/task","branch":"patchwright/task","invalidationGeneration":7,"policySha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","instructionSha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","fingerprint":{"taskId":"5A8F17C3-733B-46EE-AE48-015D091A0B91","githubRepositoryId":42,"repositoryFullName":"acme/widget","actionKind":"prepareWorktree","pullRequestNumber":null,"branch":"patchwright/task","headSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseSha":null,"payloadSha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","policySha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","instructionSha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","invalidationGeneration":7}}"#.utf8)
+        let previewData = Data(#"{"taskId":"5A8F17C3-733B-46EE-AE48-015D091A0B91","repositoryBindingId":"11111111-1111-1111-1111-111111111111","repositoryFullName":"acme/widget","repositoryPath":"/tmp/repository","sourceSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","worktreePath":"/tmp/worktrees/task","branch":"patchwright/task","invalidationGeneration":7,"policySha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","instructionSha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","contract":{"version":1,"taskId":"5A8F17C3-733B-46EE-AE48-015D091A0B91","source":{"kind":"localRequest"},"repositoryBindingId":"11111111-1111-1111-1111-111111111111","goal":"Fix login","acceptanceCriteria":["Tests pass"],"baseSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","headSha":null,"sourceSha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","repositorySha256":"9999999999999999999999999999999999999999999999999999999999999999","instructionDigests":[{"source":"resolvedInstructions","sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","precedence":0}],"verificationCommands":[{"program":"cargo","args":["test","--workspace"]}],"requiredCapabilities":["prepareWorktree"],"risk":"moderate","sensitivePaths":[{"path":"Cargo.lock","reason":"Dependency boundary"}],"dependencies":[]},"fingerprint":{"taskId":"5A8F17C3-733B-46EE-AE48-015D091A0B91","githubRepositoryId":42,"repositoryFullName":"acme/widget","actionKind":"prepareWorktree","pullRequestNumber":null,"branch":"patchwright/task","headSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseSha":null,"payloadSha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","policySha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","instructionSha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","invalidationGeneration":7}}"#.utf8)
         let preview = try JSONDecoder.patchwright.decode(PreparationPreview.self, from: previewData)
 
         XCTAssertEqual(preview.repositoryFullName, "acme/widget")
         XCTAssertEqual(preview.sourceSha, String(repeating: "a", count: 40))
         XCTAssertEqual(preview.fingerprint.actionKind, "prepareWorktree")
         XCTAssertEqual(preview.invalidationGeneration, 7)
+        XCTAssertEqual(preview.contract.goal, "Fix login")
+        XCTAssertEqual(preview.contract.verificationCommands.first?.argvDisplay, #"["cargo","test","--workspace"]"#)
+    }
+
+    func testContractDecodingRejectsAnEmptyOrMalformedVerificationBoundary() throws {
+        let valid = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: validContractData) as? [String: Any]
+        )
+        var empty = valid
+        empty["verificationCommands"] = []
+        XCTAssertThrowsError(
+            try JSONDecoder.patchwright.decode(
+                TaskContract.self,
+                from: JSONSerialization.data(withJSONObject: empty)
+            )
+        )
+
+        var malformed = valid
+        malformed["verificationCommands"] = [["program": "cargo\nsh", "args": ["test"]]]
+        XCTAssertThrowsError(
+            try JSONDecoder.patchwright.decode(
+                TaskContract.self,
+                from: JSONSerialization.data(withJSONObject: malformed)
+            )
+        )
     }
 
     func testDecodesEngineTask() throws {
@@ -106,6 +131,8 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(store.connectionState, .failed("Engine unavailable"))
     }
 }
+
+private let validContractData = Data(#"{"version":1,"taskId":"5A8F17C3-733B-46EE-AE48-015D091A0B91","source":{"kind":"localRequest"},"repositoryBindingId":"11111111-1111-1111-1111-111111111111","goal":"Fix login","acceptanceCriteria":["Tests pass"],"baseSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","headSha":null,"sourceSha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","repositorySha256":"9999999999999999999999999999999999999999999999999999999999999999","instructionDigests":[{"source":"resolvedInstructions","sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","precedence":0}],"verificationCommands":[{"program":"cargo","args":["test","--workspace"]}],"requiredCapabilities":[],"risk":"moderate","sensitivePaths":[{"path":"Cargo.lock","reason":"Dependency boundary"}],"dependencies":[]}"#.utf8)
 
 private struct FailingEngine: EngineServing {
     func call<Result: Decodable & Sendable>(method: String, params: [String: String], as type: Result.Type) async throws -> Result {
