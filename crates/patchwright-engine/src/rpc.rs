@@ -510,21 +510,9 @@ fn delivery_preview(id: Value, params: &Value, store: &Mutex<EventStore>) -> Val
         Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
     };
     let store = store.lock().expect("event store lock poisoned");
-    let contract = match store.task_contract(task_id) {
-        Ok(Some(contract)) => contract,
-        Ok(None) => {
-            return rpc_error(
-                id,
-                -32060,
-                "delivery preview failed",
-                Some("task contract is missing".into()),
-            );
-        }
-        Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
-    };
     let precondition = match RemotePrecondition::new(
-        request.expected_head_sha.as_deref().or(contract.head_sha()),
-        request.expected_base_sha.as_deref().or(contract.base_sha()),
+        request.expected_head_sha.as_deref(),
+        request.expected_base_sha.as_deref(),
         request.snapshot_generation,
     ) {
         Ok(precondition) => precondition,
