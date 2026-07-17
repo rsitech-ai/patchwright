@@ -61,7 +61,8 @@ final class UpdateConfigurationTests: XCTestCase {
         let controller = try source("Sources/PatchwrightApp/Services/EngineProcessController.swift")
 
         XCTAssertTrue(app.contains("@NSApplicationDelegateAdaptor(PatchwrightApplicationDelegate.self)"))
-        XCTAssertTrue(app.contains("func applicationWillTerminate"))
+        XCTAssertTrue(app.contains("func applicationShouldTerminate"))
+        XCTAssertTrue(app.contains("sender.windows.forEach { $0.orderOut(nil) }"))
         XCTAssertTrue(app.contains("engineProcessController?.shutdown()"))
         XCTAssertTrue(controller.contains("func shutdown()"))
         XCTAssertTrue(controller.contains("process.terminate()"))

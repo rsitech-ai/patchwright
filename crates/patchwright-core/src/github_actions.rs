@@ -75,6 +75,8 @@ pub enum GitHubAction {
         title: String,
         head: String,
         base: String,
+        #[serde(alias = "expected_base_sha")]
+        expected_base_sha: String,
         body: String,
     },
     UpdatePullRequestBranch {
@@ -165,6 +167,8 @@ enum GitHubActionWire {
         title: String,
         head: String,
         base: String,
+        #[serde(alias = "expected_base_sha")]
+        expected_base_sha: String,
         body: String,
     },
     UpdatePullRequestBranch {
@@ -246,8 +250,9 @@ impl<'de> Deserialize<'de> for GitHubAction {
                 title,
                 head,
                 base,
+                expected_base_sha,
                 body,
-            } => Self::draft_pull_request(&title, &head, &base, &body),
+            } => Self::draft_pull_request(&title, &head, &base, &expected_base_sha, &body),
             GitHubActionWire::UpdatePullRequestBranch {
                 pull_request_number,
                 expected_head_sha,
@@ -359,12 +364,14 @@ impl GitHubAction {
         title: &str,
         head: &str,
         base: &str,
+        expected_base_sha: &str,
         body: &str,
     ) -> Result<Self, GitHubActionError> {
         Ok(Self::DraftPullRequest {
             title: validate_text(title, 256, "title")?,
             head: validate_ref(head)?,
             base: validate_ref(base)?,
+            expected_base_sha: validate_sha(expected_base_sha)?,
             body: validate_body(body)?,
         })
     }
@@ -494,6 +501,44 @@ impl GitHubAction {
         match self {
             Self::CreateBranch { branch, .. } | Self::PushIntent { branch, .. } => Some(branch),
             Self::DraftPullRequest { head, .. } => Some(head),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn expected_head_sha(&self) -> Option<&str> {
+        match self {
+            Self::Review {
+                expected_head_sha, ..
+            }
+            | Self::ResolveReviewThread {
+                expected_head_sha, ..
+            }
+            | Self::UpdatePullRequestBranch {
+                expected_head_sha, ..
+            }
+            | Self::ReadyPullRequest {
+                expected_head_sha, ..
+            }
+            | Self::ClosePullRequest {
+                expected_head_sha, ..
+            }
+            | Self::EnqueuePullRequest {
+                expected_head_sha, ..
+            }
+            | Self::MergePullRequest {
+                expected_head_sha, ..
+            } => Some(expected_head_sha),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn expected_base_sha(&self) -> Option<&str> {
+        match self {
+            Self::DraftPullRequest {
+                expected_base_sha, ..
+            } => Some(expected_base_sha),
             _ => None,
         }
     }

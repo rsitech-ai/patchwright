@@ -630,12 +630,29 @@ async fn delivery_execute(id: Value, params: &Value, store: &Mutex<EventStore>) 
                 json!({"idempotencyKey":key,"state":"succeeded","result":result}),
             )
         }
-        Err(error @ MutationError::AmbiguousTransport) => rpc_error(
-            id,
-            -32063,
-            "delivery outcome is ambiguous",
-            Some(error.to_string()),
-        ),
+        Err(error @ MutationError::AmbiguousTransport) => {
+            let encoded =
+                serde_json::to_string(&json!({"state":"ambiguous","error":error.to_string()}))
+                    .expect("ambiguous result serializes");
+            if let Err(persistence) = crate::record_ambiguous_delivery(
+                &store.lock().expect("event store lock poisoned"),
+                &key,
+                &encoded,
+            ) {
+                return rpc_error(
+                    id,
+                    -32000,
+                    "persistence failure",
+                    Some(persistence.to_string()),
+                );
+            }
+            rpc_error(
+                id,
+                -32063,
+                "delivery outcome is ambiguous",
+                Some(error.to_string()),
+            )
+        }
         Err(error) => {
             let encoded =
                 serde_json::to_string(&json!({"state":"failed","error":error.to_string()}))

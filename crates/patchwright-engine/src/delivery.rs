@@ -72,17 +72,8 @@ pub fn preview_delivery(
         return Err(DeliveryError::SourceMismatch);
     }
     validate_action_target(&contract, &binding, task_id, action.action())?;
+    validate_bound_preconditions(&action, &contract)?;
     validate_action_sha(&task, &contract, action.action())?;
-    if contract.head_sha().is_some()
-        && action.precondition().expected_head_sha() != contract.head_sha()
-    {
-        return Err(DeliveryError::PreconditionMismatch);
-    }
-    if contract.base_sha().is_some()
-        && action.precondition().expected_base_sha() != contract.base_sha()
-    {
-        return Err(DeliveryError::PreconditionMismatch);
-    }
     let policy_sha256 = digest(b"patchwright-policy-v1");
     let instruction_sha256 = digest(
         &serde_json::to_vec(contract.instruction_digests())
@@ -114,6 +105,23 @@ pub fn preview_delivery(
         action,
         fingerprint,
     })
+}
+
+fn validate_bound_preconditions(
+    action: &GitHubActionPreview,
+    contract: &patchwright_core::TaskContract,
+) -> Result<(), DeliveryError> {
+    let precondition = action.precondition();
+    if action.action().expected_head_sha().is_some()
+        && action.action().expected_head_sha() != precondition.expected_head_sha()
+        || action.action().expected_base_sha().is_some()
+            && action.action().expected_base_sha() != precondition.expected_base_sha()
+        || contract.head_sha().is_some() && precondition.expected_head_sha() != contract.head_sha()
+        || contract.base_sha().is_some() && precondition.expected_base_sha() != contract.base_sha()
+    {
+        return Err(DeliveryError::PreconditionMismatch);
+    }
+    Ok(())
 }
 
 pub fn approve_delivery(
@@ -321,6 +329,16 @@ pub fn complete_failed_delivery(
         .map_err(persistence)
 }
 
+pub fn record_ambiguous_delivery(
+    store: &EventStore,
+    key: &str,
+    encoded_result: &str,
+) -> Result<(), DeliveryError> {
+    store
+        .mark_delivery_ambiguous(key, encoded_result)
+        .map_err(persistence)
+}
+
 pub fn reconcile_completed_task_from_snapshot(
     store: &EventStore,
     task_id: TaskId,
@@ -363,14 +381,56 @@ pub fn reconcile_completed_task_from_snapshot(
             item.state == "closed" && item.state_reason.as_deref() != Some("not_planned")
         }
     };
+    let ambiguous_key = if task.state == TaskState::Merging {
+        store
+            .ambiguous_delivery_for_task(task_id)
+            .map_err(persistence)?
+    } else {
+        None
+    };
     if !completed {
+        if let Some(key) = ambiguous_key.as_deref() {
+            if item.kind != WorkItemKind::PullRequest || item.state != "open" {
+                return Err(DeliveryError::RemoteNotCompleted);
+            }
+            let mut retry = task;
+            retry
+                .transition(TaskState::AwaitingMergeApproval)
+                .map_err(|error| DeliveryError::Persistence(error.to_string()))?;
+            let result = serde_json::json!({
+                "state": "failed",
+                "error": "fresh GitHub reconciliation confirmed the approved merge did not complete"
+            });
+            store
+                .complete_failed_merge_delivery(
+                    key,
+                    &result.to_string(),
+                    &retry,
+                    "Fresh GitHub reconciliation found no merge; fresh merge approval is required",
+                )
+                .map_err(persistence)?;
+            return Ok(retry);
+        }
         return Err(DeliveryError::RemoteNotCompleted);
     }
     if task.state == TaskState::Completed {
         return Ok(task);
     }
     let events = completion_events(task)?;
-    store.save_task_events(&events).map_err(persistence)?;
+    if let Some(key) = ambiguous_key.as_deref() {
+        let result = serde_json::json!({
+            "state": "succeeded",
+            "result": {
+                "merged": true,
+                "sha": item.merge_commit_sha.as_deref()
+            }
+        });
+        store
+            .complete_delivery_with_task_events(key, &result.to_string(), &events)
+            .map_err(persistence)?;
+    } else {
+        store.save_task_events(&events).map_err(persistence)?;
+    }
     events
         .last()
         .map(|(task, _)| task.clone())

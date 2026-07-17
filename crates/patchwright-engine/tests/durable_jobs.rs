@@ -77,7 +77,7 @@ fn legacy_database_migrates_without_losing_existing_tasks() {
     assert_eq!(loaded.state, TaskState::AwaitingPreparationApproval);
     assert_eq!(
         store.schema_versions().unwrap(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     );
     drop(store);
 

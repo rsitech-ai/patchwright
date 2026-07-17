@@ -10,7 +10,7 @@ use patchwright_engine::{
     DeliveryError, EventStore, GitHubRepository, GitHubRepositoryPermissions,
     GitHubRepositorySnapshot, GitHubWorkItem, WorkItemKind, approve_delivery, authorize_execution,
     complete_failed_delivery, complete_successful_delivery, preview_delivery,
-    reconcile_completed_task_from_snapshot,
+    reconcile_completed_task_from_snapshot, record_ambiguous_delivery,
 };
 
 fn fixture(store: &EventStore) -> Task {
@@ -325,6 +325,28 @@ fn delivery_target_and_branch_are_bound_to_the_task_contract() {
         preview_delivery(&create_store, create_task.id, wrong_source),
         Err(DeliveryError::PreconditionMismatch)
     );
+
+    let pull_directory = tempfile::tempdir().unwrap();
+    let pull_store = EventStore::open(&pull_directory.path().join("engine.sqlite3")).unwrap();
+    let mut pull_task = fixture_with_capability(&pull_store, Capability::CreatePullRequest);
+    save_at_delivery_approval(&pull_store, &mut pull_task);
+    let stale_base = GitHubActionPreview::new(
+        RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
+        GitHubAction::draft_pull_request(
+            "Draft",
+            &format!("patchwright/{}", pull_task.id),
+            "main",
+            &"f".repeat(40),
+            "Resolves the task",
+        )
+        .unwrap(),
+        RemotePrecondition::new(None, Some(&"a".repeat(40)), 4).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        preview_delivery(&pull_store, pull_task.id, stale_base),
+        Err(DeliveryError::PreconditionMismatch)
+    );
 }
 
 #[test]
@@ -396,6 +418,16 @@ fn merge_uses_a_separate_merge_class_and_exact_head_sha() {
     store.save_task_contract(&contract).unwrap();
     task.contract_version = contract.version();
     save_at_merge_approval(&store, &mut task);
+    let mismatched_inner = GitHubActionPreview::new(
+        RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
+        GitHubAction::merge_pull_request(7, &"c".repeat(40), MergeMethod::Squash).unwrap(),
+        RemotePrecondition::new(Some(&"b".repeat(40)), Some(&"a".repeat(40)), 4).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        preview_delivery(&store, task.id, mismatched_inner),
+        Err(DeliveryError::PreconditionMismatch)
+    );
     let action = GitHubActionPreview::new(
         RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
         GitHubAction::merge_pull_request(7, &"b".repeat(40), MergeMethod::Squash).unwrap(),
@@ -519,6 +551,62 @@ fn definitive_merge_failure_restores_the_approval_gate() {
 }
 
 #[test]
+fn ambiguous_merge_reconciliation_completes_or_restores_a_fresh_approval_gate() {
+    for merged in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = EventStore::open(&directory.path().join("engine.sqlite3")).unwrap();
+        let mut task = fixture_with_capability(&store, Capability::MergePullRequest);
+        save_at_merge_approval(&store, &mut task);
+        let action = GitHubActionPreview::new(
+            RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
+            GitHubAction::merge_pull_request(7, &"b".repeat(40), MergeMethod::Squash).unwrap(),
+            RemotePrecondition::new(Some(&"b".repeat(40)), Some(&"a".repeat(40)), 4).unwrap(),
+        )
+        .unwrap();
+        let preview = preview_delivery(&store, task.id, action).unwrap();
+        let approval = approve_delivery(&store, &preview, "owner").unwrap();
+        let key = authorize_execution(&store, &preview, approval.id()).unwrap();
+        record_ambiguous_delivery(
+            &store,
+            &key,
+            r#"{"state":"ambiguous","error":"connection reset after request write"}"#,
+        )
+        .unwrap();
+
+        let reconciled = reconcile_completed_task_from_snapshot(
+            &store,
+            task.id,
+            &completed_pull_snapshot(&"b".repeat(40), merged),
+        )
+        .unwrap();
+
+        if merged {
+            assert_eq!(reconciled.state, TaskState::Completed);
+            assert!(
+                store
+                    .delivery_result(&key)
+                    .unwrap()
+                    .unwrap()
+                    .contains(r#""state":"succeeded""#)
+            );
+        } else {
+            assert_eq!(reconciled.state, TaskState::AwaitingMergeApproval);
+            assert!(
+                store
+                    .delivery_result(&key)
+                    .unwrap()
+                    .unwrap()
+                    .contains(r#""state":"failed""#)
+            );
+            assert_eq!(
+                authorize_execution(&store, &preview, approval.id()),
+                Err(DeliveryError::ApprovalMissing)
+            );
+        }
+    }
+}
+
+#[test]
 fn successful_close_actions_complete_without_merge_lifecycle_states() {
     let actions = [
         (
@@ -537,6 +625,18 @@ fn successful_close_actions_complete_without_merge_lifecycle_states() {
         let mut task = fixture_with_capability(&store, capability);
         save_at_delivery_approval(&store, &mut task);
         let expected_head = (capability == Capability::ClosePullRequest).then(|| "b".repeat(40));
+        if capability == Capability::ClosePullRequest {
+            let mismatched_inner = GitHubActionPreview::new(
+                RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
+                GitHubAction::close_pull_request(7, &"c".repeat(40)).unwrap(),
+                RemotePrecondition::new(Some(&"b".repeat(40)), Some(&"a".repeat(40)), 4).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                preview_delivery(&store, task.id, mismatched_inner),
+                Err(DeliveryError::PreconditionMismatch)
+            );
+        }
         let action = GitHubActionPreview::new(
             RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
             action,
@@ -603,7 +703,7 @@ fn completed_pull_snapshot(head_sha: &str, merged: bool) -> GitHubRepositorySnap
             number: 7,
             kind: WorkItemKind::PullRequest,
             title: "Repair CI".into(),
-            state: "closed".into(),
+            state: if merged { "closed" } else { "open" }.into(),
             state_reason: None,
             body: None,
             author: "octocat".into(),
