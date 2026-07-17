@@ -178,7 +178,7 @@ pub fn complete_successful_delivery(
         .load_task(preview.task_id)
         .map_err(persistence)?
         .ok_or(DeliveryError::TaskMissing)?;
-    let lifecycle = [
+    let merge_lifecycle = [
         (
             TaskState::AwaitingDeliveryApproval,
             TaskState::Delivering,
@@ -197,14 +197,36 @@ pub fn complete_successful_delivery(
         (
             TaskState::AwaitingMergeApproval,
             TaskState::Merging,
-            "Approved terminal delivery is being finalized",
+            "Approved merge delivery is being finalized",
         ),
         (
             TaskState::Merging,
             TaskState::Completed,
-            "GitHub confirmed the task outcome completed",
+            "GitHub confirmed the merged task outcome completed",
         ),
     ];
+    let close_lifecycle = [
+        (
+            TaskState::AwaitingDeliveryApproval,
+            TaskState::Delivering,
+            "Approved terminal GitHub delivery started",
+        ),
+        (
+            TaskState::Delivering,
+            TaskState::Monitoring,
+            "GitHub accepted the terminal delivery; reconciling remote state",
+        ),
+        (
+            TaskState::Monitoring,
+            TaskState::Completed,
+            "GitHub confirmed the closed task outcome completed",
+        ),
+    ];
+    let lifecycle = if capability == Capability::MergePullRequest {
+        merge_lifecycle.as_slice()
+    } else {
+        close_lifecycle.as_slice()
+    };
     let mut events = Vec::new();
     if task.state != TaskState::Completed {
         let Some(start) = lifecycle
