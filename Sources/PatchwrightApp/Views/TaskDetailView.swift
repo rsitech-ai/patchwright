@@ -331,8 +331,7 @@ struct TaskDetailView: View {
                                         GitHubActionPayload(
                                             kind: "resolveReviewThread",
                                             pullRequestNumber: source.number,
-                                            threadId: threadID,
-                                            expectedHeadSha: source.headSHA
+                                            threadId: threadID
                                         )
                                     )
                                 }
@@ -364,8 +363,7 @@ struct TaskDetailView: View {
                 HStack {
                     Spacer()
                     if let worktree = store.worktreeByTask[task.id],
-                       let repository = store.repositories.first(where: { $0.id == source.repositoryID }),
-                       let expectedBaseSHA = repository.defaultBranchSHA {
+                       let repository = store.repositories.first(where: { $0.id == source.repositoryID }) {
                         Button("Preview Draft PR", systemImage: "arrow.triangle.pull") {
                             preview(
                                 GitHubActionPayload(
@@ -373,8 +371,7 @@ struct TaskDetailView: View {
                                     body: deliveryTextIsEmpty ? "Resolves #\(source.number)" : deliveryBody,
                                     title: task.title,
                                     head: worktree.branch,
-                                    base: repository.defaultBranch,
-                                    expectedBaseSha: expectedBaseSHA
+                                    base: repository.defaultBranch
                                 )
                             )
                         }
@@ -403,8 +400,7 @@ struct TaskDetailView: View {
                         preview(
                             GitHubActionPayload(
                                 kind: "readyPullRequest",
-                                pullRequestNumber: source.number,
-                                expectedHeadSha: source.headSHA
+                                pullRequestNumber: source.number
                             )
                         )
                     }
@@ -412,8 +408,7 @@ struct TaskDetailView: View {
                         preview(
                             GitHubActionPayload(
                                 kind: "closePullRequest",
-                                pullRequestNumber: source.number,
-                                expectedHeadSha: source.headSHA
+                                pullRequestNumber: source.number
                             )
                         )
                     }

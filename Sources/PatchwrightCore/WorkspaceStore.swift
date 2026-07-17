@@ -422,6 +422,10 @@ public final class WorkspaceStore: ObservableObject {
         deliveryBusyTaskIDs.insert(task.id)
         defer { deliveryBusyTaskIDs.remove(task.id) }
         do {
+            let expectedHeadSHA = [
+                "review", "updatePullRequestBranch", "enqueuePullRequest", "mergePullRequest",
+            ].contains(action.kind) ? identity.2 : nil
+            let expectedBaseSHA = action.kind == "createBranch" ? identity.3 : nil
             let draft = GitHubActionPreviewDraft(
                 remote: GitHubRemoteIdentity(
                     repositoryId: identity.0,
@@ -429,8 +433,8 @@ public final class WorkspaceStore: ObservableObject {
                     repositoryFullName: identity.1
                 ),
                 action: action,
-                expectedHeadSha: identity.2,
-                expectedBaseSha: identity.3,
+                expectedHeadSha: expectedHeadSHA,
+                expectedBaseSha: expectedBaseSHA,
                 snapshotGeneration: max(1, UInt64(identity.4.timeIntervalSince1970))
             )
             let preview = try await engine.previewDelivery(taskID: task.id, draft: draft)

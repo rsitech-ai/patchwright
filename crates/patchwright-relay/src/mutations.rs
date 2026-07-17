@@ -114,21 +114,7 @@ impl GitHubMutationClient {
             GitHubAction::ResolveReviewThread {
                 pull_request_number,
                 thread_id,
-                expected_head_sha,
             } => {
-                let pull = self
-                    .request_value(
-                        Method::GET,
-                        &format!("{prefix}/pulls/{pull_request_number}"),
-                        None,
-                        RequestEffect::Read,
-                    )
-                    .await?;
-                if pull.pointer("/head/sha").and_then(Value::as_str)
-                    != Some(expected_head_sha.as_str())
-                {
-                    return Err(MutationError::StaleRemoteHead);
-                }
                 let identity = self
                     .request_value(
                         Method::POST,
@@ -150,10 +136,6 @@ impl GitHubMutationClient {
                 if thread.get("id").and_then(Value::as_str) != Some(thread_id)
                     || thread.pointer("/pullRequest/number").and_then(Value::as_u64)
                         != Some(*pull_request_number)
-                    || thread
-                        .pointer("/pullRequest/headRefOid")
-                        .and_then(Value::as_str)
-                        != Some(expected_head_sha)
                     || thread
                         .pointer("/pullRequest/repository/nameWithOwner")
                         .and_then(Value::as_str)
@@ -217,27 +199,13 @@ impl GitHubMutationClient {
                 title,
                 head,
                 base,
-                expected_base_sha,
                 body,
             } => {
-                let reference = self
-                    .request_value(
-                        Method::GET,
-                        &format!("{prefix}/git/ref/heads/{base}"),
-                        None,
-                        RequestEffect::Read,
-                    )
-                    .await?;
-                if reference.pointer("/object/sha").and_then(Value::as_str)
-                    != Some(expected_base_sha.as_str())
-                {
-                    return Err(MutationError::StaleRemoteBase);
-                }
                 self.request(
                     Method::POST,
                     &format!("{prefix}/pulls"),
                     json!({"title":title,"head":head,"base":base,"body":body,"draft":true}),
-                    MutationExpectation::DraftPullRequest { expected_base_sha },
+                    MutationExpectation::PullRequest,
                 )
                 .await
             }
@@ -255,7 +223,6 @@ impl GitHubMutationClient {
             }
             GitHubAction::ReadyPullRequest {
                 pull_request_number,
-                expected_head_sha,
             } => {
                 let pull = self
                     .request_value(
@@ -265,11 +232,6 @@ impl GitHubMutationClient {
                         RequestEffect::Read,
                     )
                     .await?;
-                if pull.pointer("/head/sha").and_then(Value::as_str)
-                    != Some(expected_head_sha.as_str())
-                {
-                    return Err(MutationError::StaleRemoteHead);
-                }
                 if pull.get("draft").and_then(Value::as_bool) == Some(false) {
                     return Ok(decode_value(&pull));
                 }
@@ -318,21 +280,7 @@ impl GitHubMutationClient {
             }
             GitHubAction::ClosePullRequest {
                 pull_request_number,
-                expected_head_sha,
             } => {
-                let pull = self
-                    .request_value(
-                        Method::GET,
-                        &format!("{prefix}/pulls/{pull_request_number}"),
-                        None,
-                        RequestEffect::Read,
-                    )
-                    .await?;
-                if pull.pointer("/head/sha").and_then(Value::as_str)
-                    != Some(expected_head_sha.as_str())
-                {
-                    return Err(MutationError::StaleRemoteHead);
-                }
                 self.request(
                     Method::PATCH,
                     &format!("{prefix}/pulls/{pull_request_number}"),
@@ -476,7 +424,7 @@ enum RequestEffect {
 enum MutationExpectation<'a> {
     CreatedRef { reference: &'a str, sha: &'a str },
     Resource,
-    DraftPullRequest { expected_base_sha: &'a str },
+    PullRequest,
     UpdateBranch,
     Closed { number: u64 },
     Merged,
@@ -503,14 +451,11 @@ impl MutationExpectation<'_> {
                     .as_deref()
                     .is_some_and(|url| !url.is_empty()))
             .then_some(decoded),
-            Self::DraftPullRequest { expected_base_sha } => (decoded
-                .number
-                .is_some_and(|number| number > 0)
+            Self::PullRequest => (decoded.number.is_some_and(|number| number > 0)
                 && decoded
                     .html_url
                     .as_deref()
-                    .is_some_and(|url| !url.is_empty())
-                && value.pointer("/base/sha").and_then(Value::as_str) == Some(*expected_base_sha))
+                    .is_some_and(|url| !url.is_empty()))
             .then_some(decoded),
             Self::UpdateBranch => (value.get("message").and_then(nonempty_string).is_some()
                 && value.get("url").and_then(nonempty_string).is_some())
@@ -592,10 +537,6 @@ pub enum MutationError {
     DefaultBranchPushProhibited,
     #[error("repository requires native merge-queue handoff")]
     MergeQueueRequired,
-    #[error("pull request head changed before the approved mutation")]
-    StaleRemoteHead,
-    #[error("repository base branch changed before the approved mutation")]
-    StaleRemoteBase,
     #[error("review thread identity does not match the approved pull request")]
     ReviewThreadMismatch,
     #[error("GitHub App is not allowed to resolve this review thread")]

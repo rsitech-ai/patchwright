@@ -66,27 +66,24 @@ async fn capture_request(
 }
 
 #[tokio::test]
-async fn resolves_only_the_exact_owned_review_thread_at_the_captured_head() {
+async fn resolves_only_the_exact_owned_review_thread_identity() {
     let (client, capture) = client().await;
-    let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-
     let result = client
         .execute(
             "octo",
             "fixture",
-            &GitHubAction::resolve_review_thread(4, "PRRT_kwDOExample", sha).unwrap(),
+            &GitHubAction::resolve_review_thread(4, "PRRT_kwDOExample").unwrap(),
         )
         .await
         .unwrap();
 
     assert_eq!(result.resolved, Some(true));
     let requests = capture.0.lock().unwrap();
-    assert_eq!(requests.len(), 3);
-    assert_eq!(requests[0].1, "/repos/octo/fixture/pulls/4");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].1, "/graphql");
+    assert_eq!(requests[0].2["variables"]["threadId"], "PRRT_kwDOExample");
     assert_eq!(requests[1].1, "/graphql");
     assert_eq!(requests[1].2["variables"]["threadId"], "PRRT_kwDOExample");
-    assert_eq!(requests[2].1, "/graphql");
-    assert_eq!(requests[2].2["variables"]["threadId"], "PRRT_kwDOExample");
 }
 
 async fn client() -> (GitHubMutationClient, Capture) {
@@ -104,7 +101,7 @@ async fn client() -> (GitHubMutationClient, Capture) {
 }
 
 #[tokio::test]
-async fn emits_exact_branch_comment_review_check_draft_and_merge_requests() {
+async fn emits_documented_identity_and_sha_bound_requests() {
     let (client, capture) = client().await;
     let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let actions = vec![
@@ -119,10 +116,10 @@ async fn emits_exact_branch_comment_review_check_draft_and_merge_requests() {
         )
         .unwrap(),
         GitHubAction::check_run("Patchwright", sha, "completed", Some("success")).unwrap(),
-        GitHubAction::draft_pull_request("title", "feat/test", "main", sha, "body").unwrap(),
+        GitHubAction::draft_pull_request("title", "feat/test", "main", "body").unwrap(),
         GitHubAction::update_pull_request_branch(4, sha).unwrap(),
-        GitHubAction::ready_pull_request(4, sha).unwrap(),
-        GitHubAction::close_pull_request(4, sha).unwrap(),
+        GitHubAction::ready_pull_request(4).unwrap(),
+        GitHubAction::close_pull_request(4).unwrap(),
         GitHubAction::close_issue(5).unwrap(),
         GitHubAction::merge_pull_request(4, sha, MergeMethod::Squash).unwrap(),
     ];
@@ -155,26 +152,22 @@ async fn emits_exact_branch_comment_review_check_draft_and_merge_requests() {
         json!({"path":"src/lib.rs","line":9,"side":"RIGHT","body":"inline body"})
     );
     assert_eq!(requests[3].2["conclusion"], "success");
-    assert_eq!(requests[4].0, Method::GET);
-    assert_eq!(requests[4].1, "/repos/octo/fixture/git/ref/heads/main");
-    assert_eq!(requests[5].2["draft"], true);
-    assert_eq!(requests[6].2, json!({"expected_head_sha":sha}));
+    assert_eq!(requests[4].2["draft"], true);
+    assert_eq!(requests[5].2, json!({"expected_head_sha":sha}));
     assert_eq!(
-        requests[7],
+        requests[6],
         (
             Method::GET,
             "/repos/octo/fixture/pulls/4".into(),
             Value::Null
         )
     );
-    assert_eq!(requests[8].0, Method::POST);
-    assert_eq!(requests[8].1, "/graphql");
-    assert_eq!(requests[8].2["variables"]["pullRequestId"], "PR_node");
-    assert_eq!(requests[9].0, Method::GET);
-    assert_eq!(requests[9].1, "/repos/octo/fixture/pulls/4");
-    assert_eq!(requests[10].2, json!({"state":"closed"}));
+    assert_eq!(requests[7].0, Method::POST);
+    assert_eq!(requests[7].1, "/graphql");
+    assert_eq!(requests[7].2["variables"]["pullRequestId"], "PR_node");
+    assert_eq!(requests[8].2, json!({"state":"closed"}));
     assert_eq!(
-        requests[11],
+        requests[9],
         (
             Method::PATCH,
             "/repos/octo/fixture/issues/5".into(),
@@ -182,7 +175,7 @@ async fn emits_exact_branch_comment_review_check_draft_and_merge_requests() {
         )
     );
     assert_eq!(
-        requests[12],
+        requests[10],
         (
             Method::PUT,
             "/repos/octo/fixture/pulls/4/merge".into(),
@@ -248,38 +241,6 @@ async fn test_client(app: Router) -> GitHubMutationClient {
     GitHubMutationClient::new_for_test(format!("http://{address}"), "ghs_fixture").unwrap()
 }
 
-async fn advanced_base(Path(path): Path<String>, method: Method) -> Response {
-    assert_eq!(
-        method,
-        Method::GET,
-        "stale base must fail before PR creation"
-    );
-    assert!(path.ends_with("/git/ref/heads/main"));
-    Json(json!({
-        "ref":"refs/heads/main",
-        "object":{"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
-    }))
-    .into_response()
-}
-
-#[tokio::test]
-async fn draft_pull_request_fails_closed_when_the_approved_base_advanced() {
-    let client = test_client(Router::new().route("/{*path}", any(advanced_base))).await;
-    let action = GitHubAction::draft_pull_request(
-        "title",
-        "feat/test",
-        "main",
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "body",
-    )
-    .unwrap();
-
-    assert!(matches!(
-        client.execute("octo", "fixture", &action).await,
-        Err(MutationError::StaleRemoteBase)
-    ));
-}
-
 #[tokio::test]
 async fn successful_non_idempotent_mutation_with_unparseable_body_is_ambiguous() {
     let client = test_client(Router::new().route("/{*path}", any(invalid_json))).await;
@@ -302,29 +263,12 @@ async fn preflight_read_with_unparseable_body_is_a_definite_invalid_response() {
         .execute(
             "octo",
             "fixture",
-            &GitHubAction::ready_pull_request(4, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-                .unwrap(),
+            &GitHubAction::ready_pull_request(4).unwrap(),
         )
         .await
         .unwrap_err();
 
     assert!(matches!(error, MutationError::InvalidResponse));
-}
-
-#[tokio::test]
-async fn close_pull_request_rejects_a_stale_live_head_before_patch() {
-    let client = test_client(Router::new().route("/{*path}", any(ready_response))).await;
-    let error = client
-        .execute(
-            "octo",
-            "fixture",
-            &GitHubAction::close_pull_request(4, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                .unwrap(),
-        )
-        .await
-        .unwrap_err();
-
-    assert!(matches!(error, MutationError::StaleRemoteHead));
 }
 
 #[tokio::test]
@@ -334,8 +278,7 @@ async fn successful_mutation_with_untrusted_semantics_is_ambiguous() {
         .execute(
             "octo",
             "fixture",
-            &GitHubAction::ready_pull_request(4, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-                .unwrap(),
+            &GitHubAction::ready_pull_request(4).unwrap(),
         )
         .await
         .unwrap_err();

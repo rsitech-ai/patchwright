@@ -4,17 +4,15 @@ use patchwright_core::{
 
 #[test]
 fn github_app_smoke_draft_action_deserializes() {
-    let sha = "a".repeat(40);
     let encoded = serde_json::json!({
         "kind": "draftPullRequest",
         "title": "[Patchwright E2E] Approval-gated draft",
         "head": "patchwright/e2e",
         "base": "main",
-        "expectedBaseSha": sha,
         "body": "qualification"
     });
     let action: GitHubAction = serde_json::from_value(encoded).unwrap();
-    assert_eq!(action.expected_base_sha(), Some(sha.as_str()));
+    assert_eq!(action.expected_base_sha(), None);
 }
 use serde_json::json;
 
@@ -22,28 +20,29 @@ const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 fn preview(action: GitHubAction) -> GitHubActionPreview {
+    let expected_head = action.expected_head_sha().map(ToOwned::to_owned);
+    let expected_base = action.expected_base_sha().map(ToOwned::to_owned);
     GitHubActionPreview::new(
         RemoteIdentity::new(123, 7, "octo/fixture").unwrap(),
         action,
-        RemotePrecondition::new(Some(SHA_A), Some(SHA_B), 9).unwrap(),
+        RemotePrecondition::new(expected_head.as_deref(), expected_base.as_deref(), 9).unwrap(),
     )
     .unwrap()
 }
 
 #[test]
-fn every_delivery_and_merge_action_has_stable_exact_identity() {
+fn every_delivery_and_merge_action_has_stable_documented_identity() {
     let actions = vec![
         GitHubAction::create_branch("feat/fix", SHA_A).unwrap(),
         GitHubAction::push_intent("feat/fix", SHA_B).unwrap(),
         GitHubAction::comment(12, "Applied the verified fix.").unwrap(),
         GitHubAction::review(12, SHA_A, ReviewEvent::Approve, "Verified.", vec![]).unwrap(),
-        GitHubAction::resolve_review_thread(12, "PRRT_kwDOExample", SHA_B).unwrap(),
+        GitHubAction::resolve_review_thread(12, "PRRT_kwDOExample").unwrap(),
         GitHubAction::check_run("Patchwright", SHA_B, "completed", Some("success")).unwrap(),
-        GitHubAction::draft_pull_request("Fix", "feat/fix", "main", &"a".repeat(40), "Body")
-            .unwrap(),
+        GitHubAction::draft_pull_request("Fix", "feat/fix", "main", "Body").unwrap(),
         GitHubAction::update_pull_request_branch(12, SHA_A).unwrap(),
-        GitHubAction::ready_pull_request(12, SHA_B).unwrap(),
-        GitHubAction::close_pull_request(12, SHA_A).unwrap(),
+        GitHubAction::ready_pull_request(12).unwrap(),
+        GitHubAction::close_pull_request(12).unwrap(),
         GitHubAction::close_issue(13).unwrap(),
         GitHubAction::enqueue_pull_request(12, SHA_B).unwrap(),
         GitHubAction::merge_pull_request(12, SHA_B, MergeMethod::Squash).unwrap(),
@@ -69,8 +68,8 @@ fn action_contract_rejects_ambiguous_or_unsafe_boundaries() {
     assert!(GitHubAction::comment(1, &"x".repeat(65_537)).is_err());
     assert!(GitHubAction::comment(1, "Authorization: Bearer ghs_secret").is_err());
     assert!(GitHubAction::close_issue(0).is_err());
-    assert!(GitHubAction::resolve_review_thread(1, "", SHA_B).is_err());
-    assert!(GitHubAction::resolve_review_thread(1, "PRRT_bad space", SHA_B).is_err());
+    assert!(GitHubAction::resolve_review_thread(1, "").is_err());
+    assert!(GitHubAction::resolve_review_thread(1, "PRRT_bad space").is_err());
     assert!(GitHubAction::merge_pull_request(1, SHA_B, MergeMethod::Merge).is_ok());
     assert!(RemoteIdentity::new(0, 7, "octo/fixture").is_err());
     assert!(RemoteIdentity::new(1, 0, "octo/fixture").is_err());

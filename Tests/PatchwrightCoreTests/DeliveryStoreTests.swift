@@ -3,26 +3,43 @@ import XCTest
 @testable import PatchwrightCore
 
 final class DeliveryStoreTests: XCTestCase {
-    func testClosePullRequestPayloadCarriesTheExactHeadSHA() throws {
-        let sha = String(repeating: "b", count: 40)
+    func testClosePullRequestPayloadIsBoundToPRIdentityWithoutAFalseSHAClaim() throws {
         let payload = GitHubActionPayload(
             kind: "closePullRequest",
-            pullRequestNumber: 7,
-            expectedHeadSha: sha
+            pullRequestNumber: 7
         )
         let object = try XCTUnwrap(
             JSONSerialization.jsonObject(with: JSONEncoder().encode(payload)) as? [String: Any]
         )
         XCTAssertEqual(object["kind"] as? String, "closePullRequest")
         XCTAssertEqual(object["pullRequestNumber"] as? UInt64, 7)
-        XCTAssertEqual(object["expectedHeadSha"] as? String, sha)
+        XCTAssertNil(object["expectedHeadSha"])
+    }
+
+    func testNonAtomicGitHubActionsDoNotClaimSHAConditions() throws {
+        let actions = [
+            GitHubActionPayload(kind: "draftPullRequest", body: "body", title: "title", head: "feat/test", base: "main"),
+            GitHubActionPayload(kind: "readyPullRequest", pullRequestNumber: 7),
+            GitHubActionPayload(kind: "closePullRequest", pullRequestNumber: 7),
+            GitHubActionPayload(kind: "resolveReviewThread", pullRequestNumber: 7, threadId: "PRRT_example"),
+        ]
+        for action in actions {
+            let object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: JSONEncoder().encode(action)) as? [String: Any]
+            )
+            XCTAssertNil(object["expectedHeadSha"], "\(action.kind) must not claim atomic head binding")
+            XCTAssertNil(object["expectedBaseSha"], "\(action.kind) must not claim atomic base binding")
+        }
+
+        let approvalSheet = try String(
+            contentsOf: repositoryRoot.appending(path: "Sources/PatchwrightApp/Views/DeliveryApprovalSheet.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(approvalSheet.contains("GitHub does not provide an atomic head-SHA condition"))
+        XCTAssertFalse(approvalSheet.contains("ready for review only if its remote head"))
     }
 
     func testDeliverySheetIsBoundToTheExactPreviewRequest() throws {
-        let repositoryRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
         let source = try String(
             contentsOf: repositoryRoot.appending(path: "Sources/PatchwrightApp/Views/TaskDetailView.swift"),
             encoding: .utf8
@@ -62,6 +79,11 @@ final class DeliveryStoreTests: XCTestCase {
         XCTAssertEqual(executionCount, 0)
     }
 }
+
+private let repositoryRoot = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
 
 private actor DeliveryEngine: EngineServing {
     private var previewCount = 0
@@ -104,7 +126,7 @@ private actor DeliveryEngine: EngineServing {
     }
 }
 
-private let deliveryPreviewJSON = #"{"taskId":"11111111-1111-1111-1111-111111111111","action":{"remote":{"repositoryId":42,"installationId":99,"repositoryFullName":"acme/widget"},"action":{"kind":"comment","issueNumber":7,"body":"Approved action A","pullRequestNumber":null,"threadId":null,"expectedHeadSha":null,"method":null,"branch":null,"fromSha":null,"headSha":null,"event":null,"inlineComments":null,"name":null,"status":null,"conclusion":null,"title":null,"head":null,"base":null},"precondition":{"expectedHeadSha":null,"expectedBaseSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","snapshotGeneration":1783944000},"payloadSha256":"payload-a","idempotencySha256":"idempotency-a","requiredPermissions":["issues:write"]},"fingerprint":{"taskId":"11111111-1111-1111-1111-111111111111","githubRepositoryId":42,"repositoryFullName":"acme/widget","actionKind":"comment","pullRequestNumber":null,"branch":null,"headSha":null,"baseSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","payloadSha256":"payload-a","policySha256":"policy-a","instructionSha256":"instruction-a","invalidationGeneration":1}}"#
+private let deliveryPreviewJSON = #"{"taskId":"11111111-1111-1111-1111-111111111111","action":{"remote":{"repositoryId":42,"installationId":99,"repositoryFullName":"acme/widget"},"action":{"kind":"comment","issueNumber":7,"body":"Approved action A","pullRequestNumber":null,"threadId":null,"expectedHeadSha":null,"method":null,"branch":null,"fromSha":null,"headSha":null,"event":null,"inlineComments":null,"name":null,"status":null,"conclusion":null,"title":null,"head":null,"base":null},"precondition":{"expectedHeadSha":null,"expectedBaseSha":null,"snapshotGeneration":1783944000},"payloadSha256":"payload-a","idempotencySha256":"idempotency-a","requiredPermissions":["issues:write"]},"fingerprint":{"taskId":"11111111-1111-1111-1111-111111111111","githubRepositoryId":42,"repositoryFullName":"acme/widget","actionKind":"comment","pullRequestNumber":null,"branch":null,"headSha":null,"baseSha":null,"payloadSha256":"payload-a","policySha256":"policy-a","instructionSha256":"instruction-a","invalidationGeneration":1}}"#
 
 private let deliveryApprovalJSON = #"{"id":"22222222-2222-2222-2222-222222222222","class":"githubMutation","capability":"issues:write","fingerprint":{"taskId":"11111111-1111-1111-1111-111111111111","githubRepositoryId":42,"repositoryFullName":"acme/widget","actionKind":"comment","pullRequestNumber":null,"branch":null,"headSha":null,"baseSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","payloadSha256":"payload-a","policySha256":"policy-a","instructionSha256":"instruction-a","invalidationGeneration":1},"approvedBy":"tester","approvedAt":"2026-07-13T12:00:00Z","expiresAt":"2026-07-13T12:05:00Z"}"#
 
