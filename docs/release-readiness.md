@@ -4,7 +4,7 @@ Patchwright uses independent release gates. A green source build is not a
 notarized release candidate, and a notarized candidate is not automatically a
 published release.
 
-Run `./script/release.sh` only from a clean commit. It builds immutable Swift and Rust Release components, validates the app, signs nested helpers and the app with Developer ID plus Hardened Runtime, notarizes and staples the app, creates/signs/notarizes/staples the DMG, verifies the mounted payload and Gatekeeper, and emits checksums plus JSON evidence.
+Run `./script/release.sh` only from a clean commit. It builds Swift and Rust Release components, records the committed `git archive` digest, validates the app, signs nested helpers and the app with Developer ID plus Hardened Runtime, notarizes and staples the app, creates/signs/notarizes/staples the DMG, verifies the mounted payload and Gatekeeper, and emits checksums plus JSON evidence. Before candidate acceptance it rechecks the final HEAD, index, tracked worktree, untracked-file set, tag, source archive digest, and `build_metadata.dirty == false`.
 
 ## Current external prerequisites
 
@@ -37,6 +37,10 @@ not upload files, create a GitHub release, or promote anything automatically.
 
 After the exact candidate passes the documented clean-machine test, run the
 separate `script/promote_release.sh` flow. Promotion revalidates the frozen
-checksums and evidence, records the reviewer-owned gate, and produces
+checksums and evidence, requires the independent reviewer identity plus the
+complete per-check clean-machine evidence manifest, and produces
 `promoted-release` status without rebuilding or changing the DMG. Only that
-promoted artifact set is eligible for GitHub Releases.
+promoted artifact set is eligible for GitHub Releases. The emitted
+`promotion-manifest.json` cryptographically binds the candidate, every gate,
+and the public evidence/asset manifests; `promotion-readiness.json` binds that
+promotion manifest by digest.

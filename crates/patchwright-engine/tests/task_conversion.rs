@@ -1,6 +1,6 @@
 use patchwright_core::{
-    Capability, CredentialHealth, RepositoryBinding, RepositoryBindingDraft,
-    RepositoryPermissionSnapshot, TaskSource,
+    CredentialHealth, RepositoryBinding, RepositoryBindingDraft, RepositoryPermissionSnapshot,
+    TaskSource,
 };
 use patchwright_engine::{
     ConversionError, ConversionRequest, EventStore, GitHubRepository, GitHubRepositoryPermissions,
@@ -139,20 +139,8 @@ fn issue_and_pull_request_convert_to_typed_tasks_with_exact_source_identity() {
     assert_eq!(issue.preview.item_number, 7);
     assert!(issue.preview.requires_confirmation);
     assert!(matches!(issue.task.source, TaskSource::GitHubIssue(_)));
-    let issue_contract = store.task_contract(issue.task.id).unwrap().unwrap();
-    assert_eq!(issue_contract.source().item_number(), Some(7));
-    assert_eq!(issue_contract.base_sha(), Some(BASE_SHA));
-    assert_eq!(
-        issue_contract.required_capabilities(),
-        &[
-            Capability::CreateBranch,
-            Capability::PushBranch,
-            Capability::CreatePullRequest,
-            Capability::PostComment,
-            Capability::CreateCheckRun,
-            Capability::CloseIssue,
-        ]
-    );
+    assert_eq!(issue.task.contract_version, 1);
+    assert!(store.task_contract(issue.task.id).unwrap().is_none());
 
     let pull_request = service.create(request(8)).unwrap();
     assert!(matches!(
@@ -161,24 +149,8 @@ fn issue_and_pull_request_convert_to_typed_tasks_with_exact_source_identity() {
     ));
     assert_eq!(pull_request.task.source.base_sha(), Some(BASE_SHA));
     assert_eq!(pull_request.task.source.head_sha(), Some(HEAD_SHA));
-    let contract = store.task_contract(pull_request.task.id).unwrap().unwrap();
-    assert_eq!(contract.base_sha(), Some(BASE_SHA));
-    assert_eq!(contract.head_sha(), Some(HEAD_SHA));
-    assert_eq!(
-        contract.required_capabilities(),
-        &[
-            Capability::PushBranch,
-            Capability::PostComment,
-            Capability::PostReview,
-            Capability::ResolveThread,
-            Capability::CreateCheckRun,
-            Capability::UpdatePullRequestBranch,
-            Capability::ReadyPullRequest,
-            Capability::ClosePullRequest,
-            Capability::EnqueuePullRequest,
-            Capability::MergePullRequest,
-        ]
-    );
+    assert_eq!(pull_request.task.contract_version, 1);
+    assert!(store.task_contract(pull_request.task.id).unwrap().is_none());
 }
 
 #[test]

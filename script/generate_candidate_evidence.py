@@ -85,7 +85,7 @@ def write(path: Path, value: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
-def identity(args: argparse.Namespace, digest: str) -> dict[str, str]:
+def identity(args: argparse.Namespace, digest: str, source_digest: str) -> dict[str, str]:
     commit = subprocess.check_output(["git", "-C", str(args.repo), "rev-parse", "HEAD"], text=True).strip()
     tag = f"v{args.version}"
     tagged = subprocess.check_output(["git", "-C", str(args.repo), "rev-parse", f"refs/tags/{tag}^{{commit}}"], text=True, stderr=subprocess.DEVNULL).strip()
@@ -98,11 +98,30 @@ def identity(args: argparse.Namespace, digest: str) -> dict[str, str]:
         "tag": tag,
         "version": args.version,
         "build": args.build,
+        "source_archive_path": "reproducibility/source.tar.gz",
+        "source_archive_sha256": source_digest,
     }
 
 
 def gate(name: str, common: dict[str, str], completed: str, checks: list[str]) -> dict[str, Any]:
     return {"schema_version": 1, "gate": name, "status": "pass", **common, "completed_at": completed, "checks": {item: True for item in checks}}
+
+
+def require_notary_summary(document: dict[str, Any], label: str) -> None:
+    summary = document.get("log_summary")
+    required = {"log_sha256", "issue_count", "error_count", "warning_count", "info_count", "warning_policy"}
+    if not isinstance(summary, dict) or set(summary) != required:
+        raise CandidateError(f"{label} notary evidence has no sanitized log summary")
+    counts = [summary.get(name) for name in ("error_count", "warning_count", "info_count")]
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", summary.get("log_sha256", ""))
+        or any(not isinstance(count, int) or isinstance(count, bool) or count < 0 for count in counts)
+        or summary.get("issue_count") != sum(counts)
+        or summary.get("error_count") != 0
+        or summary.get("warning_policy") not in {"reject", "allow"}
+        or (summary.get("warning_policy") == "reject" and summary.get("warning_count") != 0)
+    ):
+        raise CandidateError(f"{label} notary log summary is invalid")
 
 
 def parse_args() -> argparse.Namespace:
@@ -133,10 +152,14 @@ def main() -> int:
             raise CandidateError("invalid Developer ID team identifier")
         created = args.created_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         artifact_digest = sha(args.dmg)
-        common = identity(args, artifact_digest)
+        source_archive = regular(root / "reproducibility" / "source.tar.gz", "source archive")
+        source_digest = sha(source_archive)
+        common = identity(args, artifact_digest, source_digest)
 
         notary_app = load(evidence / "notary-app.json", "app notary evidence")
         notary_dmg = load(evidence / "notary-dmg.json", "DMG notary evidence")
+        require_notary_summary(notary_app, "app")
+        require_notary_summary(notary_dmg, "DMG")
         distribution = load(evidence / "distribution.json", "distribution evidence")
         secret = load(evidence / "secret-scan.json", "secret scan evidence")
         sbom = load(evidence / "sbom.spdx.json", "SPDX evidence")
@@ -176,6 +199,8 @@ def main() -> int:
 
         assembly_path = evidence / "assembly.json"
         assembly = load(assembly_path, "assembly evidence")
+        if assembly.get("dirty") is not False or assembly.get("candidate") is not True:
+            raise CandidateError("assembly evidence must record a clean candidate")
         assembly.update({
             "schema_version": 1,
             **common,
@@ -189,6 +214,8 @@ def main() -> int:
         write(assembly_path, assembly)
         metadata_path = evidence / "build-metadata.json"
         metadata = load(metadata_path, "build metadata")
+        if metadata.get("dirty") is not False:
+            raise CandidateError("build metadata must record dirty=false")
         metadata.update({"schema_version": 1, **common})
         write(metadata_path, metadata)
         distribution.update({"schema_version": 1, **common})
@@ -237,6 +264,18 @@ def main() -> int:
                 "distribution": "evidence/distribution.json",
             },
         }
+        subprocess.run(
+            [
+                str(Path(__file__).with_name("verify_release_source.py")),
+                "--repo", str(args.repo),
+                "--commit", common["git_commit"],
+                "--tag", common["tag"],
+                "--source-archive", str(source_archive),
+                "--source-archive-sha256", source_digest,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
         write(evidence / "notarized-candidate.json", candidate)
     except (CandidateError, OSError, KeyError, subprocess.SubprocessError) as error:
         print(f"candidate evidence generation failed: {error}", file=sys.stderr)

@@ -70,9 +70,9 @@ mkdir -p "$RELEASE_ROOT/evidence" "$PRIVATE_EVIDENCE"
 DMG_PATH="$RELEASE_ROOT/Patchwright-$VERSION.dmg"
 "$ROOT_DIR/script/create_dmg.sh" "$APP_PATH" "$DMG_PATH"
 "$ROOT_DIR/script/notarize_release.sh" "$DMG_PATH" "$RELEASE_ROOT/evidence/notary-dmg.json" "$PRIVATE_EVIDENCE" dmg
-"$ROOT_DIR/script/verify_distribution.sh" "$DMG_PATH"
 ARTIFACT_SHA256="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
 printf '%s  %s\n' "$ARTIFACT_SHA256" "$(basename "$DMG_PATH")" >"$DMG_PATH.sha256"
+"$ROOT_DIR/script/verify_distribution.sh" "$DMG_PATH" "$DMG_PATH.sha256"
 TEAM_ID="$(/usr/bin/codesign -dv --verbose=4 "$APP_PATH" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
 [[ "$TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || { echo "signed app has no valid TeamIdentifier" >&2; exit 65; }
 
@@ -111,6 +111,11 @@ python3 "$ROOT_DIR/script/generate_candidate_evidence.py" \
 "$ROOT_DIR/script/scan_publication_secrets.sh" --repo "$ROOT_DIR" --artifact-root "$RELEASE_ROOT" --output "$RELEASE_ROOT/evidence/secret-scan.json"
 "$ROOT_DIR/script/generate_release_metadata.sh" --phase checksums --output-root "$RELEASE_ROOT"
 CANDIDATE_MANIFEST="$RELEASE_ROOT/evidence/notarized-candidate.json"
+SOURCE_ARCHIVE="$RELEASE_ROOT/reproducibility/source.tar.gz"
+SOURCE_ARCHIVE_SHA256="$(shasum -a 256 "$SOURCE_ARCHIVE" | awk '{print $1}')"
+"$ROOT_DIR/script/verify_release_source.py" \
+  --repo "$ROOT_DIR" --commit "$COMMIT" --tag "v$VERSION" \
+  --source-archive "$SOURCE_ARCHIVE" --source-archive-sha256 "$SOURCE_ARCHIVE_SHA256"
 "$ROOT_DIR/script/verify_release_evidence.py" candidate --candidate "$CANDIDATE_MANIFEST" --repo "$ROOT_DIR"
 printf 'PATCHWRIGHT_RELEASE_ROOT=%s\nPATCHWRIGHT_APP_PATH=%s\nPATCHWRIGHT_DMG_PATH=%s\n' "$RELEASE_ROOT" "$APP_PATH" "$DMG_PATH"
 printf 'PATCHWRIGHT_CANDIDATE_MANIFEST=%s\nPATCHWRIGHT_ARTIFACT_SHA256=%s\nPATCHWRIGHT_STATUS=notarized-candidate\n' "$CANDIDATE_MANIFEST" "$ARTIFACT_SHA256"

@@ -1,8 +1,7 @@
 use crate::{EventStore, GitHubWorkItem, WorkItemKind};
 use chrono::{DateTime, Utc};
 use patchwright_core::{
-    Capability, GitHubIssueSourceInput, GitHubPullRequestSourceInput, RepositoryBindingId,
-    RiskClass, Task, TaskContract, TaskContractDraft, TaskSource,
+    GitHubIssueSourceInput, GitHubPullRequestSourceInput, RepositoryBindingId, Task, TaskSource,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -177,25 +176,8 @@ impl<'store> TaskConversionService<'store> {
         let source = task_source(item, preview.repository_id, preview.snapshot_at)?;
         let mut task = Task::new(&preview.title, &preview.repository_path)
             .map_err(|error| ConversionError::InvalidContract(error.to_string()))?;
-        task.source = source.clone();
+        task.source = source;
         task.repository_binding_id = Some(preview.repository_binding_id);
-        task.contract_version = 1;
-        let contract = TaskContract::try_from(TaskContractDraft {
-            task_id: task.id,
-            source,
-            repository_binding_id: preview.repository_binding_id,
-            goal: preview.goal.clone(),
-            acceptance_criteria: preview.acceptance_criteria.clone(),
-            base_sha: preview.base_sha.clone(),
-            head_sha: preview.head_sha.clone(),
-            instruction_digests: vec![],
-            verification_commands: vec![],
-            required_capabilities: capabilities_for(item.kind),
-            risk: RiskClass::Moderate,
-            sensitive_paths: vec![],
-            dependencies: vec![],
-        })
-        .map_err(|error| ConversionError::InvalidContract(error.to_string()))?;
         let source_key = format!(
             "github:{}:{}:{}",
             preview.repository_id,
@@ -204,38 +186,13 @@ impl<'store> TaskConversionService<'store> {
         );
         let (task, created) = self
             .store
-            .create_converted_task(&task, &contract, &source_key)
+            .create_converted_task(&task, &source_key)
             .map_err(persistence)?;
         Ok(ConversionOutcome {
             preview,
             task,
             created,
         })
-    }
-}
-
-fn capabilities_for(kind: WorkItemKind) -> Vec<Capability> {
-    match kind {
-        WorkItemKind::Issue => vec![
-            Capability::CreateBranch,
-            Capability::PushBranch,
-            Capability::CreatePullRequest,
-            Capability::PostComment,
-            Capability::CreateCheckRun,
-            Capability::CloseIssue,
-        ],
-        WorkItemKind::PullRequest => vec![
-            Capability::PushBranch,
-            Capability::PostComment,
-            Capability::PostReview,
-            Capability::ResolveThread,
-            Capability::CreateCheckRun,
-            Capability::UpdatePullRequestBranch,
-            Capability::ReadyPullRequest,
-            Capability::ClosePullRequest,
-            Capability::EnqueuePullRequest,
-            Capability::MergePullRequest,
-        ],
     }
 }
 

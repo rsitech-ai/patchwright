@@ -358,6 +358,8 @@ EOF
 require_text script/build_release_components.sh 'swift build -c release --show-bin-path'
 require_text script/build_release_components.sh '/usr/bin/ditto "$SPARKLE_FRAMEWORK" "$APP_PATH/Contents/Frameworks/Sparkle.framework"'
 require_text script/build_and_run.sh '/usr/bin/ditto "$SPARKLE_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"'
+require_text script/build_and_run.sh '"method":"system.health"'
+require_text script/build_and_run.sh '[[ "$response" == *'\''"status":"ok"'\''* ]]'
 require_text script/build_release_components.sh 'cp "$ROOT_DIR/Packaging/Patchwright.icns" "$APP_PATH/Contents/Resources/Patchwright.icns"'
 require_text script/build_and_run.sh 'cp "$ROOT_DIR/Packaging/Patchwright.icns" "$APP_BUNDLE/Contents/Resources/Patchwright.icns"'
 require_text Sources/PatchwrightApp/Views/SettingsView.swift 'SetupGuidance.readOnlyGitHub'

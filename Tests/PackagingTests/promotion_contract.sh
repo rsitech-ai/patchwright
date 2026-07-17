@@ -102,9 +102,11 @@ def identity(commit: str) -> dict[str, object]:
     }
 
 
-def gate(name: str, commit: str, digest: str, checks: list[str]) -> dict[str, object]:
+def gate(name: str, commit: str, digest: str, source_digest: str, checks: list[str]) -> dict[str, object]:
     value = identity(commit)
     value["artifact_sha256"] = digest
+    value["source_archive_path"] = "reproducibility/source.tar.gz"
+    value["source_archive_sha256"] = source_digest
     value.update({
         "schema_version": 1,
         "gate": name,
@@ -135,9 +137,11 @@ signature_dmg = signature_root / "Patchwright-0.1.0.dmg"
 signature_template = signature_root / "appcast-template.xml"
 signature_dmg.write_bytes(DMG_BYTES)
 signature_template.write_text(appcast_content("__ARCHIVE_SIGNATURE__"), encoding="utf-8")
+swift_environment = os.environ.copy()
+swift_environment.pop("SDKROOT", None)
 signature_result = subprocess.run(
     ["swift", str(root / "Tests/PackagingTests/generate_ed25519_fixture.swift"), str(signature_dmg), str(signature_template)],
-    check=True, stdout=subprocess.PIPE, text=True,
+    check=True, env=swift_environment, stdout=subprocess.PIPE, text=True,
 )
 SIGNATURES = json.loads(signature_result.stdout)
 FIXTURE_APPCAST_CONTENT = appcast_content(SIGNATURES["archive_signature"])
@@ -155,6 +159,12 @@ def create_fixture(base: Path) -> tuple[Path, Path, Path]:
     commit = initialize_repo(repo)
     evidence.mkdir(parents=True)
     external.mkdir()
+    reproducibility = release / "reproducibility"
+    reproducibility.mkdir()
+    source_archive = reproducibility / "source.tar.gz"
+    with source_archive.open("wb") as handle:
+        subprocess.run(["git", "-C", str(repo), "archive", "--format=tar.gz", commit], check=True, stdout=handle)
+    source_digest = sha(source_archive)
 
     app = release / "Patchwright.app"
     engine = app / "Contents" / "Helpers" / "patchwright-engine"
@@ -199,6 +209,8 @@ def create_fixture(base: Path) -> tuple[Path, Path, Path]:
 
     common = identity(commit)
     common["artifact_sha256"] = digest
+    common["source_archive_path"] = "reproducibility/source.tar.gz"
+    common["source_archive_sha256"] = source_digest
     write_json(evidence / "assembly.json", {
         "schema_version": 1, **common, "dirty": False, "candidate": True,
         "compliance": {
@@ -210,7 +222,7 @@ def create_fixture(base: Path) -> tuple[Path, Path, Path]:
     write_json(evidence / "build-metadata.json", {
         "schema_version": 1, **common, "bundle_identifier": "ai.patchwright.app",
         "team_id": "ABCDE12345", "architecture": "arm64", "minimum_macos": "26.0",
-        "source_date_epoch": 1752577200,
+        "source_date_epoch": 1752577200, "dirty": False,
     })
     write_json(evidence / "SYMLINKS.json", {"schema_version": 1, "links": []})
     write_json(evidence / "secret-scan.json", {
@@ -226,12 +238,16 @@ def create_fixture(base: Path) -> tuple[Path, Path, Path]:
         "schema_version": 1, "kind": "app", "submission_sha256": "6" * 64,
         "status": "Accepted", "request_id": "11111111-1111-1111-1111-111111111111",
         "stapled": True, "stapler_validated": True, "completed_at": completed,
+        "log_summary": {"log_sha256": "8" * 64, "issue_count": 0, "error_count": 0,
+                        "warning_count": 0, "info_count": 0, "warning_policy": "reject"},
     })
     write_json(evidence / "notary-dmg.json", {
         "schema_version": 1, "kind": "dmg", "submission_sha256": "7" * 64,
         "final_sha256": digest, "status": "Accepted",
         "request_id": "22222222-2222-2222-2222-222222222222",
         "stapled": True, "stapler_validated": True, "completed_at": completed,
+        "log_summary": {"log_sha256": "9" * 64, "issue_count": 0, "error_count": 0,
+                        "warning_count": 0, "info_count": 0, "warning_policy": "reject"},
     })
     distribution_checks = [
         "dmg_signature", "dmg_ticket", "dmg_gatekeeper", "app_signature", "app_ticket",
@@ -250,12 +266,51 @@ def create_fixture(base: Path) -> tuple[Path, Path, Path]:
         "github": ["authorized_sandbox", "app_identity", "delivery", "exact_sha_approval", "merge", "kill_switch"],
         "clean_machine": ["checksum", "dmg_signature", "dmg_ticket", "dmg_gatekeeper", "app_signature", "app_ticket", "app_gatekeeper", "first_launch", "relaunch"],
     }
-    write_json(evidence / "repo.json", gate("repo", commit, digest, gate_checks["repo"]))
-    write_json(evidence / "secret-scan-gate.json", gate("secret_scan", commit, digest, gate_checks["secret_scan"]))
-    write_json(evidence / "compliance-gate.json", gate("compliance", commit, digest, gate_checks["compliance"]))
-    codex = gate("codex", commit, digest, gate_checks["codex"])
-    github = gate("github", commit, digest, gate_checks["github"])
-    clean_machine = gate("clean_machine", commit, digest, gate_checks["clean_machine"])
+    write_json(evidence / "repo.json", gate("repo", commit, digest, source_digest, gate_checks["repo"]))
+    write_json(evidence / "secret-scan-gate.json", gate("secret_scan", commit, digest, source_digest, gate_checks["secret_scan"]))
+    write_json(evidence / "compliance-gate.json", gate("compliance", commit, digest, source_digest, gate_checks["compliance"]))
+    codex = gate("codex", commit, digest, source_digest, gate_checks["codex"])
+    github = gate("github", commit, digest, source_digest, gate_checks["github"])
+    clean_checks = [
+        "checksum", "dmg_signature", "dmg_ticket", "dmg_gatekeeper", "app_signature",
+        "app_ticket", "app_gatekeeper", "first_launch", "relaunch",
+        "missing_integration_guidance", "codex_thread_resume", "github_ingestion_without_gh",
+        "offline_state", "expired_token_state", "revoked_installation_state",
+        "missing_permission_state", "approval_delivery", "stale_head_rejection",
+        "exact_sha_merge", "queue_advancement", "migration", "update_relaunch",
+        "uninstall_data_retention", "explicit_data_removal",
+    ]
+    clean_evidence: dict[str, object] = {}
+    for name in clean_checks:
+        check_path = external / "clean-machine-checks" / f"{name}.txt"
+        check_path.parent.mkdir(exist_ok=True)
+        check_path.write_text(f"{name}: pass\n", encoding="utf-8")
+        clean_evidence[name] = {
+            "path": f"clean-machine-checks/{name}.txt",
+            "sha256": sha(check_path),
+        }
+    manifest = {
+        "schema_version": 1,
+        "kind": "patchwright.clean-machine-evidence-manifest",
+        "checks": clean_evidence,
+    }
+    manifest_path = external / "clean-machine-evidence-manifest.json"
+    write_json(manifest_path, manifest)
+    clean_machine = gate("clean_machine", commit, digest, source_digest, clean_checks)
+    clean_machine["schema_version"] = 2
+    clean_machine["reviewer"] = {
+        "name": "Independent Fixture Reviewer",
+        "identity": "reviewer@example.invalid",
+        "independent": True,
+    }
+    clean_machine["checks"] = {
+        name: {"status": "pass", "evidence": evidence}
+        for name, evidence in clean_evidence.items()
+    }
+    clean_machine["evidence_manifest"] = {
+        "path": manifest_path.name,
+        "sha256": sha(manifest_path),
+    }
     clean_machine["guest"] = {
         "product_version": "26.5", "build_version": "25F71", "architecture": "arm64",
         "gatekeeper_enabled": True, "source": "apple-ipsw:26.5:25F71:fixture-image-sha256",
@@ -280,6 +335,8 @@ def create_fixture(base: Path) -> tuple[Path, Path, Path]:
         "tag": "v0.1.0",
         "version": "0.1.0",
         "build": "1",
+        "source_archive_path": "reproducibility/source.tar.gz",
+        "source_archive_sha256": source_digest,
         "bundle_identifier": "ai.patchwright.app",
         "created_at": created,
         "signing": {
@@ -333,12 +390,18 @@ if result.returncode != 0:
     raise SystemExit(f"promotion happy path failed: {result.stderr}")
 if "PATCHWRIGHT_STATUS=promoted-release" not in result.stdout:
     raise SystemExit("promotion happy path did not emit promoted-release status")
-for name in ("release-evidence.json", "release-assets.json", "promotion-readiness.json"):
+for name in ("release-evidence.json", "release-assets.json", "promotion-manifest.json", "promotion-readiness.json"):
     if not (output / name).is_file():
         raise SystemExit(f"promotion output missing: {name}")
 readiness = json.loads((output / "promotion-readiness.json").read_text(encoding="utf-8"))
 if readiness.get("ready") is not True:
     raise SystemExit("promotion readiness did not report ready=true")
+promotion_manifest = json.loads((output / "promotion-manifest.json").read_text(encoding="utf-8"))
+if (promotion_manifest.get("candidate_sha256") != sha(candidate)
+        or promotion_manifest.get("release_assets_sha256") != sha(output / "release-assets.json")
+        or promotion_manifest.get("release_evidence_sha256") != sha(output / "release-evidence.json")
+        or readiness.get("promotion_manifest_sha256") != sha(output / "promotion-manifest.json")):
+    raise SystemExit("promotion manifest did not bind candidate and publication outputs")
 
 
 def promotion_command(repo: Path, candidate: Path, external: Path, output: Path) -> list[str]:
@@ -412,6 +475,33 @@ def artifact_digest_mismatch(_repo, candidate, _external, _output, _command):
 require_rejected("artifact-digest-mismatch", artifact_digest_mismatch)
 
 
+def dirty_build_metadata(_repo, candidate, _external, _output, _command):
+    path = candidate.parent / "build-metadata.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["dirty"] = True
+    write_json(path, value)
+    refreeze(candidate)
+
+
+require_rejected("dirty-build-metadata", dirty_build_metadata)
+
+
+def dirty_release_repo(repo, _candidate, _external, _output, _command):
+    (repo / "README.md").write_text("dirty fixture\n", encoding="utf-8")
+
+
+require_rejected("dirty-release-repository", dirty_release_repo)
+
+
+def source_archive_digest_mismatch(_repo, candidate, _external, _output, _command):
+    archive = candidate.parent.parent / "reproducibility/source.tar.gz"
+    archive.write_bytes(archive.read_bytes() + b"tamper\n")
+    refreeze(candidate)
+
+
+require_rejected("source-archive-digest-mismatch", source_archive_digest_mismatch)
+
+
 def gate_digest_mismatch(_repo, _candidate, external, _output, _command):
     gate_path = external / "github.json"
     value = json.loads(gate_path.read_text(encoding="utf-8"))
@@ -440,6 +530,43 @@ def stale_gate(_repo, _candidate, external, _output, _command):
 
 
 require_rejected("stale-gate", stale_gate)
+
+
+def missing_clean_reviewer(_repo, _candidate, external, _output, _command):
+    path = external / "clean-machine.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value.pop("reviewer")
+    write_json(path, value)
+
+
+require_rejected("missing-clean-machine-reviewer", missing_clean_reviewer)
+
+
+def tampered_clean_check(_repo, _candidate, external, _output, _command):
+    (external / "clean-machine-checks/first_launch.txt").write_text("tampered\n", encoding="utf-8")
+
+
+require_rejected("tampered-clean-machine-check", tampered_clean_check)
+
+
+def tampered_clean_manifest(_repo, _candidate, external, _output, _command):
+    path = external / "clean-machine-evidence-manifest.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["checks"].pop("relaunch")
+    write_json(path, value)
+
+
+require_rejected("tampered-clean-machine-manifest", tampered_clean_manifest)
+
+
+def escaping_clean_evidence(_repo, _candidate, external, _output, _command):
+    path = external / "clean-machine.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["checks"]["first_launch"]["evidence"]["path"] = "../outside.txt"
+    write_json(path, value)
+
+
+require_rejected("escaping-clean-machine-evidence", escaping_clean_evidence)
 
 
 def symlink_gate(_repo, _candidate, external, _output, _command):
@@ -493,6 +620,17 @@ def rejected_notary(_repo, candidate, _external, _output, _command):
 
 
 require_rejected("rejected-notary-evidence", rejected_notary)
+
+
+def missing_notary_log_summary(_repo, candidate, _external, _output, _command):
+    path = candidate.parent / "notary-app.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value.pop("log_summary")
+    write_json(path, value)
+    refreeze(candidate)
+
+
+require_rejected("missing-notary-log-summary", missing_notary_log_summary)
 
 
 def dirty_secret_scan(_repo, candidate, _external, _output, _command):
@@ -690,7 +828,7 @@ published = (leak_output / "release-evidence.json").read_text(encoding="utf-8") 
 if "/Users/" in published or "PRIVATE-NOTARY-LOG" in published:
     raise SystemExit("public promotion outputs leaked unvalidated local fields")
 
-print("promotion matrix: 25 safety categories passed")
+print("promotion matrix: 29 safety categories passed")
 PY
 
 echo "Patchwright promotion contract passed"

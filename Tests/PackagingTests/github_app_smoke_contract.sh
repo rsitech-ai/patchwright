@@ -53,5 +53,11 @@ grep -Fq 'kind:"review",pullRequestNumber:$pullRequestNumber,expectedHeadSha:$ex
   echo "live review smoke must include expectedHeadSha inside the review action" >&2
   exit 1
 }
+grep -Fq 'kind:"draftPullRequest",title:$title,head:$head,base:$base,body:$body' "$SMOKE" || {
+  echo "live draft PR smoke must use the documented branch-identity schema" >&2
+  exit 1
+}
+cargo test --manifest-path "$ROOT_DIR/Cargo.toml" -p patchwright-core \
+  --test github_action_contract github_app_smoke_draft_action_deserializes --quiet
 
 printf 'GitHub App smoke safety contract passed\n'

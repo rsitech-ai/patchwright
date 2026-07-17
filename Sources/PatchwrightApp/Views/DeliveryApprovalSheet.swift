@@ -4,43 +4,45 @@ import SwiftUI
 struct DeliveryApprovalSheet: View {
     @ObservedObject var store: WorkspaceStore
     let task: EngineeringTask
+    let preview: DeliveryPreview
     @Environment(\.dismiss) private var dismiss
 
-    private var preview: DeliveryPreview? { store.deliveryPreviews[task.id] }
-    private var approval: DeliveryApproval? { store.deliveryApprovals[task.id] }
-    private var execution: DeliveryExecution? { store.deliveryExecutions[task.id] }
+    private var approval: DeliveryApproval? {
+        store.deliveryApprovals[task.id].flatMap { $0.fingerprint == preview.fingerprint ? $0 : nil }
+    }
+    private var execution: DeliveryExecution? {
+        store.deliveryPreviews[task.id] == preview ? store.deliveryExecutions[task.id] : nil
+    }
 
     var body: some View {
         NavigationStack {
             Form {
-                if let preview {
-                    Section("Exact GitHub write") {
-                        LabeledContent("Target", value: preview.action.remote.repositoryFullName)
-                        if let number = preview.action.action.issueNumber ?? preview.action.action.pullRequestNumber {
-                            LabeledContent("Item", value: "#\(number)")
-                        }
-                        LabeledContent("Action", value: preview.fingerprint.actionKind)
-                        if let branch = preview.action.action.branch ?? preview.action.action.head {
-                            LabeledContent("Branch", value: branch)
-                        }
-                        if let threadID = preview.action.action.threadId {
-                            LabeledContent("Review thread", value: threadID)
-                                .textSelection(.enabled)
-                        }
-                        if let deliveryHead = preview.action.action.headSha {
-                            LabeledContent("Delivery commit", value: short(deliveryHead))
-                        }
-                        LabeledContent("Head", value: short(preview.fingerprint.headSha))
-                        LabeledContent("Base", value: short(preview.fingerprint.baseSha))
-                        LabeledContent("Snapshot", value: "Generation \(preview.fingerprint.invalidationGeneration)")
-                        LabeledContent("Payload", value: String(preview.action.payloadSha256.prefix(12)))
-                        LabeledContent("Permissions", value: preview.action.requiredPermissions.joined(separator: ", "))
+                Section("Exact GitHub write") {
+                    LabeledContent("Target", value: preview.action.remote.repositoryFullName)
+                    if let number = preview.action.action.issueNumber ?? preview.action.action.pullRequestNumber {
+                        LabeledContent("Item", value: "#\(number)")
                     }
-                    Section(preview.action.action.kind == "mergePullRequest" ? "Merge operation" : "Remote content") {
-                        Text(actionSummary(preview.action.action))
+                    LabeledContent("Action", value: preview.fingerprint.actionKind)
+                    if let branch = preview.action.action.branch ?? preview.action.action.head {
+                        LabeledContent("Branch", value: branch)
+                    }
+                    if let threadID = preview.action.action.threadId {
+                        LabeledContent("Review thread", value: threadID)
                             .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    if let deliveryHead = preview.action.action.headSha {
+                        LabeledContent("Delivery commit", value: short(deliveryHead))
+                    }
+                    LabeledContent("Head", value: short(preview.fingerprint.headSha))
+                    LabeledContent("Base", value: short(preview.fingerprint.baseSha))
+                    LabeledContent("Snapshot", value: "Generation \(preview.fingerprint.invalidationGeneration)")
+                    LabeledContent("Payload", value: String(preview.action.payloadSha256.prefix(12)))
+                    LabeledContent("Permissions", value: preview.action.requiredPermissions.joined(separator: ", "))
+                }
+                Section(preview.action.action.kind == "mergePullRequest" ? "Merge operation" : "Remote content") {
+                    Text(actionSummary(preview.action.action))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 if let approval {
                     Section("Approval") {
@@ -69,19 +71,19 @@ struct DeliveryApprovalSheet: View {
                 }
             }
             .formStyle(.grouped)
-            .navigationTitle(preview?.action.action.kind == "mergePullRequest" ? "Approve Pull Request Merge" : "Approve GitHub Delivery")
+            .navigationTitle(preview.action.action.kind == "mergePullRequest" ? "Approve Pull Request Merge" : "Approve GitHub Delivery")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     if execution == nil {
                         if approval == nil {
-                            Button(preview?.action.action.kind == "mergePullRequest" ? "Approve Merge" : "Approve Action") {
-                                Task { await store.approveDelivery(taskID: task.id) }
+                            Button(preview.action.action.kind == "mergePullRequest" ? "Approve Merge" : "Approve Action") {
+                                Task { await store.approveDelivery(preview) }
                             }
-                                .disabled(preview == nil || store.deliveryBusyTaskIDs.contains(task.id))
+                                .disabled(store.deliveryPreviews[task.id] != preview || store.deliveryBusyTaskIDs.contains(task.id))
                         } else {
-                            Button(preview?.action.action.kind == "mergePullRequest" ? "Execute Approved Merge" : "Execute Approved Action") {
-                                Task { await store.executeDelivery(taskID: task.id) }
+                            Button(preview.action.action.kind == "mergePullRequest" ? "Execute Approved Merge" : "Execute Approved Action") {
+                                Task { await store.executeDelivery(preview) }
                             }
                                 .disabled(store.deliveryBusyTaskIDs.contains(task.id))
                         }
@@ -103,8 +105,8 @@ struct DeliveryApprovalSheet: View {
         case "closeIssue": "Close this issue as completed."
         case "closePullRequest": "Close this pull request without merging it."
         case "updatePullRequestBranch": "Request GitHub to update the pull request branch at the captured head SHA."
-        case "readyPullRequest": "Mark this draft pull request ready for review only if its remote head still matches the captured SHA."
-        case "resolveReviewThread": "Resolve only the selected review thread after GitHub confirms it belongs to this pull request and captured head SHA."
+        case "readyPullRequest": "Mark this exact draft pull request ready for review. GitHub does not provide an atomic head-SHA condition for this operation."
+        case "resolveReviewThread": "Resolve only the selected review thread after GitHub confirms it belongs to this pull request."
         case "checkRun": "Publish the exact Patchwright check-run status for this commit."
         case "mergePullRequest": "\((action.method ?? "merge").capitalized) the exact approved head SHA into the default branch."
         default: "Execute this exact approval-bound GitHub action."

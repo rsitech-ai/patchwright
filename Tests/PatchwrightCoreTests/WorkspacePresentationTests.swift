@@ -76,7 +76,7 @@ final class WorkspacePresentationTests: XCTestCase {
         XCTAssertNotNil(store.selectedWorkItem)
         XCTAssertNotNil(store.selectedRepository)
 
-        store.primarySelection = .issues
+        store.selectSection(.issues)
 
         XCTAssertNil(store.selectedWorkItemID)
         XCTAssertNil(store.selectedRepositoryID)

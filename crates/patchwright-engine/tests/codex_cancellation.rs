@@ -10,6 +10,7 @@ use patchwright_engine::codex::process::{
 use patchwright_engine::codex::service::CodexService;
 use std::process::Command;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 fn advance_to_preparing(task: &mut Task) {
@@ -32,6 +33,76 @@ async fn service(root: &std::path::Path, body: &str, grace: std::time::Duration)
         ..CodexProcessConfig::default()
     };
     CodexService::new(CodexProcessFactory::new(executable, config), version)
+}
+
+async fn wait_for_pid(path: &std::path::Path) -> i32 {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Ok(value) = std::fs::read_to_string(path)
+                && let Ok(pid) = value.trim().parse::<i32>()
+            {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for descendant pid at {}", path.display()))
+}
+
+#[tokio::test]
+async fn shutdown_concurrently_kills_owned_groups_and_persists_interrupted_jobs() {
+    let root = tempdir().unwrap();
+    let body = format!(
+        r#"{}
+trap '' TERM
+(trap '' TERM; sleep 60) &
+printf '%s\n' "$!" > descendant.pid
+while :; do sleep 1; done"#,
+        handshake()
+    );
+    let mut service = service(root.path(), &body, Duration::from_millis(400)).await;
+    let database = root.path().join("events.sqlite");
+    let store = Mutex::new(EventStore::open(&database).unwrap());
+    let mut descendant_pids = Vec::new();
+
+    for ordinal in 0..2 {
+        let worktree = root.path().join(format!("worktree-{ordinal}"));
+        std::fs::create_dir(&worktree).unwrap();
+        let mut task = Task::new(
+            format!("Shutdown task {ordinal}"),
+            worktree.to_str().unwrap(),
+        )
+        .unwrap();
+        advance_to_preparing(&mut task);
+        store.lock().unwrap().save_task(&task, "prepared").unwrap();
+        service.start(task.id, &store).await.unwrap();
+        let pid = wait_for_pid(&worktree.join("descendant.pid")).await;
+        descendant_pids.push(pid);
+    }
+
+    let started = Instant::now();
+    service.shutdown(&store).await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(700),
+        "owned process groups were shut down serially: {:?}",
+        started.elapsed()
+    );
+    for pid in descendant_pids {
+        assert!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err(),
+            "owned descendant {pid} survived engine shutdown"
+        );
+    }
+    let connection = rusqlite::Connection::open(database).unwrap();
+    let interrupted: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM jobs WHERE state = 'interrupted'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(interrupted, 2);
 }
 
 fn handshake() -> &'static str {

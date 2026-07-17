@@ -126,6 +126,56 @@ impl CodexService {
         }
     }
 
+    /// Terminates every owned app-server process and records non-terminal jobs
+    /// as interrupted before the engine releases its database lease.
+    pub async fn shutdown(&mut self, store: &Mutex<EventStore>) -> Result<(), CodexServiceError> {
+        let active = self
+            .active
+            .drain()
+            .map(|(_, active)| active)
+            .collect::<Vec<_>>();
+        let execution_job_ids = active
+            .iter()
+            .map(|active| active.execution_job_id)
+            .collect::<Vec<_>>();
+        let mut terminations = tokio::task::JoinSet::new();
+        for mut active in active {
+            terminations.spawn(async move { active.process.terminate().await });
+        }
+        let mut first_process_error = None;
+        while let Some(termination) = terminations.join_next().await {
+            match termination {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(error = %error, "terminate Codex app-server during shutdown");
+                    if first_process_error.is_none() {
+                        first_process_error = Some(error);
+                    }
+                }
+                Err(error) => tracing::error!(error = %error, "join Codex shutdown task"),
+            }
+        }
+        for execution_job_id in execution_job_ids {
+            let store = lock_store(store)?;
+            if let Some(job) = store.job(execution_job_id)? {
+                if matches!(job.state(), JobState::Running | JobState::Cancelling) {
+                    let _ = store.transition_job(
+                        job.id(),
+                        job.state(),
+                        JobState::Interrupted,
+                        job.cancellation(),
+                        "Engine shutdown interrupted Codex execution",
+                        job.checkpoint(),
+                    )?;
+                }
+            }
+        }
+        if let Some(error) = first_process_error {
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
     pub fn status(
         &self,
         task_id: TaskId,

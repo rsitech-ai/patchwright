@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 @MainActor
@@ -32,6 +33,23 @@ final class EngineProcessController: ObservableObject {
         }
     }
 
-    deinit { process?.terminate() }
-}
+    func shutdown() {
+        guard let process else { return }
+        self.process = nil
+        guard process.isRunning else { return }
 
+        process.terminate()
+        let shutdownDeadline = Date.now.addingTimeInterval(2)
+        while process.isRunning, Date.now < shutdownDeadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        if process.isRunning {
+            _ = Darwin.kill(process.processIdentifier, SIGKILL)
+            process.waitUntilExit()
+        }
+    }
+
+    deinit {
+        if process?.isRunning == true { process?.terminate() }
+    }
+}

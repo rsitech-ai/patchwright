@@ -168,6 +168,8 @@ fn task_contract_rejects_empty_acceptance_and_duplicate_dependencies() {
         acceptance_criteria: vec!["Focused test passes".into()],
         base_sha: Some("a".repeat(40)),
         head_sha: None,
+        source_sha256: "b".repeat(64),
+        repository_sha256: "c".repeat(64),
         instruction_digests: vec![InstructionDigest::new("AGENTS.md", "d".repeat(64), 10).unwrap()],
         verification_commands: vec![VerificationCommand::new("cargo", ["test"]).unwrap()],
         required_capabilities: Vec::new(),
@@ -188,9 +190,57 @@ fn task_contract_rejects_empty_acceptance_and_duplicate_dependencies() {
     );
     assert!(
         TaskContract::try_from(TaskContractDraft {
+            verification_commands: Vec::new(),
+            ..draft.clone()
+        })
+        .is_err(),
+        "a task must never become a validated contract without an executable verification boundary"
+    );
+    assert!(
+        TaskContract::try_from(TaskContractDraft {
             dependencies: vec![dependency, dependency],
             ..draft
         })
+        .is_err()
+    );
+}
+
+#[test]
+fn serialized_contracts_revalidate_commands_instead_of_trusting_private_fields() {
+    let binding = repository_binding();
+    let task = Task::new("Fix issue", "/tmp/hello").unwrap();
+    let contract = TaskContract::try_from(TaskContractDraft {
+        task_id: task.id,
+        source: TaskSource::LocalRequest,
+        repository_binding_id: binding.id(),
+        goal: "Fix the observed failure".into(),
+        acceptance_criteria: vec!["Focused test passes".into()],
+        base_sha: Some("a".repeat(40)),
+        head_sha: None,
+        source_sha256: "b".repeat(64),
+        repository_sha256: "c".repeat(64),
+        instruction_digests: vec![InstructionDigest::new("AGENTS.md", "d".repeat(64), 10).unwrap()],
+        verification_commands: vec![VerificationCommand::new("cargo", ["test"]).unwrap()],
+        required_capabilities: Vec::new(),
+        risk: RiskClass::Moderate,
+        sensitive_paths: Vec::new(),
+        dependencies: Vec::new(),
+    })
+    .unwrap();
+
+    let mut empty_commands = serde_json::to_value(&contract).unwrap();
+    empty_commands["verificationCommands"] = serde_json::json!([]);
+    assert!(serde_json::from_value::<TaskContract>(empty_commands).is_err());
+
+    let mut malformed_command = serde_json::to_value(&contract).unwrap();
+    malformed_command["verificationCommands"][0]["program"] = serde_json::json!("  ");
+    assert!(serde_json::from_value::<TaskContract>(malformed_command).is_err());
+
+    assert!(
+        serde_json::from_value::<VerificationCommand>(serde_json::json!({
+            "program": "cargo\nsh",
+            "args": ["test"]
+        }))
         .is_err()
     );
 }

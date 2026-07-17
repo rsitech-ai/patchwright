@@ -1,6 +1,6 @@
 use crate::{
     CancellationState, GitHubAccount, GitHubRepository, GitHubRepositorySnapshot, Job,
-    JobCheckpoint, JobId, JobState, MonitorRecord, TaskCheckpoint,
+    JobCheckpoint, JobId, JobState, MonitorRecord, TaskCheckpoint, VerificationEvidence,
     codex::service::CodexRuntimeApproval,
     codex::session::{CodexEventDraft, CodexEventRecord, CodexSessionRecord, CodexSessionStatus},
     jobs::validate_summary,
@@ -19,6 +19,21 @@ pub struct EventStore {
     connection: Connection,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreparationClaimOutcome {
+    Claimed,
+    ApprovalUnavailable,
+    AlreadyClaimed,
+    TaskInProgress,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookIngestOutcome {
+    pub inserted: bool,
+    pub monitors_woken: usize,
+}
+
 impl EventStore {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -33,6 +48,7 @@ impl EventStore {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         apply_migrations(&mut connection)?;
         let store = Self { connection };
+        store.recover_interrupted_preparations()?;
         store.recover_interrupted_jobs()?;
         Ok(store)
     }
@@ -44,6 +60,109 @@ impl EventStore {
         let rows = statement.query_map([], |row| row.get(0))?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("load schema migration versions")
+    }
+
+    pub fn ingest_github_webhook(
+        &self,
+        delivery: &patchwright_relay::ForwardedWebhook,
+    ) -> Result<WebhookIngestOutcome> {
+        validate_forwarded_webhook(delivery)?;
+        let transaction = self.connection.unchecked_transaction()?;
+        let inserted = transaction.execute(
+            "INSERT OR IGNORE INTO github_webhook_deliveries(
+                 delivery_id, event, action, repository_full_name,
+                 entity_number, payload_sha256, received_at, ingested_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                delivery.delivery_id,
+                delivery.envelope.event,
+                delivery.envelope.action,
+                delivery.envelope.repository_full_name,
+                delivery.envelope.entity_number,
+                delivery.payload_sha256,
+                delivery.received_at,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )? == 1;
+        if !inserted {
+            transaction.rollback()?;
+            return Ok(WebhookIngestOutcome {
+                inserted: false,
+                monitors_woken: 0,
+            });
+        }
+
+        let mut monitors = Vec::new();
+        if let Some(repository) = delivery.envelope.repository_full_name.as_deref() {
+            let mut statement = if delivery.envelope.entity_number.is_some() {
+                transaction.prepare(
+                    "SELECT payload FROM monitors
+                     WHERE state = 'pending' AND repository_full_name = ?1
+                       AND pull_request_number = ?2
+                     ORDER BY id",
+                )?
+            } else {
+                transaction.prepare(
+                    "SELECT payload FROM monitors
+                     WHERE state = 'pending' AND repository_full_name = ?1
+                     ORDER BY id",
+                )?
+            };
+            if let Some(number) = delivery.envelope.entity_number {
+                let rows = statement
+                    .query_map(params![repository, number], |row| row.get::<_, String>(0))?;
+                for row in rows {
+                    monitors.push(
+                        serde_json::from_str::<MonitorRecord>(&row?)
+                            .context("decode webhook monitor")?,
+                    );
+                }
+            } else {
+                let rows = statement.query_map([repository], |row| row.get::<_, String>(0))?;
+                for row in rows {
+                    monitors.push(
+                        serde_json::from_str::<MonitorRecord>(&row?)
+                            .context("decode webhook monitor")?,
+                    );
+                }
+            }
+        }
+
+        let now = chrono::Utc::now();
+        let mut monitors_woken = 0;
+        for monitor in &mut monitors {
+            if !monitor.wake(now) {
+                continue;
+            }
+            transaction.execute(
+                "UPDATE monitors
+                 SET state = ?2, next_attempt_at = ?3, payload = ?4, updated_at = ?5
+                 WHERE id = ?1 AND state = 'pending'",
+                params![
+                    monitor.id.to_string(),
+                    enum_name(monitor.state),
+                    monitor.next_attempt_at.map(|value| value.to_rfc3339()),
+                    serde_json::to_string(monitor)?,
+                    monitor.updated_at.to_rfc3339(),
+                ],
+            )?;
+            monitors_woken += 1;
+        }
+        transaction.commit()?;
+        Ok(WebhookIngestOutcome {
+            inserted: true,
+            monitors_woken,
+        })
+    }
+
+    pub fn github_webhook_delivery_count(&self) -> Result<usize> {
+        self.connection
+            .query_row(
+                "SELECT COUNT(*) FROM github_webhook_deliveries",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     pub fn save_task(&self, task: &Task, summary: &str) -> Result<()> {
@@ -111,6 +230,33 @@ impl EventStore {
         )?;
         let rows = statement.query_map([task_id.to_string()], |row| row.get::<_, String>(0))?;
         rows.map(|row| decode_json_row(row, "task checkpoint"))
+            .collect::<Result<Vec<_>>>()
+    }
+
+    pub fn save_verification_evidence(&self, evidence: &VerificationEvidence) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO verification_evidence(
+                 task_id, run_id, ordinal, success, payload, completed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                evidence.task_id.to_string(),
+                evidence.run_id.to_string(),
+                evidence.ordinal,
+                evidence.success,
+                serde_json::to_string(evidence)?,
+                evidence.completed_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn verification_evidence(&self, task_id: TaskId) -> Result<Vec<VerificationEvidence>> {
+        let mut statement = self.connection.prepare(
+            "SELECT payload FROM verification_evidence
+             WHERE task_id = ?1 ORDER BY completed_at, run_id, ordinal",
+        )?;
+        let rows = statement.query_map([task_id.to_string()], |row| row.get::<_, String>(0))?;
+        rows.map(|row| decode_json_row(row, "verification evidence"))
             .collect::<Result<Vec<_>>>()
     }
 
@@ -419,6 +565,89 @@ impl EventStore {
             .context("load approval action digest")
     }
 
+    pub fn claim_preparation(
+        &self,
+        approval_id: uuid::Uuid,
+        task_id: patchwright_core::TaskId,
+        action_digest: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<PreparationClaimOutcome> {
+        let approval_id = approval_id.to_string();
+        let task_id = task_id.to_string();
+        let inserted = self.connection.execute(
+            "INSERT OR IGNORE INTO preparation_claims(
+                 approval_id, task_id, action_digest, claimed_at
+             )
+             SELECT ?1, ?2, ?3, ?4 FROM approvals
+             WHERE id = ?1
+               AND task_id = ?2
+               AND capability = 'prepareWorktree'
+               AND action_digest = ?3
+               AND invalidated_at IS NULL
+               AND julianday(expires_at) > julianday(?4)",
+            params![approval_id, task_id, action_digest, now.to_rfc3339()],
+        )?;
+        if inserted == 1 {
+            return Ok(PreparationClaimOutcome::Claimed);
+        }
+        let already_claimed: bool = self.connection.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM preparation_claims WHERE approval_id = ?1
+             )",
+            [&approval_id],
+            |row| row.get(0),
+        )?;
+        if already_claimed {
+            return Ok(PreparationClaimOutcome::AlreadyClaimed);
+        }
+        let approval_available: bool = self.connection.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM approvals
+                 WHERE id = ?1
+                   AND task_id = ?2
+                   AND capability = 'prepareWorktree'
+                   AND action_digest = ?3
+                   AND invalidated_at IS NULL
+                   AND julianday(expires_at) > julianday(?4)
+             )",
+            params![approval_id, task_id, action_digest, now.to_rfc3339()],
+            |row| row.get(0),
+        )?;
+        if !approval_available {
+            return Ok(PreparationClaimOutcome::ApprovalUnavailable);
+        }
+        Ok(PreparationClaimOutcome::TaskInProgress)
+    }
+
+    pub fn complete_preparation_claim(&self, approval_id: uuid::Uuid, result: &str) -> Result<()> {
+        anyhow::ensure!(
+            matches!(result, "succeeded" | "failed" | "interrupted"),
+            "invalid preparation result"
+        );
+        let updated = self.connection.execute(
+            "UPDATE preparation_claims
+             SET result = ?2, completed_at = ?3
+             WHERE approval_id = ?1 AND completed_at IS NULL",
+            params![
+                approval_id.to_string(),
+                result,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )?;
+        anyhow::ensure!(updated == 1, "preparation approval is not actively claimed");
+        Ok(())
+    }
+
+    fn recover_interrupted_preparations(&self) -> Result<()> {
+        self.connection.execute(
+            "UPDATE preparation_claims
+             SET result = 'interrupted', completed_at = ?1
+             WHERE completed_at IS NULL",
+            [chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
     fn load_json_optional<T: DeserializeOwned>(
         &self,
         statement: &str,
@@ -457,20 +686,7 @@ impl EventStore {
             .collect::<Result<Vec<_>>>()
     }
 
-    pub fn create_converted_task(
-        &self,
-        task: &Task,
-        contract: &TaskContract,
-        source_key: &str,
-    ) -> Result<(Task, bool)> {
-        anyhow::ensure!(
-            task.id == contract.task_id(),
-            "task contract ID does not match"
-        );
-        anyhow::ensure!(
-            task.repository_binding_id == Some(contract.repository_binding_id()),
-            "task contract binding does not match"
-        );
+    pub fn create_converted_task(&self, task: &Task, source_key: &str) -> Result<(Task, bool)> {
         anyhow::ensure!(!source_key.is_empty(), "source key is required");
         let transaction = self.connection.unchecked_transaction()?;
         let existing_task_id: Option<String> = transaction
@@ -502,17 +718,6 @@ impl EventStore {
             params![task.id.to_string(), task_payload, occurred_at],
         )?;
         transaction.execute(
-            "INSERT INTO task_contracts(task_id, binding_id, version, payload, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                task.id.to_string(),
-                contract.repository_binding_id().to_string(),
-                contract.version(),
-                serde_json::to_string(contract)?,
-                occurred_at,
-            ],
-        )?;
-        transaction.execute(
             "INSERT INTO task_sources(source_key, task_id, created_at) VALUES (?1, ?2, ?3)",
             params![source_key, task.id.to_string(), occurred_at],
         )?;
@@ -530,24 +735,60 @@ impl EventStore {
     }
 
     pub fn claim_delivery(&self, key: &str) -> Result<bool> {
-        let reset = self.connection.execute(
+        self.claim_delivery_with_task_event(key, None)
+    }
+
+    pub fn claim_delivery_with_task_event(
+        &self,
+        key: &str,
+        task_event: Option<&(Task, String)>,
+    ) -> Result<bool> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let task_id = task_event.map(|(task, _)| task.id.to_string());
+        let reset = transaction.execute(
             "UPDATE deliveries
-             SET claimed_at = datetime('now'), result = NULL, completed_at = NULL
+             SET claimed_at = datetime('now'), result = NULL, completed_at = NULL,
+                 task_id = COALESCE(?2, task_id)
              WHERE key = ?1
                AND CASE
                    WHEN json_valid(result) THEN json_extract(result, '$.state') = 'failed'
                    ELSE 0
                END",
-            [key],
+            params![key, task_id],
         )?;
-        if reset == 1 {
-            return Ok(true);
+        let claimed = if reset == 1 {
+            true
+        } else {
+            transaction.execute(
+                "INSERT OR IGNORE INTO deliveries(key, claimed_at, task_id)
+                 VALUES (?1, datetime('now'), ?2)",
+                params![key, task_id],
+            )? == 1
+        };
+        if claimed {
+            if let Some((task, summary)) = task_event {
+                let payload = serde_json::to_string(task)?;
+                transaction.execute(
+                    "INSERT INTO tasks(id, payload, updated_at) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
+                    params![task.id.to_string(), payload, task.updated_at.to_rfc3339()],
+                )?;
+                transaction.execute(
+                    "INSERT INTO task_events(task_id, summary, payload, occurred_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        task.id.to_string(),
+                        summary,
+                        payload,
+                        task.updated_at.to_rfc3339()
+                    ],
+                )?;
+            }
+            transaction.commit()?;
+        } else {
+            transaction.rollback()?;
         }
-        let inserted = self.connection.execute(
-            "INSERT OR IGNORE INTO deliveries(key, claimed_at) VALUES (?1, datetime('now'))",
-            [key],
-        )?;
-        Ok(inserted == 1)
+        Ok(claimed)
     }
 
     pub fn complete_delivery(&self, key: &str, result: &str) -> Result<()> {
@@ -557,6 +798,30 @@ impl EventStore {
         )?;
         anyhow::ensure!(updated == 1, "delivery key was not claimed");
         Ok(())
+    }
+
+    pub fn mark_delivery_ambiguous(&self, key: &str, result: &str) -> Result<()> {
+        let updated = self.connection.execute(
+            "UPDATE deliveries SET result = ?2, completed_at = NULL WHERE key = ?1",
+            params![key, result],
+        )?;
+        anyhow::ensure!(updated == 1, "delivery key was not claimed");
+        Ok(())
+    }
+
+    pub fn ambiguous_delivery_for_task(&self, task_id: TaskId) -> Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT key FROM deliveries
+                 WHERE task_id = ?1 AND completed_at IS NULL
+                   AND json_valid(result)
+                   AND json_extract(result, '$.state') = 'ambiguous'
+                 ORDER BY claimed_at DESC LIMIT 1",
+                [task_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("load ambiguous delivery")
     }
 
     pub fn complete_delivery_with_task_events(
@@ -589,6 +854,44 @@ impl EventStore {
                 ],
             )?;
         }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn complete_failed_merge_delivery(
+        &self,
+        key: &str,
+        result: &str,
+        task: &Task,
+        summary: &str,
+    ) -> Result<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let updated = transaction.execute(
+            "UPDATE deliveries SET result = ?2, completed_at = datetime('now') WHERE key = ?1",
+            params![key, result],
+        )?;
+        anyhow::ensure!(updated == 1, "delivery key was not claimed");
+        transaction.execute(
+            "UPDATE approvals SET invalidated_at = ?2
+             WHERE task_id = ?1 AND invalidated_at IS NULL",
+            params![task.id.to_string(), chrono::Utc::now().to_rfc3339()],
+        )?;
+        let payload = serde_json::to_string(task)?;
+        transaction.execute(
+            "INSERT INTO tasks(id, payload, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
+            params![task.id.to_string(), payload, task.updated_at.to_rfc3339()],
+        )?;
+        transaction.execute(
+            "INSERT INTO task_events(task_id, summary, payload, occurred_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                task.id.to_string(),
+                summary,
+                payload,
+                task.updated_at.to_rfc3339()
+            ],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -963,6 +1266,55 @@ impl EventStore {
         Ok(())
     }
 
+    pub fn save_monitor_with_task_event(
+        &self,
+        monitor: &MonitorRecord,
+        task: &Task,
+        summary: &str,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            monitor.task_id == task.id,
+            "monitor task does not match event task"
+        );
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO monitors(id, task_id, repository_full_name, pull_request_number, state,
+                 next_attempt_at, payload, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET state=excluded.state,
+                 next_attempt_at=excluded.next_attempt_at, payload=excluded.payload,
+                 updated_at=excluded.updated_at",
+            params![
+                monitor.id.to_string(),
+                monitor.task_id.to_string(),
+                monitor.repository_full_name,
+                monitor.pull_request_number,
+                enum_name(monitor.state),
+                monitor.next_attempt_at.map(|value| value.to_rfc3339()),
+                serde_json::to_string(monitor)?,
+                monitor.updated_at.to_rfc3339(),
+            ],
+        )?;
+        let payload = serde_json::to_string(task)?;
+        transaction.execute(
+            "INSERT INTO tasks(id, payload, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
+            params![task.id.to_string(), payload, task.updated_at.to_rfc3339()],
+        )?;
+        transaction.execute(
+            "INSERT INTO task_events(task_id, summary, payload, occurred_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                task.id.to_string(),
+                summary,
+                payload,
+                task.updated_at.to_rfc3339()
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn monitor(&self, id: uuid::Uuid) -> Result<Option<MonitorRecord>> {
         self.load_json_optional(
             "SELECT payload FROM monitors WHERE id = ?1",
@@ -1084,6 +1436,70 @@ fn validate_codex_event_kind(value: &str) -> Result<String> {
         "invalid Codex event kind"
     );
     Ok(value.to_owned())
+}
+
+fn validate_forwarded_webhook(delivery: &patchwright_relay::ForwardedWebhook) -> Result<()> {
+    anyhow::ensure!(
+        !delivery.delivery_id.is_empty()
+            && delivery.delivery_id.len() <= 128
+            && !delivery.delivery_id.chars().any(char::is_control),
+        "invalid GitHub webhook delivery ID"
+    );
+    anyhow::ensure!(
+        delivery.envelope.schema_version == 1,
+        "unsupported webhook schema"
+    );
+    anyhow::ensure!(
+        !delivery.envelope.event.is_empty()
+            && delivery.envelope.event.len() <= 64
+            && !delivery.envelope.event.chars().any(char::is_control),
+        "invalid webhook event"
+    );
+    anyhow::ensure!(
+        !delivery.envelope.action.is_empty()
+            && delivery.envelope.action.len() <= 64
+            && !delivery.envelope.action.chars().any(char::is_control),
+        "invalid webhook action"
+    );
+    if delivery.envelope.event != "ping" {
+        anyhow::ensure!(
+            delivery.envelope.repository_id.is_some()
+                && delivery.envelope.repository_full_name.is_some(),
+            "webhook repository identity is missing"
+        );
+    }
+    if let Some(repository) = delivery.envelope.repository_full_name.as_deref() {
+        let Some((owner, name)) = repository.split_once('/') else {
+            bail!("invalid webhook repository identity");
+        };
+        anyhow::ensure!(
+            !owner.is_empty()
+                && !name.is_empty()
+                && !name.contains('/')
+                && repository.len() <= 255
+                && !repository.chars().any(char::is_whitespace),
+            "invalid webhook repository identity"
+        );
+    }
+    anyhow::ensure!(
+        delivery
+            .envelope
+            .entity_number
+            .is_none_or(|value| value > 0)
+            && delivery.envelope.entity_id.is_none_or(|value| value > 0),
+        "invalid webhook entity identity"
+    );
+    anyhow::ensure!(
+        delivery.payload_sha256.len() == 64
+            && delivery
+                .payload_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit()),
+        "invalid webhook payload digest"
+    );
+    chrono::DateTime::parse_from_rfc3339(&delivery.received_at)
+        .context("invalid webhook receive time")?;
+    Ok(())
 }
 
 fn validate_codex_identity(value: &str, field: &'static str) -> Result<()> {
@@ -1324,5 +1740,55 @@ const MIGRATIONS: &[(u32, &str)] = &[
              updated_at TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS monitors_task ON monitors(task_id, updated_at);
-         CREATE INDEX IF NOT EXISTS monitors_due ON monitors(state, next_attempt_at);")
+         CREATE INDEX IF NOT EXISTS monitors_due ON monitors(state, next_attempt_at);"),
+    (
+        8,
+        "CREATE TABLE IF NOT EXISTS preparation_claims (
+             approval_id TEXT PRIMARY KEY,
+             task_id TEXT NOT NULL,
+             action_digest TEXT NOT NULL,
+             claimed_at TEXT NOT NULL,
+             result TEXT,
+             completed_at TEXT
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS preparation_claims_active_task
+             ON preparation_claims(task_id) WHERE completed_at IS NULL;
+         CREATE INDEX IF NOT EXISTS preparation_claims_task
+             ON preparation_claims(task_id, claimed_at);",
+    ),
+    (
+        9,
+        "CREATE TABLE IF NOT EXISTS verification_evidence (
+             task_id TEXT NOT NULL,
+             run_id TEXT NOT NULL,
+             ordinal INTEGER NOT NULL,
+             success INTEGER NOT NULL,
+             payload TEXT NOT NULL,
+             completed_at TEXT NOT NULL,
+             PRIMARY KEY(task_id, run_id, ordinal)
+         );
+         CREATE INDEX IF NOT EXISTS verification_evidence_task
+             ON verification_evidence(task_id, completed_at);",
+    ),
+    (
+        10,
+        "CREATE TABLE IF NOT EXISTS github_webhook_deliveries (
+             delivery_id TEXT PRIMARY KEY NOT NULL,
+             event TEXT NOT NULL,
+             action TEXT NOT NULL,
+             repository_full_name TEXT,
+             entity_number INTEGER,
+             payload_sha256 TEXT NOT NULL,
+             received_at TEXT NOT NULL,
+             ingested_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS github_webhook_repository
+             ON github_webhook_deliveries(repository_full_name, entity_number, ingested_at);",
+    ),
+    (
+        11,
+        "ALTER TABLE deliveries ADD COLUMN task_id TEXT;
+         CREATE INDEX IF NOT EXISTS deliveries_task_id
+             ON deliveries(task_id, claimed_at);",
+    ),
 ];

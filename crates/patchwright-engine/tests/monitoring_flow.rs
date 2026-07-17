@@ -1,8 +1,9 @@
 use chrono::{Duration, TimeZone, Utc};
 use patchwright_core::{
-    Capability, CredentialHealth, GitHubAction, GitHubActionPreview, InstructionDigest,
-    RemoteIdentity, RemotePrecondition, RepositoryBinding, RepositoryBindingDraft,
-    RepositoryPermissionSnapshot, RiskClass, Task, TaskContract, TaskContractDraft, TaskSource,
+    Capability, CredentialHealth, GitHubAction, GitHubActionPreview, GitHubIssueSourceInput,
+    InstructionDigest, RemoteIdentity, RemotePrecondition, RepositoryBinding,
+    RepositoryBindingDraft, RepositoryPermissionSnapshot, RiskClass, Task, TaskContract,
+    TaskContractDraft, TaskSource, VerificationCommand,
 };
 use patchwright_engine::{
     CIState, EventStore, Mergeability, MonitorRecord, MonitorState, RemoteObservation, ReviewState,
@@ -30,21 +31,31 @@ fn fixture(store: &EventStore) -> Task {
     store.save_repository_binding(&binding).unwrap();
     let mut task = Task::new("Monitor delivery", "/tmp/hello").unwrap();
     task.repository_binding_id = Some(binding.id());
+    task.source = TaskSource::github_issue(GitHubIssueSourceInput {
+        repository_id: 42,
+        repository_full_name: "octocat/hello".into(),
+        number: 7,
+        html_url: "https://github.com/octocat/hello/issues/7".into(),
+        snapshot_at: Utc.with_ymd_and_hms(2026, 7, 14, 8, 0, 0).unwrap(),
+    })
+    .unwrap();
     store.save_task(&task, "task created").unwrap();
     store
         .save_task_contract(
             &TaskContract::try_from(TaskContractDraft {
                 task_id: task.id,
-                source: TaskSource::LocalRequest,
+                source: task.source.clone(),
                 repository_binding_id: binding.id(),
                 goal: "Monitor one delivered pull request".into(),
                 acceptance_criteria: vec!["CI and review converge".into()],
                 base_sha: Some("a".repeat(40)),
                 head_sha: Some("b".repeat(40)),
+                source_sha256: "c".repeat(64),
+                repository_sha256: "e".repeat(64),
                 instruction_digests: vec![
                     InstructionDigest::new("AGENTS.md", "d".repeat(64), 1).unwrap(),
                 ],
-                verification_commands: Vec::new(),
+                verification_commands: vec![VerificationCommand::new("cargo", ["test"]).unwrap()],
                 required_capabilities: vec![Capability::PostComment],
                 risk: RiskClass::Moderate,
                 sensitive_paths: Vec::new(),
@@ -52,6 +63,21 @@ fn fixture(store: &EventStore) -> Task {
             })
             .unwrap(),
         )
+        .unwrap();
+    for state in [
+        patchwright_core::TaskState::Assessing,
+        patchwright_core::TaskState::Planned,
+        patchwright_core::TaskState::AwaitingPreparationApproval,
+        patchwright_core::TaskState::Preparing,
+        patchwright_core::TaskState::Implementing,
+        patchwright_core::TaskState::Verifying,
+        patchwright_core::TaskState::Reviewing,
+        patchwright_core::TaskState::AwaitingDeliveryApproval,
+    ] {
+        task.transition(state).unwrap();
+    }
+    store
+        .save_task(&task, "ready for delivery approval")
         .unwrap();
     task
 }
@@ -161,7 +187,7 @@ fn monitor_and_approval_invalidation_survive_restart() {
     let action = GitHubActionPreview::new(
         RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
         GitHubAction::comment(7, "approved body").unwrap(),
-        RemotePrecondition::new(Some(&"b".repeat(40)), Some(&"a".repeat(40)), 1).unwrap(),
+        RemotePrecondition::new(None, None, 1).unwrap(),
     )
     .unwrap();
     let preview = preview_delivery(&store, task.id, action).unwrap();
