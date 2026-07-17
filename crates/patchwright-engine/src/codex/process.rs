@@ -71,7 +71,7 @@ impl Default for CodexProcessConfig {
         Self {
             initialization_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(30),
-            shutdown_grace: Duration::from_secs(2),
+            shutdown_grace: Duration::from_millis(500),
             stderr_capacity: 64 * 1024,
         }
     }

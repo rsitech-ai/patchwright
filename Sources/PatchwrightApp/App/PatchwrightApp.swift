@@ -6,8 +6,10 @@ import SwiftUI
 final class PatchwrightApplicationDelegate: NSObject, NSApplicationDelegate {
     static weak var engineProcessController: EngineProcessController?
 
-    func applicationWillTerminate(_: Notification) {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        sender.windows.forEach { $0.orderOut(nil) }
         Self.engineProcessController?.shutdown()
+        return .terminateNow
     }
 }
 

@@ -31,6 +31,8 @@ async fn capture_request(
         .push((method.clone(), format!("/{path}"), body.clone()));
     let response = if method == Method::GET && path.ends_with("/pulls/4") {
         json!({"id":91,"node_id":"PR_node","number":4,"html_url":"https://example.invalid/pull/4","draft":true,"head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}})
+    } else if method == Method::GET && path.ends_with("/git/ref/heads/main") {
+        json!({"ref":"refs/heads/main","object":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}})
     } else if path.ends_with("/git/refs") {
         json!({"ref":body["ref"],"object":{"sha":body["sha"]}})
     } else if path == "graphql"
@@ -56,7 +58,7 @@ async fn capture_request(
     } else if method == Method::PATCH && path.ends_with("/issues/5") {
         json!({"id":92,"number":5,"html_url":"https://example.invalid/issues/5","state":"closed","state_reason":"completed"})
     } else if path.ends_with("/pulls") {
-        json!({"number":17,"html_url":"https://example.invalid/pull/17"})
+        json!({"number":17,"html_url":"https://example.invalid/pull/17","base":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}})
     } else {
         json!({"id":91,"html_url":"https://example.invalid/result/91"})
     };
@@ -117,7 +119,7 @@ async fn emits_exact_branch_comment_review_check_draft_and_merge_requests() {
         )
         .unwrap(),
         GitHubAction::check_run("Patchwright", sha, "completed", Some("success")).unwrap(),
-        GitHubAction::draft_pull_request("title", "feat/test", "main", "body").unwrap(),
+        GitHubAction::draft_pull_request("title", "feat/test", "main", sha, "body").unwrap(),
         GitHubAction::update_pull_request_branch(4, sha).unwrap(),
         GitHubAction::ready_pull_request(4, sha).unwrap(),
         GitHubAction::close_pull_request(4, sha).unwrap(),
@@ -153,24 +155,26 @@ async fn emits_exact_branch_comment_review_check_draft_and_merge_requests() {
         json!({"path":"src/lib.rs","line":9,"side":"RIGHT","body":"inline body"})
     );
     assert_eq!(requests[3].2["conclusion"], "success");
-    assert_eq!(requests[4].2["draft"], true);
-    assert_eq!(requests[5].2, json!({"expected_head_sha":sha}));
+    assert_eq!(requests[4].0, Method::GET);
+    assert_eq!(requests[4].1, "/repos/octo/fixture/git/ref/heads/main");
+    assert_eq!(requests[5].2["draft"], true);
+    assert_eq!(requests[6].2, json!({"expected_head_sha":sha}));
     assert_eq!(
-        requests[6],
+        requests[7],
         (
             Method::GET,
             "/repos/octo/fixture/pulls/4".into(),
             Value::Null
         )
     );
-    assert_eq!(requests[7].0, Method::POST);
-    assert_eq!(requests[7].1, "/graphql");
-    assert_eq!(requests[7].2["variables"]["pullRequestId"], "PR_node");
-    assert_eq!(requests[8].0, Method::GET);
-    assert_eq!(requests[8].1, "/repos/octo/fixture/pulls/4");
-    assert_eq!(requests[9].2, json!({"state":"closed"}));
+    assert_eq!(requests[8].0, Method::POST);
+    assert_eq!(requests[8].1, "/graphql");
+    assert_eq!(requests[8].2["variables"]["pullRequestId"], "PR_node");
+    assert_eq!(requests[9].0, Method::GET);
+    assert_eq!(requests[9].1, "/repos/octo/fixture/pulls/4");
+    assert_eq!(requests[10].2, json!({"state":"closed"}));
     assert_eq!(
-        requests[10],
+        requests[11],
         (
             Method::PATCH,
             "/repos/octo/fixture/issues/5".into(),
@@ -178,7 +182,7 @@ async fn emits_exact_branch_comment_review_check_draft_and_merge_requests() {
         )
     );
     assert_eq!(
-        requests[11],
+        requests[12],
         (
             Method::PUT,
             "/repos/octo/fixture/pulls/4/merge".into(),
@@ -242,6 +246,38 @@ async fn test_client(app: Router) -> GitHubMutationClient {
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     GitHubMutationClient::new_for_test(format!("http://{address}"), "ghs_fixture").unwrap()
+}
+
+async fn advanced_base(Path(path): Path<String>, method: Method) -> Response {
+    assert_eq!(
+        method,
+        Method::GET,
+        "stale base must fail before PR creation"
+    );
+    assert!(path.ends_with("/git/ref/heads/main"));
+    Json(json!({
+        "ref":"refs/heads/main",
+        "object":{"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+    }))
+    .into_response()
+}
+
+#[tokio::test]
+async fn draft_pull_request_fails_closed_when_the_approved_base_advanced() {
+    let client = test_client(Router::new().route("/{*path}", any(advanced_base))).await;
+    let action = GitHubAction::draft_pull_request(
+        "title",
+        "feat/test",
+        "main",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "body",
+    )
+    .unwrap();
+
+    assert!(matches!(
+        client.execute("octo", "fixture", &action).await,
+        Err(MutationError::StaleRemoteBase)
+    ));
 }
 
 #[tokio::test]

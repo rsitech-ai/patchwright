@@ -364,7 +364,8 @@ struct TaskDetailView: View {
                 HStack {
                     Spacer()
                     if let worktree = store.worktreeByTask[task.id],
-                       let repository = store.repositories.first(where: { $0.id == source.repositoryID }) {
+                       let repository = store.repositories.first(where: { $0.id == source.repositoryID }),
+                       let expectedBaseSHA = repository.defaultBranchSHA {
                         Button("Preview Draft PR", systemImage: "arrow.triangle.pull") {
                             preview(
                                 GitHubActionPayload(
@@ -372,7 +373,8 @@ struct TaskDetailView: View {
                                     body: deliveryTextIsEmpty ? "Resolves #\(source.number)" : deliveryBody,
                                     title: task.title,
                                     head: worktree.branch,
-                                    base: repository.defaultBranch
+                                    base: repository.defaultBranch,
+                                    expectedBaseSha: expectedBaseSHA
                                 )
                             )
                         }
