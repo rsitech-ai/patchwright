@@ -112,7 +112,8 @@ pub enum GitHubAction {
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
-    tag = "kind"
+    tag = "kind",
+    deny_unknown_fields
 )]
 enum GitHubActionWire {
     CreateBranch {

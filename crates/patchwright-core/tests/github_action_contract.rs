@@ -75,6 +75,17 @@ fn action_contract_rejects_ambiguous_or_unsafe_boundaries() {
     assert!(RemoteIdentity::new(1, 0, "octo/fixture").is_err());
     assert!(RemoteIdentity::new(1, 7, "not-a-repository").is_err());
     assert!(RemotePrecondition::new(Some("short"), Some(SHA_B), 1).is_err());
+    for legacy_false_sha in [
+        json!({"kind":"readyPullRequest","pullRequestNumber":1,"expectedHeadSha":SHA_A}),
+        json!({"kind":"closePullRequest","pullRequestNumber":1,"expectedHeadSha":SHA_A}),
+        json!({"kind":"resolveReviewThread","pullRequestNumber":1,"threadId":"PRRT_example","expectedHeadSha":SHA_A}),
+        json!({"kind":"draftPullRequest","title":"Draft","head":"feat/test","base":"main","body":"Body","expectedBaseSha":SHA_B}),
+    ] {
+        assert!(
+            serde_json::from_value::<GitHubAction>(legacy_false_sha).is_err(),
+            "removed SHA claims must fail closed instead of silently weakening authorization"
+        );
+    }
 }
 
 #[test]
