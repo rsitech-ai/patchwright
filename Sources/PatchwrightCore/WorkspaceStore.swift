@@ -48,6 +48,8 @@ public final class WorkspaceStore: ObservableObject {
     private let healthRetryDelay: Duration
     private let preferences: any WorkspacePreferencesPersisting
     private var preferencesWorkspaceID = "global"
+    private var detailSelectionGeneration: UInt64 = 0
+    private var healthRefreshGeneration: UInt64 = 0
 
     public init(
         engine: any EngineServing,
@@ -63,43 +65,69 @@ public final class WorkspaceStore: ObservableObject {
     }
 
     public func refreshHealth() async {
+        healthRefreshGeneration &+= 1
+        let generation = healthRefreshGeneration
         connectionState = .connecting
         var lastError: Error?
         for attempt in 0..<healthRetryAttempts {
             do {
                 let health = try await engine.call(method: "system.health", params: [:], as: HealthResponse.self)
+                guard generation == healthRefreshGeneration else { return }
                 connectionState = .connected(health.version)
-                await refreshTasks()
-                await refreshGitHub()
+                await refreshTasks(healthGeneration: generation)
+                await refreshGitHub(healthGeneration: generation)
                 return
             } catch {
+                guard generation == healthRefreshGeneration else { return }
                 lastError = error
                 if attempt < healthRetryAttempts - 1 { try? await Task.sleep(for: healthRetryDelay) }
             }
         }
+        guard generation == healthRefreshGeneration else { return }
         connectionState = .failed(lastError?.localizedDescription ?? "Engine unavailable")
     }
 
     public func refreshGitHub() async {
+        await refreshGitHub(healthGeneration: nil)
+    }
+
+    private func refreshGitHub(healthGeneration generation: UInt64?) async {
         do {
-            githubStatus = try await engine.call(method: "github.status", params: [:], as: GitHubStatus.self)
-            repositories = try await engine.call(method: "github.repositories", params: [:], as: [GitHubRepository].self)
-            githubWorkItems = try await engine.call(method: "github.queue", params: [:], as: [GitHubWorkItem].self)
-            if let decisions = try? await engine.call(
+            let status = try await engine.call(method: "github.status", params: [:], as: GitHubStatus.self)
+            let refreshedRepositories = try await engine.call(
+                method: "github.repositories", params: [:], as: [GitHubRepository].self
+            )
+            let workItems = try await engine.call(
+                method: "github.queue", params: [:], as: [GitHubWorkItem].self
+            )
+            let decisions = try? await engine.call(
                 method: "github.queue.decisions", params: [:], as: [PullRequestQueueDecision].self
-            ) {
-                queueDecisions = decisions
-            }
+            )
+            guard generation.map({ $0 == healthRefreshGeneration }) ?? true else { return }
+            githubStatus = status
+            repositories = refreshedRepositories
+            githubWorkItems = workItems
+            if let decisions { queueDecisions = decisions }
             githubError = nil
         } catch {
+            guard generation.map({ $0 == healthRefreshGeneration }) ?? true else { return }
             githubError = error.localizedDescription
         }
     }
 
     public func refreshTasks() async {
+        await refreshTasks(healthGeneration: nil)
+    }
+
+    private func refreshTasks(healthGeneration generation: UInt64?) async {
         do {
-            tasks = try await engine.call(method: "task.list", params: [:], as: [EngineeringTask].self)
+            let refreshedTasks = try await engine.call(
+                method: "task.list", params: [:], as: [EngineeringTask].self
+            )
+            guard generation.map({ $0 == healthRefreshGeneration }) ?? true else { return }
+            tasks = refreshedTasks
         } catch {
+            guard generation.map({ $0 == healthRefreshGeneration }) ?? true else { return }
             connectionState = .failed(error.localizedDescription)
         }
     }
@@ -245,26 +273,60 @@ public final class WorkspaceStore: ObservableObject {
     }
 
     public func selectRepository(_ repository: GitHubRepository) async {
+        detailSelectionGeneration &+= 1
+        let generation = detailSelectionGeneration
+        selectedRepositoryID = repository.id
+        selectedWorkItemID = nil
+        selectedTaskID = nil
+        selectedRepository = nil
         do {
-            selectedRepository = try await engine.call(
+            let snapshot = try await engine.call(
                 method: "github.repository", params: ["fullName": repository.fullName],
                 as: GitHubRepositorySnapshot?.self
             )
-            selectedRepositoryID = repository.id
-            selectedWorkItemID = nil
-            selectedTaskID = nil
+            guard generation == detailSelectionGeneration,
+                  selectedRepositoryID == repository.id else { return }
+            selectedRepository = snapshot
             loadPresentationPreferences(workspaceID: repository.fullName)
             githubError = nil
         } catch {
+            guard generation == detailSelectionGeneration,
+                  selectedRepositoryID == repository.id else { return }
             githubError = error.localizedDescription
         }
     }
 
     public func selectWorkItem(_ item: GitHubWorkItem) async {
-        if selectedRepository?.repository.fullName != item.repositoryFullName,
-           let repository = repositories.first(where: { $0.fullName == item.repositoryFullName }) {
-            await selectRepository(repository)
+        detailSelectionGeneration &+= 1
+        let generation = detailSelectionGeneration
+        selectedWorkItemID = item.id
+        selectedTaskID = nil
+        if let repository = repositories.first(where: { $0.fullName == item.repositoryFullName }) {
+            selectedRepositoryID = repository.id
+            if selectedRepository?.repository.fullName != item.repositoryFullName {
+                selectedRepository = nil
+                do {
+                    let snapshot = try await engine.call(
+                        method: "github.repository",
+                        params: ["fullName": repository.fullName],
+                        as: GitHubRepositorySnapshot?.self
+                    )
+                    guard generation == detailSelectionGeneration,
+                          selectedWorkItemID == item.id,
+                          selectedRepositoryID == repository.id else { return }
+                    selectedRepository = snapshot
+                    loadPresentationPreferences(workspaceID: repository.fullName)
+                    githubError = nil
+                } catch {
+                    guard generation == detailSelectionGeneration,
+                          selectedWorkItemID == item.id,
+                          selectedRepositoryID == repository.id else { return }
+                    githubError = error.localizedDescription
+                }
+            }
         }
+        guard generation == detailSelectionGeneration,
+              selectedWorkItemID == item.id else { return }
         selectedWorkItemID = item.id
         selectedTaskID = nil
     }
@@ -627,6 +689,7 @@ public final class WorkspaceStore: ObservableObject {
     }
 
     private func clearDetailSelection() {
+        detailSelectionGeneration &+= 1
         selectedTaskID = nil
         selectedRepositoryID = nil
         selectedWorkItemID = nil
