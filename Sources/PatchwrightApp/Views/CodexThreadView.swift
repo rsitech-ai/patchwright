@@ -6,6 +6,7 @@ struct CodexThreadView: View {
     let task: EngineeringTask
     @State private var draft = ""
     @State private var selectedApproval: CodexRuntimeApproval?
+    @State private var preparationApprovalRequest: PreparationPreview?
 
     private var status: CodexRuntimeStatus? { store.codexStatus(for: task.id) }
     private var transcript: CodexTranscript { store.codexTranscript(for: task.id) }
@@ -29,6 +30,9 @@ struct CodexThreadView: View {
             CodexApprovalSheet(approval: approval) { approve in
                 Task { await store.resolveCodexApproval(approval, approve: approve) }
             }
+        }
+        .sheet(item: $preparationApprovalRequest) { preview in
+            PreparationApprovalSheet(store: store, preview: preview)
         }
     }
 
@@ -61,8 +65,11 @@ struct CodexThreadView: View {
             }
             if status?.canStart == true || status == nil {
                 if task.state == .awaitingPreparationApproval {
-                    Button("Approve & Prepare", systemImage: "checkmark.shield.fill") {
-                        Task { await store.prepareTask(taskID: task.id) }
+                    Button("Review Preparation", systemImage: "checkmark.shield.fill") {
+                        Task {
+                            await store.previewPreparation(taskID: task.id)
+                            preparationApprovalRequest = store.preparationPreviews[task.id]
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(isBusy || store.taskLifecycleBusyTaskIDs.contains(task.id))

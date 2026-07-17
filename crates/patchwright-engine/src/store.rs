@@ -19,6 +19,14 @@ pub struct EventStore {
     connection: Connection,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreparationClaimOutcome {
+    Claimed,
+    ApprovalUnavailable,
+    AlreadyClaimed,
+    TaskInProgress,
+}
+
 impl EventStore {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -33,6 +41,7 @@ impl EventStore {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         apply_migrations(&mut connection)?;
         let store = Self { connection };
+        store.recover_interrupted_preparations()?;
         store.recover_interrupted_jobs()?;
         Ok(store)
     }
@@ -444,6 +453,89 @@ impl EventStore {
             )
             .optional()
             .context("load approval action digest")
+    }
+
+    pub fn claim_preparation(
+        &self,
+        approval_id: uuid::Uuid,
+        task_id: patchwright_core::TaskId,
+        action_digest: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<PreparationClaimOutcome> {
+        let approval_id = approval_id.to_string();
+        let task_id = task_id.to_string();
+        let inserted = self.connection.execute(
+            "INSERT OR IGNORE INTO preparation_claims(
+                 approval_id, task_id, action_digest, claimed_at
+             )
+             SELECT ?1, ?2, ?3, ?4 FROM approvals
+             WHERE id = ?1
+               AND task_id = ?2
+               AND capability = 'prepareWorktree'
+               AND action_digest = ?3
+               AND invalidated_at IS NULL
+               AND julianday(expires_at) > julianday(?4)",
+            params![approval_id, task_id, action_digest, now.to_rfc3339()],
+        )?;
+        if inserted == 1 {
+            return Ok(PreparationClaimOutcome::Claimed);
+        }
+        let already_claimed: bool = self.connection.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM preparation_claims WHERE approval_id = ?1
+             )",
+            [&approval_id],
+            |row| row.get(0),
+        )?;
+        if already_claimed {
+            return Ok(PreparationClaimOutcome::AlreadyClaimed);
+        }
+        let approval_available: bool = self.connection.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM approvals
+                 WHERE id = ?1
+                   AND task_id = ?2
+                   AND capability = 'prepareWorktree'
+                   AND action_digest = ?3
+                   AND invalidated_at IS NULL
+                   AND julianday(expires_at) > julianday(?4)
+             )",
+            params![approval_id, task_id, action_digest, now.to_rfc3339()],
+            |row| row.get(0),
+        )?;
+        if !approval_available {
+            return Ok(PreparationClaimOutcome::ApprovalUnavailable);
+        }
+        Ok(PreparationClaimOutcome::TaskInProgress)
+    }
+
+    pub fn complete_preparation_claim(&self, approval_id: uuid::Uuid, result: &str) -> Result<()> {
+        anyhow::ensure!(
+            matches!(result, "succeeded" | "failed" | "interrupted"),
+            "invalid preparation result"
+        );
+        let updated = self.connection.execute(
+            "UPDATE preparation_claims
+             SET result = ?2, completed_at = ?3
+             WHERE approval_id = ?1 AND completed_at IS NULL",
+            params![
+                approval_id.to_string(),
+                result,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )?;
+        anyhow::ensure!(updated == 1, "preparation approval is not actively claimed");
+        Ok(())
+    }
+
+    fn recover_interrupted_preparations(&self) -> Result<()> {
+        self.connection.execute(
+            "UPDATE preparation_claims
+             SET result = 'interrupted', completed_at = ?1
+             WHERE completed_at IS NULL",
+            [chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
     }
 
     fn load_json_optional<T: DeserializeOwned>(
@@ -1354,6 +1446,21 @@ const MIGRATIONS: &[(u32, &str)] = &[
          CREATE INDEX IF NOT EXISTS monitors_due ON monitors(state, next_attempt_at);"),
     (
         8,
+        "CREATE TABLE IF NOT EXISTS preparation_claims (
+             approval_id TEXT PRIMARY KEY,
+             task_id TEXT NOT NULL,
+             action_digest TEXT NOT NULL,
+             claimed_at TEXT NOT NULL,
+             result TEXT,
+             completed_at TEXT
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS preparation_claims_active_task
+             ON preparation_claims(task_id) WHERE completed_at IS NULL;
+         CREATE INDEX IF NOT EXISTS preparation_claims_task
+             ON preparation_claims(task_id, claimed_at);",
+    ),
+    (
+        9,
         "CREATE TABLE IF NOT EXISTS verification_evidence (
              task_id TEXT NOT NULL,
              run_id TEXT NOT NULL,
