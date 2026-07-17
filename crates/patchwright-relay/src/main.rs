@@ -23,6 +23,8 @@ enum Command {
         address: SocketAddr,
         #[arg(long, env = "PATCHWRIGHT_GITHUB_WEBHOOK_SECRET_FILE")]
         webhook_secret_file: PathBuf,
+        #[arg(long, env = "PATCHWRIGHT_RELAY_DATABASE")]
+        database: PathBuf,
     },
     ImportGithubAppKey {
         #[arg(long)]
@@ -64,15 +66,13 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve {
             address,
             webhook_secret_file,
+            database,
         } => {
             let secret = std::fs::read(webhook_secret_file)?;
+            let state = patchwright_relay::RelayState::open(secret, expand_home(database)?)?;
             let listener = tokio::net::TcpListener::bind(address).await?;
             tracing::info!(address = %address, "relay listening on loopback");
-            axum::serve(
-                listener,
-                patchwright_relay::router(patchwright_relay::RelayState::new(secret)),
-            )
-            .await?;
+            axum::serve(listener, patchwright_relay::router(state)).await?;
         }
         Command::ImportGithubAppKey {
             path,
@@ -148,7 +148,8 @@ const fn is_owner_only(mode: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_home, is_owner_only};
+    use super::{Arguments, expand_home, is_owner_only};
+    use clap::Parser;
     use std::path::PathBuf;
 
     #[test]
@@ -172,5 +173,16 @@ mod tests {
         assert!(is_owner_only(0o400));
         assert!(!is_owner_only(0o640));
         assert!(!is_owner_only(0o604));
+    }
+
+    #[test]
+    fn relay_serve_requires_an_explicit_durable_database_path() {
+        let result = Arguments::try_parse_from([
+            "patchwright-relay",
+            "serve",
+            "--webhook-secret-file",
+            "/tmp/webhook-secret",
+        ]);
+        assert!(result.is_err());
     }
 }
