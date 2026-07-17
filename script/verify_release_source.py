@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import os
 import re
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -30,7 +32,7 @@ def git(repo: Path, *arguments: str) -> str:
     return result.stdout.strip()
 
 
-def digest_regular(path: Path) -> str:
+def verified_release_archive_content_digest(path: Path, expected_digest: str) -> str:
     try:
         before = path.lstat()
     except FileNotFoundError as error:
@@ -38,7 +40,8 @@ def digest_regular(path: Path) -> str:
     if not stat.S_ISREG(before.st_mode) or path.is_symlink():
         raise SourceError("source archive must be a regular non-symlink file")
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    result = hashlib.sha256()
+    archive_digest = hashlib.sha256()
+    content_digest = hashlib.sha256()
     try:
         opened = os.fstat(descriptor)
         if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
@@ -47,7 +50,20 @@ def digest_regular(path: Path) -> str:
             chunk = os.read(descriptor, 1024 * 1024)
             if not chunk:
                 break
-            result.update(chunk)
+            archive_digest.update(chunk)
+        if archive_digest.hexdigest() != expected_digest:
+            raise SourceError("source archive digest mismatch")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            with os.fdopen(os.dup(descriptor), "rb") as compressed:
+                with gzip.GzipFile(fileobj=compressed, mode="rb") as archive:
+                    while True:
+                        chunk = archive.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        content_digest.update(chunk)
+        except (EOFError, gzip.BadGzipFile) as error:
+            raise SourceError("source archive must be a valid gzip archive") from error
         after = os.fstat(descriptor)
         if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != (
             after.st_dev,
@@ -58,6 +74,32 @@ def digest_regular(path: Path) -> str:
             raise SourceError("source archive changed during verification")
     finally:
         os.close(descriptor)
+    return content_digest.hexdigest()
+
+
+def git_archive_content_digest(repo: Path, commit: str) -> str:
+    result = hashlib.sha256()
+    with tempfile.TemporaryFile() as error_log:
+        process = subprocess.Popen(
+            ["git", "-C", str(repo), "archive", "--format=tar", commit],
+            stdout=subprocess.PIPE,
+            stderr=error_log,
+        )
+        if process.stdout is None:
+            process.kill()
+            process.wait()
+            raise SourceError("Git archive did not provide a content stream")
+        try:
+            while True:
+                chunk = process.stdout.read(1024 * 1024)
+                if not chunk:
+                    break
+                result.update(chunk)
+        finally:
+            process.stdout.close()
+        returncode = process.wait()
+        if returncode != 0:
+            raise SourceError(f"Git command failed: archive --format=tar {commit}")
     return result.hexdigest()
 
 
@@ -87,8 +129,11 @@ def main() -> int:
             raise SourceError("release index differs from candidate commit")
         if git(repo, "ls-files", "--others", "--exclude-standard", "-z"):
             raise SourceError("release worktree contains untracked files")
-        if digest_regular(arguments.source_archive) != arguments.source_archive_sha256:
-            raise SourceError("source archive digest mismatch")
+        content_digest = verified_release_archive_content_digest(
+            arguments.source_archive, arguments.source_archive_sha256
+        )
+        if content_digest != git_archive_content_digest(repo, arguments.commit):
+            raise SourceError("source archive content differs from candidate commit")
     except (SourceError, OSError) as error:
         print(f"release source verification failed: {error}", file=sys.stderr)
         return 65
