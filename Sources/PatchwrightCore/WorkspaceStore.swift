@@ -30,7 +30,7 @@ public final class WorkspaceStore: ObservableObject {
     @Published public private(set) var taskLifecycleBusyTaskIDs: Set<UUID> = []
     @Published public private(set) var taskLifecycleError: String?
     @Published public private(set) var worktreeByTask: [UUID: WorktreeInspection] = [:]
-    @Published public private(set) var taskContracts: [UUID: TaskContract] = [:]
+    @Published public private(set) var taskContracts: [UUID: TaskContractSnapshot] = [:]
     @Published public private(set) var preparationPreviews: [UUID: PreparationPreview] = [:]
     @Published public private(set) var preparationApprovals: [UUID: PreparationApproval] = [:]
     @Published public private(set) var repositorySnapshotByTask: [UUID: GitHubRepositorySnapshot] = [:]

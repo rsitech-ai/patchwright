@@ -27,13 +27,25 @@ public enum WorkspaceContentState: Equatable, Sendable {
     }
 }
 
+public enum PullRequestTableDensity: Equatable, Sendable {
+    case compact
+    case expanded
+
+    public static func resolve(availableWidth: Double) -> Self {
+        availableWidth >= 1_050 ? .expanded : .compact
+    }
+}
+
 public enum TaskSurfaceState: Equatable, Sendable {
     case ready
+    case completed
     case cancelled
     case blocked(String)
 
     public static func resolve(state: TaskState, reason: String?) -> Self {
         switch state {
+        case .completed:
+            .completed
         case .cancelled:
             .cancelled
         case .blocked:
