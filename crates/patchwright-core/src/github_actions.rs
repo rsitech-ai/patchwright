@@ -92,6 +92,8 @@ pub enum GitHubAction {
     ClosePullRequest {
         #[serde(alias = "pull_request_number")]
         pull_request_number: u64,
+        #[serde(alias = "expected_head_sha")]
+        expected_head_sha: String,
     },
     CloseIssue {
         #[serde(alias = "issue_number")]
@@ -180,6 +182,8 @@ enum GitHubActionWire {
     ClosePullRequest {
         #[serde(alias = "pull_request_number")]
         pull_request_number: u64,
+        #[serde(alias = "expected_head_sha")]
+        expected_head_sha: String,
     },
     CloseIssue {
         #[serde(alias = "issue_number")]
@@ -254,7 +258,8 @@ impl<'de> Deserialize<'de> for GitHubAction {
             } => Self::ready_pull_request(pull_request_number, &expected_head_sha),
             GitHubActionWire::ClosePullRequest {
                 pull_request_number,
-            } => Self::close_pull_request(pull_request_number),
+                expected_head_sha,
+            } => Self::close_pull_request(pull_request_number, &expected_head_sha),
             GitHubActionWire::CloseIssue { issue_number } => Self::close_issue(issue_number),
             GitHubActionWire::EnqueuePullRequest {
                 pull_request_number,
@@ -374,9 +379,13 @@ impl GitHubAction {
         })
     }
 
-    pub fn close_pull_request(pull_request_number: u64) -> Result<Self, GitHubActionError> {
+    pub fn close_pull_request(
+        pull_request_number: u64,
+        expected_head_sha: &str,
+    ) -> Result<Self, GitHubActionError> {
         Ok(Self::ClosePullRequest {
             pull_request_number: validate_number(pull_request_number)?,
+            expected_head_sha: validate_sha(expected_head_sha)?,
         })
     }
 
@@ -459,6 +468,7 @@ impl GitHubAction {
             }
             | Self::ClosePullRequest {
                 pull_request_number,
+                ..
             }
             | Self::ReadyPullRequest {
                 pull_request_number,

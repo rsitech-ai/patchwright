@@ -735,7 +735,16 @@ impl EventStore {
     }
 
     pub fn claim_delivery(&self, key: &str) -> Result<bool> {
-        let reset = self.connection.execute(
+        self.claim_delivery_with_task_event(key, None)
+    }
+
+    pub fn claim_delivery_with_task_event(
+        &self,
+        key: &str,
+        task_event: Option<&(Task, String)>,
+    ) -> Result<bool> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let reset = transaction.execute(
             "UPDATE deliveries
              SET claimed_at = datetime('now'), result = NULL, completed_at = NULL
              WHERE key = ?1
@@ -745,14 +754,38 @@ impl EventStore {
                END",
             [key],
         )?;
-        if reset == 1 {
-            return Ok(true);
+        let claimed = if reset == 1 {
+            true
+        } else {
+            transaction.execute(
+                "INSERT OR IGNORE INTO deliveries(key, claimed_at) VALUES (?1, datetime('now'))",
+                [key],
+            )? == 1
+        };
+        if claimed {
+            if let Some((task, summary)) = task_event {
+                let payload = serde_json::to_string(task)?;
+                transaction.execute(
+                    "INSERT INTO tasks(id, payload, updated_at) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
+                    params![task.id.to_string(), payload, task.updated_at.to_rfc3339()],
+                )?;
+                transaction.execute(
+                    "INSERT INTO task_events(task_id, summary, payload, occurred_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        task.id.to_string(),
+                        summary,
+                        payload,
+                        task.updated_at.to_rfc3339()
+                    ],
+                )?;
+            }
+            transaction.commit()?;
+        } else {
+            transaction.rollback()?;
         }
-        let inserted = self.connection.execute(
-            "INSERT OR IGNORE INTO deliveries(key, claimed_at) VALUES (?1, datetime('now'))",
-            [key],
-        )?;
-        Ok(inserted == 1)
+        Ok(claimed)
     }
 
     pub fn complete_delivery(&self, key: &str, result: &str) -> Result<()> {
@@ -794,6 +827,44 @@ impl EventStore {
                 ],
             )?;
         }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn complete_failed_merge_delivery(
+        &self,
+        key: &str,
+        result: &str,
+        task: &Task,
+        summary: &str,
+    ) -> Result<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let updated = transaction.execute(
+            "UPDATE deliveries SET result = ?2, completed_at = datetime('now') WHERE key = ?1",
+            params![key, result],
+        )?;
+        anyhow::ensure!(updated == 1, "delivery key was not claimed");
+        transaction.execute(
+            "UPDATE approvals SET invalidated_at = ?2
+             WHERE task_id = ?1 AND invalidated_at IS NULL",
+            params![task.id.to_string(), chrono::Utc::now().to_rfc3339()],
+        )?;
+        let payload = serde_json::to_string(task)?;
+        transaction.execute(
+            "INSERT INTO tasks(id, payload, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
+            params![task.id.to_string(), payload, task.updated_at.to_rfc3339()],
+        )?;
+        transaction.execute(
+            "INSERT INTO task_events(task_id, summary, payload, occurred_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                task.id.to_string(),
+                summary,
+                payload,
+                task.updated_at.to_rfc3339()
+            ],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -1165,6 +1236,55 @@ impl EventStore {
                 monitor.updated_at.to_rfc3339(),
             ],
         )?;
+        Ok(())
+    }
+
+    pub fn save_monitor_with_task_event(
+        &self,
+        monitor: &MonitorRecord,
+        task: &Task,
+        summary: &str,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            monitor.task_id == task.id,
+            "monitor task does not match event task"
+        );
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO monitors(id, task_id, repository_full_name, pull_request_number, state,
+                 next_attempt_at, payload, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET state=excluded.state,
+                 next_attempt_at=excluded.next_attempt_at, payload=excluded.payload,
+                 updated_at=excluded.updated_at",
+            params![
+                monitor.id.to_string(),
+                monitor.task_id.to_string(),
+                monitor.repository_full_name,
+                monitor.pull_request_number,
+                enum_name(monitor.state),
+                monitor.next_attempt_at.map(|value| value.to_rfc3339()),
+                serde_json::to_string(monitor)?,
+                monitor.updated_at.to_rfc3339(),
+            ],
+        )?;
+        let payload = serde_json::to_string(task)?;
+        transaction.execute(
+            "INSERT INTO tasks(id, payload, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
+            params![task.id.to_string(), payload, task.updated_at.to_rfc3339()],
+        )?;
+        transaction.execute(
+            "INSERT INTO task_events(task_id, summary, payload, occurred_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                task.id.to_string(),
+                summary,
+                payload,
+                task.updated_at.to_rfc3339()
+            ],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
