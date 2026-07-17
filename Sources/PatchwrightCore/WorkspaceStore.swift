@@ -283,9 +283,10 @@ public final class WorkspaceStore: ObservableObject {
         }
     }
 
-    public func previewCommentDelivery(task: EngineeringTask, body: String) async {
+    @discardableResult
+    public func previewCommentDelivery(task: EngineeringTask, body: String) async -> DeliveryPreview? {
         let body = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !body.isEmpty, !deliveryBusyTaskIDs.contains(task.id) else { return }
+        guard !body.isEmpty, !deliveryBusyTaskIDs.contains(task.id) else { return nil }
         let number: UInt64
         switch task.source {
         case .githubIssue(let source):
@@ -293,14 +294,20 @@ public final class WorkspaceStore: ObservableObject {
         case .githubPullRequest(let source):
             number = source.number
         default:
+            invalidateDeliveryState(taskID: task.id)
             deliveryError = "GitHub delivery requires an ingested issue or pull request task."
-            return
+            return nil
         }
-        await previewDelivery(task: task, action: GitHubActionPayload(commentNumber: number, body: body))
+        return await previewDelivery(
+            task: task,
+            action: GitHubActionPayload(commentNumber: number, body: body)
+        )
     }
 
-    public func previewDelivery(task: EngineeringTask, action: GitHubActionPayload) async {
-        guard !deliveryBusyTaskIDs.contains(task.id) else { return }
+    @discardableResult
+    public func previewDelivery(task: EngineeringTask, action: GitHubActionPayload) async -> DeliveryPreview? {
+        guard !deliveryBusyTaskIDs.contains(task.id) else { return nil }
+        invalidateDeliveryState(taskID: task.id)
         let identity: (UInt64, String, String?, String?, Date)
         switch task.source {
         case .githubIssue(let source):
@@ -313,11 +320,11 @@ public final class WorkspaceStore: ObservableObject {
             )
         default:
             deliveryError = "GitHub delivery requires an ingested issue or pull request task."
-            return
+            return nil
         }
         guard let installationID = repositories.first(where: { $0.id == identity.0 })?.installationID else {
             deliveryError = "Verify Patchwright GitHub App access before preparing delivery."
-            return
+            return nil
         }
         deliveryBusyTaskIDs.insert(task.id)
         defer { deliveryBusyTaskIDs.remove(task.id) }
@@ -333,22 +340,26 @@ public final class WorkspaceStore: ObservableObject {
                 expectedBaseSha: identity.3,
                 snapshotGeneration: max(1, UInt64(identity.4.timeIntervalSince1970))
             )
-            deliveryPreviews[task.id] = try await engine.previewDelivery(taskID: task.id, draft: draft)
-            deliveryApprovals[task.id] = nil
-            deliveryExecutions[task.id] = nil
+            let preview = try await engine.previewDelivery(taskID: task.id, draft: draft)
+            deliveryPreviews[task.id] = preview
             deliveryError = nil
+            return preview
         } catch {
+            invalidateDeliveryState(taskID: task.id)
             deliveryError = error.localizedDescription
+            return nil
         }
     }
 
-    public func previewMergeDelivery(task: EngineeringTask, method: GitHubMergeMethod) async {
-        guard !deliveryBusyTaskIDs.contains(task.id) else { return }
+    @discardableResult
+    public func previewMergeDelivery(task: EngineeringTask, method: GitHubMergeMethod) async -> DeliveryPreview? {
+        guard !deliveryBusyTaskIDs.contains(task.id) else { return nil }
         guard case .githubPullRequest(let source) = task.source else {
+            invalidateDeliveryState(taskID: task.id)
             deliveryError = "Merge approval requires an ingested pull request task."
-            return
+            return nil
         }
-        await previewDelivery(
+        return await previewDelivery(
             task: task,
             action: GitHubActionPayload(
                 pullRequestNumber: source.number,
@@ -358,8 +369,10 @@ public final class WorkspaceStore: ObservableObject {
         )
     }
 
-    public func approveDelivery(taskID: UUID) async {
-        guard let preview = deliveryPreviews[taskID], !deliveryBusyTaskIDs.contains(taskID) else { return }
+    public func approveDelivery(_ preview: DeliveryPreview) async {
+        let taskID = preview.taskId
+        guard deliveryPreviews[taskID] == preview,
+              !deliveryBusyTaskIDs.contains(taskID) else { return }
         deliveryBusyTaskIDs.insert(taskID)
         defer { deliveryBusyTaskIDs.remove(taskID) }
         do {
@@ -373,9 +386,11 @@ public final class WorkspaceStore: ObservableObject {
         }
     }
 
-    public func executeDelivery(taskID: UUID) async {
-        guard let preview = deliveryPreviews[taskID],
+    public func executeDelivery(_ preview: DeliveryPreview) async {
+        let taskID = preview.taskId
+        guard deliveryPreviews[taskID] == preview,
               let approval = deliveryApprovals[taskID],
+              approval.fingerprint == preview.fingerprint,
               !deliveryBusyTaskIDs.contains(taskID) else { return }
         deliveryBusyTaskIDs.insert(taskID)
         defer { deliveryBusyTaskIDs.remove(taskID) }
@@ -387,6 +402,12 @@ public final class WorkspaceStore: ObservableObject {
         } catch {
             deliveryError = error.localizedDescription
         }
+    }
+
+    private func invalidateDeliveryState(taskID: UUID) {
+        deliveryPreviews[taskID] = nil
+        deliveryApprovals[taskID] = nil
+        deliveryExecutions[taskID] = nil
     }
 
     public func codexStatus(for taskID: UUID) -> CodexRuntimeStatus? {

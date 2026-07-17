@@ -6,8 +6,7 @@ struct TaskDetailView: View {
     let task: EngineeringTask
     @SceneStorage("patchwright.taskWorkbenchTab") private var tabRaw = TaskWorkbenchTab.overview.rawValue
     @State private var deliveryBody = ""
-    @State private var deliveryApprovalPresented = false
-    @State private var mergeApprovalPresented = false
+    @State private var deliveryApprovalRequest: DeliveryApprovalRequest?
     @State private var mergeMethod = GitHubMergeMethod.squash
     @State private var reviewEvent = GitHubReviewEvent.comment
 
@@ -26,11 +25,8 @@ struct TaskDetailView: View {
             Divider()
             tabContent
         }
-        .sheet(isPresented: $deliveryApprovalPresented) {
-            DeliveryApprovalSheet(store: store, task: task)
-        }
-        .sheet(isPresented: $mergeApprovalPresented) {
-            DeliveryApprovalSheet(store: store, task: task)
+        .sheet(item: $deliveryApprovalRequest) { request in
+            DeliveryApprovalSheet(store: store, task: task, preview: request.preview)
         }
         .task(id: task.id) {
             while !Task.isCancelled {
@@ -233,8 +229,9 @@ struct TaskDetailView: View {
                     Spacer()
                     Button("Preview Comment", systemImage: "bubble.left") {
                         Task {
-                            await store.previewCommentDelivery(task: task, body: deliveryBody)
-                            if store.deliveryPreviews[task.id] != nil { deliveryApprovalPresented = true }
+                            if let preview = await store.previewCommentDelivery(task: task, body: deliveryBody) {
+                                deliveryApprovalRequest = DeliveryApprovalRequest(preview: preview)
+                            }
                         }
                     }
                     .disabled(deliveryTextIsEmpty || store.deliveryBusyTaskIDs.contains(task.id))
@@ -431,8 +428,9 @@ struct TaskDetailView: View {
 
     private func preview(_ action: GitHubActionPayload) {
         Task {
-            await store.previewDelivery(task: task, action: action)
-            if store.deliveryPreviews[task.id] != nil { deliveryApprovalPresented = true }
+            if let preview = await store.previewDelivery(task: task, action: action) {
+                deliveryApprovalRequest = DeliveryApprovalRequest(preview: preview)
+            }
         }
     }
 
@@ -453,9 +451,8 @@ struct TaskDetailView: View {
                 Spacer()
                 Button("Preview Exact Merge", systemImage: "eye") {
                     Task {
-                        await store.previewMergeDelivery(task: task, method: mergeMethod)
-                        if store.deliveryPreviews[task.id]?.action.action.kind == "mergePullRequest" {
-                            mergeApprovalPresented = true
+                        if let preview = await store.previewMergeDelivery(task: task, method: mergeMethod) {
+                            deliveryApprovalRequest = DeliveryApprovalRequest(preview: preview)
                         }
                     }
                 }
@@ -510,6 +507,11 @@ struct TaskDetailView: View {
         ContentUnavailableView(title, systemImage: image, description: Text(description))
             .frame(maxWidth: .infinity, minHeight: 280)
     }
+}
+
+private struct DeliveryApprovalRequest: Identifiable {
+    let id = UUID()
+    let preview: DeliveryPreview
 }
 
 private enum TaskWorkbenchTab: String, CaseIterable, Identifiable {
