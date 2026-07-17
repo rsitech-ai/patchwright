@@ -24,6 +24,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Verify toolchains
@@ -40,6 +41,22 @@ jobs:
           swift package resolve
           cargo fetch --locked
           git diff --exit-code -- Package.resolved Cargo.lock
+
+      - name: Audit Rust dependencies
+        run: |
+          set -euo pipefail
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit --deny warnings
+
+      - name: Scan tracked source and full history for secrets
+        run: |
+          set -euo pipefail
+          evidence_root="$(mktemp -d)"
+          mkdir -p "$evidence_root/evidence"
+          ./script/scan_publication_secrets.sh \
+            --repo "$GITHUB_WORKSPACE" \
+            --artifact-root "$evidence_root" \
+            --output "$evidence_root/evidence/secret-scan.json"
 
       - name: Run verification
         run: ./script/verify.sh
