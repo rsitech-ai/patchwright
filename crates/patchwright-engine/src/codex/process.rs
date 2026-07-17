@@ -22,6 +22,7 @@ use uuid::Uuid;
 use super::protocol::MAX_LINE_BYTES;
 
 const COMPATIBLE_VERSION_PREFIX: &str = "codex-cli 0.144.";
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const ALLOWED_ENVIRONMENT_KEYS: &[&str] = &[
     "CODEX_HOME",
     "HOME",
@@ -423,15 +424,31 @@ impl CodexExecutable {
             .arg("--version")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        command.as_std_mut().process_group(0);
         apply_allowlisted_environment(&mut command);
-        let output = command
-            .output()
-            .await
-            .map_err(|source| CodexProcessError::Io {
-                operation: "probe Codex version",
-                source,
-            })?;
+        let child = command.spawn().map_err(|source| CodexProcessError::Io {
+            operation: "launch Codex version probe",
+            source,
+        })?;
+        let process_group_id = child
+            .id()
+            .and_then(|id| i32::try_from(id).ok())
+            .ok_or(CodexProcessError::MissingProcessId)?;
+        let output =
+            if let Ok(result) = timeout(VERSION_PROBE_TIMEOUT, child.wait_with_output()).await {
+                result.map_err(|source| CodexProcessError::Io {
+                    operation: "probe Codex version",
+                    source,
+                })?
+            } else {
+                let _ = killpg(Pid::from_raw(process_group_id), Signal::SIGKILL);
+                return Err(CodexProcessError::VersionProbeTimeout {
+                    path,
+                    duration: VERSION_PROBE_TIMEOUT,
+                });
+            };
         if !output.status.success() {
             return Err(CodexProcessError::VersionProbeFailed {
                 path,
@@ -481,6 +498,8 @@ pub enum CodexProcessError {
     NotExecutable(PathBuf),
     #[error("Codex version probe failed for {path} with status {status:?}")]
     VersionProbeFailed { path: PathBuf, status: Option<i32> },
+    #[error("Codex version probe timed out after {duration:?}: {path}")]
+    VersionProbeTimeout { path: PathBuf, duration: Duration },
     #[error("Codex version probe returned an empty version")]
     EmptyVersion,
     #[error("task key must not be empty")]
