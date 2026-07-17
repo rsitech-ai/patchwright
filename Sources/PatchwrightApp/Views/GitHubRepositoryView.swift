@@ -166,7 +166,7 @@ struct GitHubRepositoryView: View {
                     Spacer(minLength: 0)
                     Button("Preview Task") { Task { await store.previewTask(from: item) } }
                         .buttonStyle(.borderedProminent)
-                        .help("Verify GitHub App access and preview the task contract")
+                        .help("Preview the local task contract")
                 }
             }
             if snapshot.repository.installationID == nil {
@@ -174,7 +174,7 @@ struct GitHubRepositoryView: View {
                     Image(systemName: "exclamationmark.shield.fill").foregroundStyle(.orange)
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Your GitHub App is not installed for this repository").font(.callout.weight(.semibold))
-                        Text("Read-only gh data remains available. Previewing a mutation requires your App to be installed here and will refresh its installation identity.")
+                        Text("Local task preview and read-only gh data remain available. GitHub App access is required only for remote mutations and refreshes the installation identity before a mutation preview.")
                             .font(.caption).foregroundStyle(.secondary)
                         if let url = URL(string: "https://github.com/settings/installations") { Link("Manage your GitHub App installations", destination: url).font(.caption) }
                     }
