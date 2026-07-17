@@ -35,6 +35,21 @@ async fn service(root: &std::path::Path, body: &str, grace: std::time::Duration)
     CodexService::new(CodexProcessFactory::new(executable, config), version)
 }
 
+async fn wait_for_pid(path: &std::path::Path) -> i32 {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Ok(value) = std::fs::read_to_string(path)
+                && let Ok(pid) = value.trim().parse::<i32>()
+            {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for descendant pid at {}", path.display()))
+}
+
 #[tokio::test]
 async fn shutdown_concurrently_kills_owned_groups_and_persists_interrupted_jobs() {
     let root = tempdir().unwrap();
@@ -62,11 +77,7 @@ while :; do sleep 1; done"#,
         advance_to_preparing(&mut task);
         store.lock().unwrap().save_task(&task, "prepared").unwrap();
         service.start(task.id, &store).await.unwrap();
-        let pid = std::fs::read_to_string(worktree.join("descendant.pid"))
-            .unwrap()
-            .trim()
-            .parse::<i32>()
-            .unwrap();
+        let pid = wait_for_pid(&worktree.join("descendant.pid")).await;
         descendant_pids.push(pid);
     }
 
