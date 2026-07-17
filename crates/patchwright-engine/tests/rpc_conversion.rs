@@ -23,6 +23,67 @@ async fn call(stream: &mut BufReader<UnixStream>, request: Value) -> Value {
     serde_json::from_str(&line).unwrap()
 }
 
+#[tokio::test]
+async fn task_contract_rpc_preserves_legacy_contract_as_read_only_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = directory.path().join("engine.sock");
+    let database = directory.path().join("engine.sqlite3");
+    let task_id = uuid::Uuid::new_v4();
+    let binding_id = uuid::Uuid::new_v4();
+    EventStore::open(&database).unwrap();
+    let legacy = json!({
+        "version": 1,
+        "taskId": task_id,
+        "source": { "kind": "localRequest" },
+        "repositoryBindingId": binding_id,
+        "goal": "Historical task outcome",
+        "acceptanceCriteria": ["Preserve the original audit record"],
+        "baseSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "headSha": null,
+        "instructionDigests": [],
+        "verificationCommands": [],
+        "requiredCapabilities": [],
+        "risk": "moderate",
+        "sensitivePaths": [],
+        "dependencies": []
+    });
+    rusqlite::Connection::open(&database)
+        .unwrap()
+        .execute(
+            "INSERT INTO task_contracts(task_id, binding_id, version, payload, updated_at)
+             VALUES (?1, ?2, 1, ?3, '2026-07-14T20:00:00Z')",
+            rusqlite::params![
+                task_id.to_string(),
+                binding_id.to_string(),
+                legacy.to_string()
+            ],
+        )
+        .unwrap();
+
+    let server_socket = socket.clone();
+    let server_database = database.clone();
+    let server = tokio::spawn(async move { serve(&server_socket, &server_database).await });
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let mut stream = BufReader::new(UnixStream::connect(&socket).await.unwrap());
+    let response = call(
+        &mut stream,
+        json!({"jsonrpc":"2.0","id":1,"method":"task.contract","params":{"taskId":task_id}}),
+    )
+    .await;
+
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(response["result"]["goal"], "Historical task outcome");
+    assert_eq!(response["result"]["version"], 1);
+    assert!(response["result"].get("sourceSha256").is_none());
+    server.abort();
+}
+
 fn snapshot() -> GitHubRepositorySnapshot {
     snapshot_with_base(BASE_SHA)
 }
