@@ -1,6 +1,21 @@
 use patchwright_core::{
     GitHubAction, GitHubActionPreview, MergeMethod, RemoteIdentity, RemotePrecondition, ReviewEvent,
 };
+
+#[test]
+fn github_app_smoke_draft_action_deserializes() {
+    let sha = "a".repeat(40);
+    let encoded = serde_json::json!({
+        "kind": "draftPullRequest",
+        "title": "[Patchwright E2E] Approval-gated draft",
+        "head": "patchwright/e2e",
+        "base": "main",
+        "expectedBaseSha": sha,
+        "body": "qualification"
+    });
+    let action: GitHubAction = serde_json::from_value(encoded).unwrap();
+    assert_eq!(action.expected_base_sha(), Some(sha.as_str()));
+}
 use serde_json::json;
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

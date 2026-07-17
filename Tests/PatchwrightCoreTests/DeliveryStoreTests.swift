@@ -3,6 +3,21 @@ import XCTest
 @testable import PatchwrightCore
 
 final class DeliveryStoreTests: XCTestCase {
+    func testClosePullRequestPayloadCarriesTheExactHeadSHA() throws {
+        let sha = String(repeating: "b", count: 40)
+        let payload = GitHubActionPayload(
+            kind: "closePullRequest",
+            pullRequestNumber: 7,
+            expectedHeadSha: sha
+        )
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(payload)) as? [String: Any]
+        )
+        XCTAssertEqual(object["kind"] as? String, "closePullRequest")
+        XCTAssertEqual(object["pullRequestNumber"] as? UInt64, 7)
+        XCTAssertEqual(object["expectedHeadSha"] as? String, sha)
+    }
+
     func testDeliverySheetIsBoundToTheExactPreviewRequest() throws {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
