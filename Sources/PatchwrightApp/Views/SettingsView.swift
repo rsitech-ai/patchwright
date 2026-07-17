@@ -3,7 +3,6 @@ import PatchwrightCore
 import SwiftUI
 
 struct SettingsView: View {
-    @AppStorage("reviewProvider") private var reviewProvider = "apple"
     @State private var appID = ""
     @State private var clientID = ""
     @State private var keyReference = ""
@@ -23,10 +22,6 @@ struct SettingsView: View {
                 Text(SetupGuidance.codexSecondary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Picker("Review provider", selection: $reviewProvider) {
-                    Text("Apple Foundation Models").tag("apple")
-                    Text("Codex CLI").tag("codex")
-                }
             }
             Section("Your GitHub App — mutations") {
                 Text(SetupGuidance.mutations)
