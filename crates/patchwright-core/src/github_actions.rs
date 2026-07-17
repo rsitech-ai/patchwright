@@ -24,7 +24,7 @@ pub enum MergeMethod {
     Rebase,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -61,8 +61,6 @@ pub enum GitHubAction {
         pull_request_number: u64,
         #[serde(alias = "thread_id")]
         thread_id: String,
-        #[serde(alias = "expected_head_sha")]
-        expected_head_sha: String,
     },
     CheckRun {
         name: String,
@@ -86,8 +84,6 @@ pub enum GitHubAction {
     ReadyPullRequest {
         #[serde(alias = "pull_request_number")]
         pull_request_number: u64,
-        #[serde(alias = "expected_head_sha")]
-        expected_head_sha: String,
     },
     ClosePullRequest {
         #[serde(alias = "pull_request_number")]
@@ -110,6 +106,159 @@ pub enum GitHubAction {
         expected_head_sha: String,
         method: MergeMethod,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind",
+    deny_unknown_fields
+)]
+enum GitHubActionWire {
+    CreateBranch {
+        branch: String,
+        #[serde(alias = "from_sha")]
+        from_sha: String,
+    },
+    PushIntent {
+        branch: String,
+        #[serde(alias = "head_sha")]
+        head_sha: String,
+    },
+    Comment {
+        #[serde(alias = "issue_number")]
+        issue_number: u64,
+        body: String,
+    },
+    Review {
+        #[serde(alias = "pull_request_number")]
+        pull_request_number: u64,
+        #[serde(alias = "expected_head_sha")]
+        expected_head_sha: String,
+        event: ReviewEvent,
+        body: String,
+        #[serde(alias = "inline_comments")]
+        inline_comments: Vec<InlineReviewComment>,
+    },
+    ResolveReviewThread {
+        #[serde(alias = "pull_request_number")]
+        pull_request_number: u64,
+        #[serde(alias = "thread_id")]
+        thread_id: String,
+    },
+    CheckRun {
+        name: String,
+        #[serde(alias = "head_sha")]
+        head_sha: String,
+        status: String,
+        conclusion: Option<String>,
+    },
+    DraftPullRequest {
+        title: String,
+        head: String,
+        base: String,
+        body: String,
+    },
+    UpdatePullRequestBranch {
+        #[serde(alias = "pull_request_number")]
+        pull_request_number: u64,
+        #[serde(alias = "expected_head_sha")]
+        expected_head_sha: String,
+    },
+    ReadyPullRequest {
+        #[serde(alias = "pull_request_number")]
+        pull_request_number: u64,
+    },
+    ClosePullRequest {
+        #[serde(alias = "pull_request_number")]
+        pull_request_number: u64,
+    },
+    CloseIssue {
+        #[serde(alias = "issue_number")]
+        issue_number: u64,
+    },
+    EnqueuePullRequest {
+        #[serde(alias = "pull_request_number")]
+        pull_request_number: u64,
+        #[serde(alias = "expected_head_sha")]
+        expected_head_sha: String,
+    },
+    MergePullRequest {
+        #[serde(alias = "pull_request_number")]
+        pull_request_number: u64,
+        #[serde(alias = "expected_head_sha")]
+        expected_head_sha: String,
+        method: MergeMethod,
+    },
+}
+
+impl<'de> Deserialize<'de> for GitHubAction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = GitHubActionWire::deserialize(deserializer)?;
+        let action = match wire {
+            GitHubActionWire::CreateBranch { branch, from_sha } => {
+                Self::create_branch(&branch, &from_sha)
+            }
+            GitHubActionWire::PushIntent { branch, head_sha } => {
+                Self::push_intent(&branch, &head_sha)
+            }
+            GitHubActionWire::Comment { issue_number, body } => Self::comment(issue_number, &body),
+            GitHubActionWire::Review {
+                pull_request_number,
+                expected_head_sha,
+                event,
+                body,
+                inline_comments,
+            } => Self::review(
+                pull_request_number,
+                &expected_head_sha,
+                event,
+                &body,
+                inline_comments,
+            ),
+            GitHubActionWire::ResolveReviewThread {
+                pull_request_number,
+                thread_id,
+            } => Self::resolve_review_thread(pull_request_number, &thread_id),
+            GitHubActionWire::CheckRun {
+                name,
+                head_sha,
+                status,
+                conclusion,
+            } => Self::check_run(&name, &head_sha, &status, conclusion.as_deref()),
+            GitHubActionWire::DraftPullRequest {
+                title,
+                head,
+                base,
+                body,
+            } => Self::draft_pull_request(&title, &head, &base, &body),
+            GitHubActionWire::UpdatePullRequestBranch {
+                pull_request_number,
+                expected_head_sha,
+            } => Self::update_pull_request_branch(pull_request_number, &expected_head_sha),
+            GitHubActionWire::ReadyPullRequest {
+                pull_request_number,
+            } => Self::ready_pull_request(pull_request_number),
+            GitHubActionWire::ClosePullRequest {
+                pull_request_number,
+            } => Self::close_pull_request(pull_request_number),
+            GitHubActionWire::CloseIssue { issue_number } => Self::close_issue(issue_number),
+            GitHubActionWire::EnqueuePullRequest {
+                pull_request_number,
+                expected_head_sha,
+            } => Self::enqueue_pull_request(pull_request_number, &expected_head_sha),
+            GitHubActionWire::MergePullRequest {
+                pull_request_number,
+                expected_head_sha,
+                method,
+            } => Self::merge_pull_request(pull_request_number, &expected_head_sha, method),
+        };
+        action.map_err(serde::de::Error::custom)
+    }
 }
 
 impl GitHubAction {
@@ -161,12 +310,10 @@ impl GitHubAction {
     pub fn resolve_review_thread(
         pull_request_number: u64,
         thread_id: &str,
-        expected_head_sha: &str,
     ) -> Result<Self, GitHubActionError> {
         Ok(Self::ResolveReviewThread {
             pull_request_number: validate_number(pull_request_number)?,
             thread_id: validate_node_id(thread_id)?,
-            expected_head_sha: validate_sha(expected_head_sha)?,
         })
     }
 
@@ -222,13 +369,9 @@ impl GitHubAction {
         })
     }
 
-    pub fn ready_pull_request(
-        pull_request_number: u64,
-        expected_head_sha: &str,
-    ) -> Result<Self, GitHubActionError> {
+    pub fn ready_pull_request(pull_request_number: u64) -> Result<Self, GitHubActionError> {
         Ok(Self::ReadyPullRequest {
             pull_request_number: validate_number(pull_request_number)?,
-            expected_head_sha: validate_sha(expected_head_sha)?,
         })
     }
 
@@ -301,6 +444,7 @@ impl GitHubAction {
             }
             | Self::ClosePullRequest {
                 pull_request_number,
+                ..
             }
             | Self::ReadyPullRequest {
                 pull_request_number,
@@ -329,14 +473,59 @@ impl GitHubAction {
             _ => None,
         }
     }
+
+    #[must_use]
+    pub fn expected_head_sha(&self) -> Option<&str> {
+        match self {
+            Self::Review {
+                expected_head_sha, ..
+            }
+            | Self::UpdatePullRequestBranch {
+                expected_head_sha, ..
+            }
+            | Self::EnqueuePullRequest {
+                expected_head_sha, ..
+            }
+            | Self::MergePullRequest {
+                expected_head_sha, ..
+            } => Some(expected_head_sha),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn expected_base_sha(&self) -> Option<&str> {
+        match self {
+            Self::CreateBranch { from_sha, .. } => Some(from_sha),
+            _ => None,
+        }
+    }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InlineReviewComment {
     path: String,
     line: u64,
     body: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InlineReviewCommentWire {
+    path: String,
+    line: u64,
+    body: String,
+}
+
+impl<'de> Deserialize<'de> for InlineReviewComment {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = InlineReviewCommentWire::deserialize(deserializer)?;
+        Self::new(&wire.path, wire.line, &wire.body).map_err(serde::de::Error::custom)
+    }
 }
 
 impl InlineReviewComment {
@@ -367,12 +556,38 @@ impl InlineReviewComment {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteIdentity {
     repository_id: u64,
     installation_id: u64,
     repository_full_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteIdentityWire {
+    #[serde(alias = "repository_id")]
+    repository_id: u64,
+    #[serde(alias = "installation_id")]
+    installation_id: u64,
+    #[serde(alias = "repository_full_name")]
+    repository_full_name: String,
+}
+
+impl<'de> Deserialize<'de> for RemoteIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = RemoteIdentityWire::deserialize(deserializer)?;
+        Self::new(
+            wire.repository_id,
+            wire.installation_id,
+            &wire.repository_full_name,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl RemoteIdentity {
@@ -412,12 +627,38 @@ impl RemoteIdentity {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemotePrecondition {
     expected_head_sha: Option<String>,
     expected_base_sha: Option<String>,
     snapshot_generation: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemotePreconditionWire {
+    #[serde(alias = "expected_head_sha")]
+    expected_head_sha: Option<String>,
+    #[serde(alias = "expected_base_sha")]
+    expected_base_sha: Option<String>,
+    #[serde(alias = "snapshot_generation")]
+    snapshot_generation: u64,
+}
+
+impl<'de> Deserialize<'de> for RemotePrecondition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = RemotePreconditionWire::deserialize(deserializer)?;
+        Self::new(
+            wire.expected_head_sha.as_deref(),
+            wire.expected_base_sha.as_deref(),
+            wire.snapshot_generation,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl RemotePrecondition {
@@ -452,7 +693,7 @@ impl RemotePrecondition {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitHubActionPreview {
     remote: RemoteIdentity,
@@ -461,6 +702,47 @@ pub struct GitHubActionPreview {
     payload_sha256: String,
     idempotency_sha256: String,
     required_permissions: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubActionPreviewWire {
+    remote: RemoteIdentity,
+    action: GitHubAction,
+    precondition: RemotePrecondition,
+    #[serde(alias = "payload_sha256")]
+    payload_sha256: String,
+    #[serde(alias = "idempotency_sha256")]
+    idempotency_sha256: String,
+    #[serde(alias = "required_permissions")]
+    required_permissions: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for GitHubActionPreview {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = GitHubActionPreviewWire::deserialize(deserializer)?;
+        let preview = Self::new(wire.remote, wire.action, wire.precondition)
+            .map_err(serde::de::Error::custom)?;
+        if wire.payload_sha256 != preview.payload_sha256 {
+            return Err(serde::de::Error::custom(GitHubActionError::InvalidField(
+                "payloadSha256",
+            )));
+        }
+        if wire.idempotency_sha256 != preview.idempotency_sha256 {
+            return Err(serde::de::Error::custom(GitHubActionError::InvalidField(
+                "idempotencySha256",
+            )));
+        }
+        if wire.required_permissions != preview.required_permissions {
+            return Err(serde::de::Error::custom(GitHubActionError::InvalidField(
+                "requiredPermissions",
+            )));
+        }
+        Ok(preview)
+    }
 }
 
 impl GitHubActionPreview {

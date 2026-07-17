@@ -17,7 +17,7 @@ Patchwright is available under your choice of the
 
 This repository contains the Stage 1–3 MVP:
 
-- `Patchwright`: native SwiftUI review and task client with Apple Foundation Models availability handling.
+- `Patchwright`: native SwiftUI task, GitHub inspection, approval, and Codex-session client.
 - `patchwright-engine`: Rust task state, policy, instruction resolution, worktrees, argv-safe commands, SQLite recovery, and Unix-socket JSON-RPC.
 - `patchwright-relay`: signature-verifying GitHub webhook ingress plus draft-PR and check-run API adapters.
 
@@ -73,11 +73,23 @@ cargo run -p patchwright-engine -- serve \
   --socket "$HOME/.patchwright/engine.sock" \
   --database "$HOME/.patchwright/patchwright.sqlite3"
 
-PATCHWRIGHT_GITHUB_WEBHOOK_SECRET='runtime-secret' \
-cargo run -p patchwright-relay -- --address 127.0.0.1:8787
+PATCHWRIGHT_GITHUB_WEBHOOK_SECRET_FILE="$HOME/.patchwright/webhook-secret" \
+PATCHWRIGHT_RELAY_DATABASE="$HOME/.patchwright/relay.sqlite" \
+PATCHWRIGHT_ENGINE_SOCKET="$HOME/.patchwright/engine.sock" \
+cargo run -p patchwright-relay -- serve --address 127.0.0.1:8787
 ```
 
-The relay binds to loopback by default. GitHub App metadata and a Keychain or owner-only protected-key reference are your configuration and are never committed. See [Choose only the access you need](#choose-only-the-access-you-need). The engine brokers repository-scoped, short-lived installation tokens for installed-repository ingestion and every approved mutation.
+The relay accepts only IPv4 or IPv6 loopback addresses; terminate authenticated
+HTTPS or a tunnel in front of it. Create the webhook secret file outside the
+checkout with owner-only mode `0400` or `0600`; the file contains the raw webhook
+secret and must never be committed or passed as a command-line argument. The
+relay durably retries accepted sanitized events to the owner-only engine socket;
+an engine outage does not require GitHub redelivery. GitHub
+App metadata and a Keychain or owner-only protected-key reference are your
+configuration and are never committed. See [Choose only the access you
+need](#choose-only-the-access-you-need). The engine brokers repository-scoped,
+short-lived installation tokens for installed-repository ingestion and every
+approved mutation.
 
 ## Direct macOS distribution
 

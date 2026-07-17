@@ -7,11 +7,15 @@ use patchwright_engine::codex::process::{
     VersionCompatibility,
 };
 use serde_json::Value;
+use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 use tempfile::tempdir;
 
+static PROCESS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn discovers_the_exact_executable_and_reports_version_compatibility() {
+    let _test_guard = PROCESS_TEST_LOCK.lock().await;
     let root = tempdir().unwrap();
     let compatible = FakeCodexAppServer::create(root.path(), "codex-cli 0.144.2", "exit 0");
     let executable = CodexExecutable::discover(Some(compatible.path()))
@@ -37,6 +41,7 @@ async fn discovers_the_exact_executable_and_reports_version_compatibility() {
 
 #[tokio::test]
 async fn rejects_missing_or_non_executable_codex_paths() {
+    let _test_guard = PROCESS_TEST_LOCK.lock().await;
     let root = tempdir().unwrap();
     let missing = root.path().join("missing-codex");
     assert!(matches!(
@@ -53,7 +58,40 @@ async fn rejects_missing_or_non_executable_codex_paths() {
 }
 
 #[tokio::test]
+async fn bounds_a_hung_version_probe_and_cleans_up_its_process_group() {
+    let _test_guard = PROCESS_TEST_LOCK.lock().await;
+    let root = tempdir().unwrap();
+    let executable = root.path().join("hung-codex");
+    let descendant_path = root.path().join("descendant.pid");
+    std::fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\n(sleep 60) &\nprintf '%s' \"$!\" > '{}'\nwait\n",
+            descendant_path.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let started = std::time::Instant::now();
+    let result = CodexExecutable::discover(Some(&executable)).await;
+
+    assert!(matches!(
+        result,
+        Err(CodexProcessError::VersionProbeTimeout { .. })
+    ));
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let descendant_pid = std::fs::read_to_string(descendant_path)
+        .unwrap()
+        .parse::<i32>()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(!pid_exists(descendant_pid));
+}
+
+#[tokio::test]
 async fn launches_independent_task_process_groups_in_their_worktrees_without_secrets() {
+    let _test_guard = PROCESS_TEST_LOCK.lock().await;
     let root = tempdir().unwrap();
     let fake = FakeCodexAppServer::create(
         root.path(),
@@ -100,6 +138,7 @@ while IFS= read -r line; do printf '%s\n' "$line"; done"#,
 
 #[tokio::test]
 async fn bounds_stderr_reports_early_exit_and_times_out_hung_initialization() {
+    let _test_guard = PROCESS_TEST_LOCK.lock().await;
     let root = tempdir().unwrap();
     let noisy = FakeCodexAppServer::create(
         root.path(),
@@ -140,6 +179,7 @@ async fn bounds_stderr_reports_early_exit_and_times_out_hung_initialization() {
 
 #[tokio::test]
 async fn termination_cleans_up_the_owned_process_group() {
+    let _test_guard = PROCESS_TEST_LOCK.lock().await;
     let root = tempdir().unwrap();
     let fake = FakeCodexAppServer::create(
         root.path(),

@@ -64,10 +64,15 @@ impl GitHubMutationClient {
         let prefix = format!("repos/{owner}/{repository}");
         match action {
             GitHubAction::CreateBranch { branch, from_sha } => {
+                let reference = format!("refs/heads/{branch}");
                 self.request(
                     Method::POST,
                     &format!("{prefix}/git/refs"),
-                    json!({"ref":format!("refs/heads/{branch}"),"sha":from_sha}),
+                    json!({"ref":reference,"sha":from_sha}),
+                    MutationExpectation::CreatedRef {
+                        reference: &reference,
+                        sha: from_sha,
+                    },
                 )
                 .await
             }
@@ -77,6 +82,7 @@ impl GitHubMutationClient {
                     Method::POST,
                     &format!("{prefix}/issues/{issue_number}/comments"),
                     json!({"body":body}),
+                    MutationExpectation::Resource,
                 )
                 .await
             }
@@ -101,26 +107,14 @@ impl GitHubMutationClient {
                     Method::POST,
                     &format!("{prefix}/pulls/{pull_request_number}/reviews"),
                     payload,
+                    MutationExpectation::Resource,
                 )
                 .await
             }
             GitHubAction::ResolveReviewThread {
                 pull_request_number,
                 thread_id,
-                expected_head_sha,
             } => {
-                let pull = self
-                    .request_value(
-                        Method::GET,
-                        &format!("{prefix}/pulls/{pull_request_number}"),
-                        None,
-                    )
-                    .await?;
-                if pull.pointer("/head/sha").and_then(Value::as_str)
-                    != Some(expected_head_sha.as_str())
-                {
-                    return Err(MutationError::StaleRemoteHead);
-                }
                 let identity = self
                     .request_value(
                         Method::POST,
@@ -129,6 +123,7 @@ impl GitHubMutationClient {
                             "query":"query ReviewThreadIdentity($threadId: ID!) { node(id: $threadId) { ... on PullRequestReviewThread { id isResolved viewerCanResolve pullRequest { number headRefOid repository { nameWithOwner } } } } }",
                             "variables":{"threadId":thread_id}
                         })),
+                        RequestEffect::Read,
                     )
                     .await?;
                 if identity.get("errors").is_some() {
@@ -141,10 +136,6 @@ impl GitHubMutationClient {
                 if thread.get("id").and_then(Value::as_str) != Some(thread_id)
                     || thread.pointer("/pullRequest/number").and_then(Value::as_u64)
                         != Some(*pull_request_number)
-                    || thread
-                        .pointer("/pullRequest/headRefOid")
-                        .and_then(Value::as_str)
-                        != Some(expected_head_sha)
                     || thread
                         .pointer("/pullRequest/repository/nameWithOwner")
                         .and_then(Value::as_str)
@@ -170,6 +161,7 @@ impl GitHubMutationClient {
                             "query":"mutation ResolveReviewThread($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } } }",
                             "variables":{"threadId":thread_id}
                         })),
+                        RequestEffect::Mutation,
                     )
                     .await?;
                 if response.get("errors").is_some() {
@@ -177,11 +169,11 @@ impl GitHubMutationClient {
                 }
                 let resolved = response
                     .pointer("/data/resolveReviewThread/thread")
-                    .ok_or(MutationError::InvalidResponse)?;
+                    .ok_or(MutationError::AmbiguousTransport)?;
                 if resolved.get("id").and_then(Value::as_str) != Some(thread_id)
                     || resolved.get("isResolved").and_then(Value::as_bool) != Some(true)
                 {
-                    return Err(MutationError::InvalidResponse);
+                    return Err(MutationError::AmbiguousTransport);
                 }
                 Ok(MutationResult {
                     node_id: Some(thread_id.clone()),
@@ -199,6 +191,7 @@ impl GitHubMutationClient {
                     Method::POST,
                     &format!("{prefix}/check-runs"),
                     json!({"name":name,"head_sha":head_sha,"status":status,"conclusion":conclusion}),
+                    MutationExpectation::Resource,
                 )
                 .await
             }
@@ -212,6 +205,7 @@ impl GitHubMutationClient {
                     Method::POST,
                     &format!("{prefix}/pulls"),
                     json!({"title":title,"head":head,"base":base,"body":body,"draft":true}),
+                    MutationExpectation::PullRequest,
                 )
                 .await
             }
@@ -223,25 +217,21 @@ impl GitHubMutationClient {
                     Method::PUT,
                     &format!("{prefix}/pulls/{pull_request_number}/update-branch"),
                     json!({"expected_head_sha":expected_head_sha}),
+                    MutationExpectation::UpdateBranch,
                 )
                 .await
             }
             GitHubAction::ReadyPullRequest {
                 pull_request_number,
-                expected_head_sha,
             } => {
                 let pull = self
                     .request_value(
                         Method::GET,
                         &format!("{prefix}/pulls/{pull_request_number}"),
                         None,
+                        RequestEffect::Read,
                     )
                     .await?;
-                if pull.pointer("/head/sha").and_then(Value::as_str)
-                    != Some(expected_head_sha.as_str())
-                {
-                    return Err(MutationError::StaleRemoteHead);
-                }
                 if pull.get("draft").and_then(Value::as_bool) == Some(false) {
                     return Ok(decode_value(&pull));
                 }
@@ -257,6 +247,7 @@ impl GitHubMutationClient {
                             "query":"mutation MarkReady($pullRequestId: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $pullRequestId}) { pullRequest { databaseId number url isDraft } } }",
                             "variables":{"pullRequestId":pull_request_id}
                         })),
+                        RequestEffect::Mutation,
                     )
                     .await?;
                 if response.get("errors").is_some() {
@@ -264,7 +255,16 @@ impl GitHubMutationClient {
                 }
                 let ready = response
                     .pointer("/data/markPullRequestReadyForReview/pullRequest")
-                    .ok_or(MutationError::InvalidResponse)?;
+                    .ok_or(MutationError::AmbiguousTransport)?;
+                if ready.get("databaseId").and_then(Value::as_u64) == Some(0)
+                    || ready.get("databaseId").and_then(Value::as_u64).is_none()
+                    || ready.get("number").and_then(Value::as_u64)
+                        != Some(*pull_request_number)
+                    || ready.get("url").and_then(nonempty_string).is_none()
+                    || ready.get("isDraft").and_then(Value::as_bool) != Some(false)
+                {
+                    return Err(MutationError::AmbiguousTransport);
+                }
                 Ok(MutationResult {
                     id: ready.get("databaseId").and_then(Value::as_u64),
                     number: ready.get("number").and_then(Value::as_u64),
@@ -285,6 +285,9 @@ impl GitHubMutationClient {
                     Method::PATCH,
                     &format!("{prefix}/pulls/{pull_request_number}"),
                     json!({"state":"closed"}),
+                    MutationExpectation::Closed {
+                        number: *pull_request_number,
+                    },
                 )
                 .await
             }
@@ -293,6 +296,9 @@ impl GitHubMutationClient {
                     Method::PATCH,
                     &format!("{prefix}/issues/{issue_number}"),
                     json!({"state":"closed","state_reason":"completed"}),
+                    MutationExpectation::Closed {
+                        number: *issue_number,
+                    },
                 )
                 .await
             }
@@ -306,6 +312,7 @@ impl GitHubMutationClient {
                     Method::PUT,
                     &format!("{prefix}/pulls/{pull_request_number}/merge"),
                     json!({"sha":expected_head_sha,"merge_method":merge_method(*method)}),
+                    MutationExpectation::Merged,
                 )
                 .await
             }
@@ -317,9 +324,14 @@ impl GitHubMutationClient {
         method: Method,
         path: &str,
         body: Value,
+        expectation: MutationExpectation<'_>,
     ) -> Result<MutationResult, MutationError> {
-        let value = self.request_value(method, path, Some(&body)).await?;
-        Ok(decode_value(&value))
+        let value = self
+            .request_value(method, path, Some(&body), RequestEffect::Mutation)
+            .await?;
+        expectation
+            .decode(&value)
+            .ok_or(MutationError::AmbiguousTransport)
     }
 
     async fn request_value(
@@ -327,6 +339,7 @@ impl GitHubMutationClient {
         method: Method,
         path: &str,
         body: Option<&Value>,
+        effect: RequestEffect,
     ) -> Result<Value, MutationError> {
         let url = self
             .base_url
@@ -341,10 +354,10 @@ impl GitHubMutationClient {
         if let Some(body) = body {
             request = request.json(body);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|_| MutationError::AmbiguousTransport)?;
+        let response = request.send().await.map_err(|error| match effect {
+            RequestEffect::Read => MutationError::Client(error),
+            RequestEffect::Mutation => MutationError::AmbiguousTransport,
+        })?;
         let status = response.status();
         let retry_after = response
             .headers()
@@ -363,10 +376,10 @@ impl GitHubMutationClient {
                 request_id,
             });
         }
-        response
-            .json()
-            .await
-            .map_err(|_| MutationError::InvalidResponse)
+        response.json().await.map_err(|_| match effect {
+            RequestEffect::Read => MutationError::InvalidResponse,
+            RequestEffect::Mutation => MutationError::AmbiguousTransport,
+        })
     }
 }
 
@@ -400,6 +413,73 @@ fn decode_value(value: &Value) -> MutationResult {
             .map(ToOwned::to_owned),
         resolved: value.get("isResolved").and_then(Value::as_bool),
     }
+}
+
+#[derive(Clone, Copy)]
+enum RequestEffect {
+    Read,
+    Mutation,
+}
+
+enum MutationExpectation<'a> {
+    CreatedRef { reference: &'a str, sha: &'a str },
+    Resource,
+    PullRequest,
+    UpdateBranch,
+    Closed { number: u64 },
+    Merged,
+}
+
+impl MutationExpectation<'_> {
+    fn decode(&self, value: &Value) -> Option<MutationResult> {
+        let decoded = decode_value(value);
+        match self {
+            Self::CreatedRef { reference, sha } => {
+                if value.get("ref").and_then(Value::as_str) != Some(*reference)
+                    || value.pointer("/object/sha").and_then(Value::as_str) != Some(*sha)
+                {
+                    return None;
+                }
+                Some(MutationResult {
+                    sha: Some((*sha).to_owned()),
+                    ..decoded
+                })
+            }
+            Self::Resource => (decoded.id.is_some_and(|id| id > 0)
+                && decoded
+                    .html_url
+                    .as_deref()
+                    .is_some_and(|url| !url.is_empty()))
+            .then_some(decoded),
+            Self::PullRequest => (decoded.number.is_some_and(|number| number > 0)
+                && decoded
+                    .html_url
+                    .as_deref()
+                    .is_some_and(|url| !url.is_empty()))
+            .then_some(decoded),
+            Self::UpdateBranch => (value.get("message").and_then(nonempty_string).is_some()
+                && value.get("url").and_then(nonempty_string).is_some())
+            .then_some(decoded),
+            Self::Closed { number } => (decoded.number == Some(*number)
+                && value.get("state").and_then(Value::as_str) == Some("closed")
+                && decoded
+                    .html_url
+                    .as_deref()
+                    .is_some_and(|url| !url.is_empty()))
+            .then_some(decoded),
+            Self::Merged => (decoded.merged == Some(true)
+                && decoded.sha.as_deref().is_some_and(valid_sha))
+            .then_some(decoded),
+        }
+    }
+}
+
+fn nonempty_string(value: &Value) -> Option<&str> {
+    value.as_str().filter(|value| !value.trim().is_empty())
+}
+
+fn valid_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 const fn review_event(event: ReviewEvent) -> &'static str {
@@ -457,8 +537,6 @@ pub enum MutationError {
     DefaultBranchPushProhibited,
     #[error("repository requires native merge-queue handoff")]
     MergeQueueRequired,
-    #[error("pull request head changed before the approved mutation")]
-    StaleRemoteHead,
     #[error("review thread identity does not match the approved pull request")]
     ReviewThreadMismatch,
     #[error("GitHub App is not allowed to resolve this review thread")]

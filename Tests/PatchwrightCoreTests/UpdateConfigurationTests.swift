@@ -56,6 +56,20 @@ final class UpdateConfigurationTests: XCTestCase {
         XCTAssertTrue(commands.contains(".disabled(!updateController.canCheckForUpdates)"))
     }
 
+    func testAppExplicitlyStopsItsOwnedEngineDuringTermination() throws {
+        let app = try source("Sources/PatchwrightApp/App/PatchwrightApp.swift")
+        let controller = try source("Sources/PatchwrightApp/Services/EngineProcessController.swift")
+
+        XCTAssertTrue(app.contains("@NSApplicationDelegateAdaptor(PatchwrightApplicationDelegate.self)"))
+        XCTAssertTrue(app.contains("func applicationShouldTerminate"))
+        XCTAssertTrue(app.contains("sender.windows.forEach { $0.orderOut(nil) }"))
+        XCTAssertTrue(app.contains("engineProcessController?.shutdown()"))
+        XCTAssertTrue(controller.contains("func shutdown()"))
+        XCTAssertTrue(controller.contains("process.terminate()"))
+        XCTAssertTrue(controller.contains("SIGKILL"))
+        XCTAssertTrue(controller.contains("shutdownDeadline"))
+    }
+
     private var root: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

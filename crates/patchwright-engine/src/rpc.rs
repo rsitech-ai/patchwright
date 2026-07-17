@@ -1,39 +1,52 @@
 use crate::{
-    CancellationState, ConversionError, ConversionRequest, EventStore, GhCliCredentialBroker,
-    GitHubAccount, GitHubRepository, GitHubSource, GitHubSyncSummary, GitHubToken, Job, JobId,
-    JobKind, JobState, MonitorRecord, RemoteObservation, TaskConversionService, approve_delivery,
-    authorize_execution,
+    CIState, CancellationState, ConversionError, ConversionRequest, EventStore,
+    GhCliCredentialBroker, GitHubAccount, GitHubRepository, GitHubSource, GitHubSyncSummary,
+    GitHubToken, GitHubWorkItem, Job, JobId, JobKind, JobState, Mergeability, MonitorRecord,
+    MonitorState, RemoteObservation, RepositoryPlanner, ReviewState, TaskConversionService,
+    WorkItemKind, approve_delivery, approve_preparation, authorize_execution,
+    authorize_preparation,
     codex::{
         process::{CodexExecutable, CodexProcessConfig, CodexProcessFactory},
         service::{CodexRuntimeStatus, CodexService, CodexServiceError, CodexServiceState},
     },
-    preview_delivery,
+    lease::DatabaseLease,
+    preview_delivery, preview_preparation,
 };
 use anyhow::{Context, Result, bail};
 use patchwright_core::{
     CredentialHealth, GitHubAction, GitHubActionPreview, QueueCandidate, RemoteIdentity,
     RemotePrecondition, RepositoryBinding, RepositoryBindingDraft, RepositoryPermissionLevel,
-    RepositoryPermissionSnapshot, Task, TaskId, TaskState, WorkflowPreset, assess_queue,
+    RepositoryPermissionSnapshot, Task, TaskId, TaskSource, TaskState, WorkflowPreset,
+    assess_queue,
 };
 use patchwright_relay::{
-    AppAuthenticator, ConfiguredKeyProvider, GitHubAppConfiguration, GitHubMutationClient,
-    InstallationBroker, InstallationPermissions, InstallationToken, KeyReference, MutationError,
+    AppAuthenticator, ConfiguredKeyProvider, ForwardedWebhook, GitHubAppConfiguration,
+    GitHubMutationClient, InstallationBroker, InstallationPermissions, InstallationToken,
+    KeyReference, MutationError,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 #[cfg(unix)]
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::{
     collections::HashMap,
-    path::Path,
+    future::Future,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
-    sync::{Mutex as AsyncMutex, watch},
+    sync::{Mutex as AsyncMutex, Semaphore, watch},
+    task::JoinSet,
 };
+
+const MAX_RPC_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_RPC_CONNECTIONS: usize = 32;
+const CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_MONITOR_SNAPSHOT_AGE: chrono::Duration = chrono::Duration::minutes(5);
 
 #[derive(Deserialize)]
 struct Request {
@@ -46,8 +59,24 @@ struct Request {
 }
 
 pub async fn serve(socket_path: &Path, database_path: &Path) -> Result<()> {
-    let listener = prepare_listener(socket_path).await?;
-    let codex = match CodexExecutable::discover(None).await {
+    serve_until(socket_path, database_path, std::future::pending()).await
+}
+
+pub async fn serve_until<F>(socket_path: &Path, database_path: &Path, shutdown: F) -> Result<()>
+where
+    F: Future<Output = ()> + Send,
+{
+    tracing::debug!(database = %database_path.display(), "acquire engine database lease");
+    let lease = DatabaseLease::acquire(database_path)?;
+    tracing::debug!(socket = %socket_path.display(), "prepare engine socket");
+    let (listener, socket_guard) = prepare_listener(socket_path).await?;
+    tracing::debug!(socket = %socket_path.display(), "engine socket is ready");
+    tokio::pin!(shutdown);
+    let discovered = tokio::select! {
+        () = &mut shutdown => return Ok(()),
+        result = CodexExecutable::discover(None) => result,
+    };
+    let codex = match discovered {
         Ok(executable) => {
             let version = executable.version().to_owned();
             Some(CodexService::new(
@@ -60,7 +89,15 @@ pub async fn serve(socket_path: &Path, database_path: &Path) -> Result<()> {
             None
         }
     };
-    serve_with_state(listener, database_path, codex).await
+    serve_with_state(
+        listener,
+        socket_guard,
+        lease,
+        database_path,
+        codex,
+        &mut shutdown,
+    )
+    .await
 }
 
 pub async fn serve_with_codex(
@@ -69,37 +106,91 @@ pub async fn serve_with_codex(
     factory: CodexProcessFactory,
     executable_version: String,
 ) -> Result<()> {
-    let listener = prepare_listener(socket_path).await?;
+    let lease = DatabaseLease::acquire(database_path)?;
+    let (listener, socket_guard) = prepare_listener(socket_path).await?;
     serve_with_state(
         listener,
+        socket_guard,
+        lease,
         database_path,
         Some(CodexService::new(factory, executable_version)),
+        std::future::pending(),
     )
     .await
 }
 
-async fn serve_with_state(
+async fn serve_with_state<F>(
     listener: UnixListener,
+    _socket_guard: SocketGuard,
+    _lease: DatabaseLease,
     database_path: &Path,
     codex: Option<CodexService>,
-) -> Result<()> {
+    shutdown: F,
+) -> Result<()>
+where
+    F: Future<Output = ()> + Send,
+{
     let state = ServerState {
         store: Arc::new(Mutex::new(EventStore::open(database_path)?)),
         codex: Arc::new(AsyncMutex::new(codex)),
         github_syncs: Arc::new(AsyncMutex::new(HashMap::new())),
     };
+    let permits = Arc::new(Semaphore::new(MAX_RPC_CONNECTIONS));
+    let mut connections = JoinSet::new();
+    tokio::pin!(shutdown);
     loop {
-        let (stream, _) = listener.accept().await.context("accept engine client")?;
-        let state = state.clone();
-        tokio::spawn(async move {
-            if let Err(error) = handle_connection(stream, state).await {
-                tracing::warn!(error = %error, "engine client disconnected with error");
+        tokio::select! {
+            () = &mut shutdown => break,
+            accepted = accept_with_permit(&listener, Arc::clone(&permits)) => {
+                let (stream, permit) = accepted?;
+                if let Err(error) = verify_peer(&stream) {
+                    tracing::warn!(error = %error, "reject unauthorized RPC peer");
+                    continue;
+                }
+                let state = state.clone();
+                connections.spawn(async move {
+                    let _permit = permit;
+                    if let Err(error) = handle_connection(stream, state).await {
+                        tracing::warn!(error = %error, "engine client disconnected with error");
+                    }
+                });
             }
-        });
+        }
     }
+
+    for sender in state.github_syncs.lock().await.values() {
+        let _ = sender.send(true);
+    }
+    state.github_syncs.lock().await.clear();
+    let codex_shutdown = if let Some(service) = state.codex.lock().await.as_mut() {
+        service
+            .shutdown(state.store.as_ref())
+            .await
+            .map_err(Into::into)
+    } else {
+        Ok(())
+    };
+    connections.abort_all();
+    let _ = tokio::time::timeout(CONNECTION_DRAIN_TIMEOUT, async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await;
+    codex_shutdown
 }
 
-async fn prepare_listener(socket_path: &Path) -> Result<UnixListener> {
+async fn accept_with_permit(
+    listener: &UnixListener,
+    permits: Arc<Semaphore>,
+) -> Result<(UnixStream, tokio::sync::OwnedSemaphorePermit)> {
+    let permit = permits
+        .acquire_owned()
+        .await
+        .context("RPC connection semaphore closed")?;
+    let (stream, _) = listener.accept().await.context("accept engine client")?;
+    Ok((stream, permit))
+}
+
+async fn prepare_listener(socket_path: &Path) -> Result<(UnixListener, SocketGuard)> {
     if socket_path.exists() {
         if !std::fs::symlink_metadata(socket_path)?
             .file_type()
@@ -113,9 +204,71 @@ async fn prepare_listener(socket_path: &Path) -> Result<UnixListener> {
         std::fs::remove_file(socket_path).context("remove stale engine socket")?;
     }
     if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent).context("create socket directory")?;
+        if parent.exists() {
+            validate_socket_parent(parent)?;
+        } else {
+            std::fs::create_dir_all(parent).context("create socket directory")?;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .context("restrict socket directory permissions")?;
+        }
     }
-    UnixListener::bind(socket_path).context("bind engine socket")
+    let listener = UnixListener::bind(socket_path).context("bind engine socket")?;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
+        .context("restrict engine socket permissions")?;
+    let guard = SocketGuard::new(socket_path)?;
+    Ok((listener, guard))
+}
+
+fn validate_socket_parent(parent: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(parent).context("inspect socket directory")?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        bail!("socket parent must be a real directory")
+    }
+    if metadata.uid() != nix::unistd::geteuid().as_raw() || metadata.mode() & 0o077 != 0 {
+        bail!("socket parent must be owned by the current user and owner-only")
+    }
+    Ok(())
+}
+
+fn verify_peer(stream: &UnixStream) -> Result<()> {
+    let (peer_uid, _) = nix::unistd::getpeereid(stream).context("inspect RPC peer credentials")?;
+    if peer_uid != nix::unistd::geteuid() {
+        bail!("RPC peer is not owned by the current user")
+    }
+    Ok(())
+}
+
+struct SocketGuard {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl SocketGuard {
+    fn new(path: &Path) -> Result<Self> {
+        let metadata = std::fs::symlink_metadata(path).context("inspect owned engine socket")?;
+        Ok(Self {
+            path: path.to_owned(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+}
+
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        let Ok(metadata) = std::fs::symlink_metadata(&self.path) else {
+            return;
+        };
+        if metadata.file_type().is_socket()
+            && metadata.dev() == self.device
+            && metadata.ino() == self.inode
+        {
+            if let Err(error) = std::fs::remove_file(&self.path) {
+                tracing::warn!(error = %error, path = %self.path.display(), "remove engine socket");
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -127,9 +280,24 @@ struct ServerState {
 
 async fn handle_connection(stream: UnixStream, state: ServerState) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader).lines();
-    while let Some(line) = lines.next_line().await? {
-        let response = match serde_json::from_str::<Request>(&line) {
+    let mut reader = BufReader::new(reader);
+    loop {
+        let mut frame = Vec::with_capacity(4096);
+        let read = (&mut reader)
+            .take((MAX_RPC_FRAME_BYTES + 1) as u64)
+            .read_until(b'\n', &mut frame)
+            .await?;
+        if read == 0 {
+            break;
+        }
+        if frame.len() > MAX_RPC_FRAME_BYTES || frame.last() != Some(&b'\n') {
+            let response = rpc_error(Value::Null, -32600, "request frame is too large", None);
+            writer.write_all(&serde_json::to_vec(&response)?).await?;
+            writer.write_all(b"\n").await?;
+            break;
+        }
+        frame.pop();
+        let response = match serde_json::from_slice::<Request>(&frame) {
             Ok(request) => dispatch(request, &state).await,
             Err(error) => rpc_error(Value::Null, -32700, "parse error", Some(error.to_string())),
         };
@@ -150,9 +318,14 @@ async fn dispatch(request: Request, state: &ServerState) -> Value {
         "task.list" => list_tasks(request.id, store),
         "task.timeline" => task_timeline(request.id, &request.params, store),
         "task.worktree" => task_worktree(request.id, &request.params, store),
-        "task.plan" => task_plan(request.id, &request.params, store),
+        "task.plan" => task_plan(request.id, &request.params, store).await,
+        "task.contract" => task_contract(request.id, &request.params, store),
+        "task.preparation.preview" => task_preparation_preview(request.id, &request.params, store),
+        "task.preparation.approve" => task_preparation_approve(request.id, &request.params, store),
         "task.prepare" => task_prepare(request.id, &request.params, store).await,
-        "task.readyForDelivery" => task_ready_for_delivery(request.id, &request.params, store),
+        "task.readyForDelivery" => {
+            task_ready_for_delivery(request.id, &request.params, store).await
+        }
         "task.previewFromGitHub" => preview_task_from_github(request.id, &request.params, store),
         "task.createFromGitHub" => create_task_from_github(request.id, &request.params, store),
         "task.reconcileGitHub" => task_reconcile_github(request.id, &request.params, store).await,
@@ -170,6 +343,7 @@ async fn dispatch(request: Request, state: &ServerState) -> Value {
         "github.sync.start" => github_sync_start(request.id, &request.params, state).await,
         "github.sync.status" => github_sync_status(request.id, &request.params, store),
         "github.sync.cancel" => github_sync_cancel(request.id, &request.params, state).await,
+        "github.webhook.ingest" => github_webhook_ingest(request.id, &request.params, store),
         "delivery.preview" => delivery_preview(request.id, &request.params, store),
         "delivery.approve" => delivery_approve(request.id, &request.params, store),
         "delivery.execute" => delivery_execute(request.id, &request.params, store).await,
@@ -191,6 +365,28 @@ async fn dispatch(request: Request, state: &ServerState) -> Value {
         "codex.pause" => codex_interrupt(request.id, &request.params, state, false).await,
         "codex.cancel" => codex_interrupt(request.id, &request.params, state, true).await,
         _ => rpc_error(request.id, -32601, "method not found", None),
+    }
+}
+
+fn github_webhook_ingest(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let delivery: ForwardedWebhook = match serde_json::from_value(params.clone()) {
+        Ok(delivery) => delivery,
+        Err(error) => {
+            return rpc_error(id, -32602, "invalid parameters", Some(error.to_string()));
+        }
+    };
+    match store
+        .lock()
+        .expect("event store lock poisoned")
+        .ingest_github_webhook(&delivery)
+    {
+        Ok(outcome) => rpc_result(id, json!(outcome)),
+        Err(error) => rpc_error(
+            id,
+            -32072,
+            "webhook ingestion failed",
+            Some(error.to_string()),
+        ),
     }
 }
 
@@ -314,21 +510,9 @@ fn delivery_preview(id: Value, params: &Value, store: &Mutex<EventStore>) -> Val
         Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
     };
     let store = store.lock().expect("event store lock poisoned");
-    let contract = match store.task_contract(task_id) {
-        Ok(Some(contract)) => contract,
-        Ok(None) => {
-            return rpc_error(
-                id,
-                -32060,
-                "delivery preview failed",
-                Some("task contract is missing".into()),
-            );
-        }
-        Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
-    };
     let precondition = match RemotePrecondition::new(
-        request.expected_head_sha.as_deref().or(contract.head_sha()),
-        request.expected_base_sha.as_deref().or(contract.base_sha()),
+        request.expected_head_sha.as_deref(),
+        request.expected_base_sha.as_deref(),
         request.snapshot_generation,
     ) {
         Ok(precondition) => precondition,
@@ -434,20 +618,46 @@ async fn delivery_execute(id: Value, params: &Value, store: &Mutex<EventStore>) 
                 json!({"idempotencyKey":key,"state":"succeeded","result":result}),
             )
         }
-        Err(error @ MutationError::AmbiguousTransport) => rpc_error(
-            id,
-            -32063,
-            "delivery outcome is ambiguous",
-            Some(error.to_string()),
-        ),
+        Err(error @ MutationError::AmbiguousTransport) => {
+            let encoded =
+                serde_json::to_string(&json!({"state":"ambiguous","error":error.to_string()}))
+                    .expect("ambiguous result serializes");
+            if let Err(persistence) = crate::record_ambiguous_delivery(
+                &store.lock().expect("event store lock poisoned"),
+                &key,
+                &encoded,
+            ) {
+                return rpc_error(
+                    id,
+                    -32000,
+                    "persistence failure",
+                    Some(persistence.to_string()),
+                );
+            }
+            rpc_error(
+                id,
+                -32063,
+                "delivery outcome is ambiguous",
+                Some(error.to_string()),
+            )
+        }
         Err(error) => {
             let encoded =
                 serde_json::to_string(&json!({"state":"failed","error":error.to_string()}))
                     .expect("failure result serializes");
-            let _ = store
-                .lock()
-                .expect("event store lock poisoned")
-                .complete_delivery(&key, &encoded);
+            if let Err(persistence) = crate::complete_failed_delivery(
+                &store.lock().expect("event store lock poisoned"),
+                &preview,
+                &key,
+                &encoded,
+            ) {
+                return rpc_error(
+                    id,
+                    -32000,
+                    "persistence failure",
+                    Some(persistence.to_string()),
+                );
+            }
             rpc_error(id, -32064, "delivery failed", Some(error.to_string()))
         }
     }
@@ -515,35 +725,92 @@ fn monitor_start(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value 
         Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
     };
     let store = store.lock().expect("event store lock poisoned");
-    match store.load_task(request.task_id) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            return rpc_error(
-                id,
-                -32070,
-                "monitor start failed",
-                Some("task is missing".into()),
-            );
-        }
-        Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
-    }
-    let monitor = match MonitorRecord::new(
-        request.task_id,
-        request.repository_full_name,
-        request.pull_request_number,
-        request.expected_head_sha,
-        request.expected_base_sha,
-        chrono::Utc::now(),
-        request.repair_budget,
-    ) {
+    let monitor = match create_verified_monitor(&store, request) {
         Ok(monitor) => monitor,
-        Err(error) => {
-            return rpc_error(id, -32602, "invalid parameters", Some(error.to_string()));
+        Err(MonitorStartFailure::Rejected(detail)) => {
+            return rpc_error(id, -32070, "monitor start failed", Some(detail));
+        }
+        Err(MonitorStartFailure::Invalid(detail)) => {
+            return rpc_error(id, -32602, "invalid parameters", Some(detail));
+        }
+        Err(MonitorStartFailure::Persistence(detail)) => {
+            return rpc_error(id, -32000, "persistence failure", Some(detail));
         }
     };
     match store.save_monitor(&monitor) {
         Ok(()) => rpc_result(id, json!(monitor)),
         Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    }
+}
+
+enum MonitorStartFailure {
+    Rejected(String),
+    Invalid(String),
+    Persistence(String),
+}
+
+fn create_verified_monitor(
+    store: &EventStore,
+    request: MonitorStartRequest,
+) -> std::result::Result<MonitorRecord, MonitorStartFailure> {
+    let task = store
+        .load_task(request.task_id)
+        .map_err(|error| MonitorStartFailure::Persistence(error.to_string()))?
+        .ok_or_else(|| MonitorStartFailure::Rejected("task is missing".into()))?;
+    if task.state != TaskState::Monitoring {
+        return Err(MonitorStartFailure::Rejected(
+            "task is not in the monitoring state".into(),
+        ));
+    }
+    let contract = store
+        .task_contract(task.id)
+        .map_err(|error| MonitorStartFailure::Persistence(error.to_string()))?
+        .ok_or_else(|| MonitorStartFailure::Rejected("task contract is missing".into()))?;
+    if contract.source() != &task.source {
+        return Err(MonitorStartFailure::Rejected(
+            "task source no longer matches its contract".into(),
+        ));
+    }
+    if task.repository_binding_id != Some(contract.repository_binding_id()) {
+        return Err(MonitorStartFailure::Rejected(
+            "task repository binding no longer matches its contract".into(),
+        ));
+    }
+    let binding = store
+        .repository_binding(contract.repository_binding_id())
+        .map_err(|error| MonitorStartFailure::Persistence(error.to_string()))?
+        .ok_or_else(|| {
+            MonitorStartFailure::Rejected("task repository binding is missing".into())
+        })?;
+    if binding.full_name() != request.repository_full_name {
+        return Err(MonitorStartFailure::Rejected(
+            "monitor repository does not match the task binding".into(),
+        ));
+    }
+    let (snapshot, snapshot_at) =
+        fresh_github_snapshot(store, &request.repository_full_name, chrono::Utc::now())
+            .map_err(MonitorStartFailure::Rejected)?;
+    let Some(item) = snapshot.work_items.iter().find(|item| {
+        item.kind == WorkItemKind::PullRequest
+            && item.repository_full_name == request.repository_full_name
+            && item.number == request.pull_request_number
+    }) else {
+        return Err(MonitorStartFailure::Rejected(
+            "pull request is missing from the fresh GitHub snapshot".into(),
+        ));
+    };
+    validate_monitor_target(&task, item, &request).map_err(MonitorStartFailure::Rejected)?;
+    match MonitorRecord::new(
+        request.task_id,
+        request.repository_full_name,
+        request.pull_request_number,
+        request.expected_head_sha,
+        request.expected_base_sha,
+        snapshot_at,
+        request.repair_budget,
+    ) {
+        Ok(monitor) => Ok(monitor),
+        Err(error) => Err(MonitorStartFailure::Invalid(error.to_string())),
     }
 }
 
@@ -576,17 +843,39 @@ fn monitor_observe(id: Value, params: &Value, store: &Mutex<EventStore>) -> Valu
             Some("monitorId is required".into()),
         );
     };
-    let observation: RemoteObservation = match encoded_parameter(params, "observation") {
-        Ok(observation) => observation,
-        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
-    };
     let store = store.lock().expect("event store lock poisoned");
     let mut monitor = match store.monitor(monitor_id) {
         Ok(Some(monitor)) => monitor,
         Ok(None) => return rpc_error(id, -32071, "monitor is missing", None),
         Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
     };
-    let outcome = match monitor.observe(observation, chrono::Utc::now()) {
+    let now = chrono::Utc::now();
+    let (snapshot, snapshot_at) =
+        match fresh_github_snapshot(&store, &monitor.repository_full_name, now) {
+            Ok(snapshot) => snapshot,
+            Err(detail) => {
+                return rpc_error(id, -32072, "monitor observation rejected", Some(detail));
+            }
+        };
+    let Some(item) = snapshot.work_items.iter().find(|item| {
+        item.kind == WorkItemKind::PullRequest
+            && item.repository_full_name == monitor.repository_full_name
+            && item.number == monitor.pull_request_number
+    }) else {
+        return rpc_error(
+            id,
+            -32072,
+            "monitor observation rejected",
+            Some("pull request is missing from the fresh GitHub snapshot".into()),
+        );
+    };
+    let observation = match observation_from_github_item(item, snapshot_at) {
+        Ok(observation) => observation,
+        Err(detail) => {
+            return rpc_error(id, -32072, "monitor observation rejected", Some(detail));
+        }
+    };
+    let outcome = match monitor.observe(observation, now) {
         Ok(outcome) => outcome,
         Err(error) => {
             return rpc_error(
@@ -602,10 +891,151 @@ fn monitor_observe(id: Value, params: &Value, store: &Mutex<EventStore>) -> Valu
             return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
         }
     }
+    if outcome.state == MonitorState::Succeeded {
+        let mut task = match store.load_task(monitor.task_id) {
+            Ok(Some(task)) => task,
+            Ok(None) => return rpc_error(id, -32040, "task is missing", None),
+            Err(error) => {
+                return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+            }
+        };
+        if task.state != TaskState::Monitoring {
+            return rpc_error(
+                id,
+                -32072,
+                "monitor observation rejected",
+                Some("task is not in the monitoring state".into()),
+            );
+        }
+        if let Err(error) = task.transition(TaskState::AwaitingMergeApproval) {
+            return rpc_error(
+                id,
+                -32072,
+                "monitor observation rejected",
+                Some(error.to_string()),
+            );
+        }
+        return match store.save_monitor_with_task_event(
+            &monitor,
+            &task,
+            "GitHub evidence satisfied monitoring; merge approval is required",
+        ) {
+            Ok(()) => rpc_result(id, json!({"monitor":monitor,"outcome":outcome})),
+            Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+        };
+    }
     match store.save_monitor(&monitor) {
         Ok(()) => rpc_result(id, json!({"monitor":monitor,"outcome":outcome})),
         Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
     }
+}
+
+fn fresh_github_snapshot(
+    store: &EventStore,
+    repository_full_name: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> std::result::Result<
+    (
+        crate::GitHubRepositorySnapshot,
+        chrono::DateTime<chrono::Utc>,
+    ),
+    String,
+> {
+    let (snapshot, snapshot_at) = store
+        .github_repository_with_snapshot_at(repository_full_name)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "repository is missing from the GitHub snapshot".to_owned())?;
+    let age = now.signed_duration_since(snapshot_at);
+    if age < chrono::Duration::zero() || age > MAX_MONITOR_SNAPSHOT_AGE {
+        return Err("GitHub snapshot is stale; sync the repository before monitoring".into());
+    }
+    Ok((snapshot, snapshot_at))
+}
+
+fn validate_monitor_target(
+    task: &Task,
+    item: &GitHubWorkItem,
+    request: &MonitorStartRequest,
+) -> std::result::Result<(), String> {
+    if item.head_sha.as_deref() != Some(request.expected_head_sha.as_str())
+        || item.base_sha.as_deref() != Some(request.expected_base_sha.as_str())
+    {
+        return Err("monitor SHA identity does not match the fresh pull request".into());
+    }
+    match &task.source {
+        TaskSource::GitHubPullRequest(_) => {
+            if task.source.repository_full_name() != Some(request.repository_full_name.as_str())
+                || task.source.item_number() != Some(request.pull_request_number)
+                || task.source.head_sha() != Some(request.expected_head_sha.as_str())
+                || task.source.base_sha() != Some(request.expected_base_sha.as_str())
+            {
+                return Err("monitor target does not match the task pull-request source".into());
+            }
+        }
+        TaskSource::GitHubIssue(_) => {
+            if task.source.repository_full_name() != Some(request.repository_full_name.as_str()) {
+                return Err("monitor repository does not match the task issue source".into());
+            }
+            let expected_branch = format!("patchwright/{}", task.id);
+            if item.head_ref.as_deref() != Some(expected_branch.as_str()) {
+                return Err("monitor pull request is not the task's prepared branch".into());
+            }
+        }
+        TaskSource::LocalRequest => {
+            let expected_branch = format!("patchwright/{}", task.id);
+            if item.head_ref.as_deref() != Some(expected_branch.as_str()) {
+                return Err("monitor pull request is not the task's prepared branch".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn observation_from_github_item(
+    item: &GitHubWorkItem,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) -> std::result::Result<RemoteObservation, String> {
+    let head_sha = item
+        .head_sha
+        .clone()
+        .ok_or_else(|| "pull request head SHA is missing".to_owned())?;
+    let base_sha = item
+        .base_sha
+        .clone()
+        .ok_or_else(|| "pull request base SHA is missing".to_owned())?;
+    let ci = match item.ci_health.as_deref() {
+        Some("passing") => CIState::Success,
+        Some("failing") => CIState::Failure,
+        Some("pending" | "unknown") | None => CIState::Pending,
+        Some(_) => return Err("pull request CI state is unsupported".into()),
+    };
+    let review = match item.review_decision.as_deref() {
+        Some("approved") => ReviewState::Approved,
+        Some("changesRequested") => ReviewState::ChangesRequested,
+        Some("approvalDismissed") => ReviewState::ApprovalDismissed,
+        Some("reviewRequired") | None => ReviewState::Pending,
+        Some(_) => return Err("pull request review state is unsupported".into()),
+    };
+    let mergeability = if item.has_conflicts == Some(true) {
+        Mergeability::Conflicting
+    } else {
+        match item.mergeable {
+            Some(true) => Mergeability::Mergeable,
+            Some(false) => Mergeability::Conflicting,
+            None => Mergeability::Unknown,
+        }
+    };
+    Ok(RemoteObservation {
+        observed_at,
+        head_sha,
+        base_sha,
+        ci,
+        review,
+        mergeability,
+        repository_accessible: true,
+        network_available: true,
+        rate_limited_until: None,
+    })
 }
 
 fn monitor_wake(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
@@ -1120,27 +1550,85 @@ fn task_worktree(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value 
     }
 }
 
-fn task_plan(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+async fn task_plan(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
     let task_id = match required_task_id(params) {
         Ok(task_id) => task_id,
         Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
     };
+    let (mut task, binding) = {
+        let store = store.lock().expect("event store lock poisoned");
+        let task = match store.load_task(task_id) {
+            Ok(Some(task)) => task,
+            Ok(None) => return rpc_error(id, -32040, "task is missing", None),
+            Err(error) => {
+                return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+            }
+        };
+        if task.state == TaskState::AwaitingPreparationApproval {
+            return match store.task_contract(task_id) {
+                Ok(Some(_)) => rpc_result(id, json!(task)),
+                Ok(None) => rpc_error(id, -32045, "task contract is missing", None),
+                Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+            };
+        }
+        if task.state != TaskState::Discovered {
+            return rpc_error(
+                id,
+                -32041,
+                "task cannot be planned from its current state",
+                Some(task.state.to_string()),
+            );
+        }
+        let Some(binding_id) = task.repository_binding_id else {
+            return rpc_error(
+                id,
+                -32041,
+                "task planning failed",
+                Some("task repository binding is missing".into()),
+            );
+        };
+        let binding = match store.repository_binding(binding_id) {
+            Ok(Some(binding)) => binding,
+            Ok(None) => {
+                return rpc_error(
+                    id,
+                    -32041,
+                    "task planning failed",
+                    Some("task repository binding is missing".into()),
+                );
+            }
+            Err(error) => {
+                return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+            }
+        };
+        (task, binding)
+    };
+    if let Err(error) = ensure_planning_repository(&task, &binding).await {
+        return rpc_error(id, -32041, "task planning failed", Some(error));
+    }
+    let contract = match RepositoryPlanner::assess(&task, &binding) {
+        Ok(contract) => contract,
+        Err(error) => {
+            return rpc_error(id, -32041, "task planning failed", Some(error.to_string()));
+        }
+    };
     let store = store.lock().expect("event store lock poisoned");
-    let mut task = match store.load_task(task_id) {
-        Ok(Some(task)) => task,
+    match store.load_task(task_id) {
+        Ok(Some(fresh)) if fresh == task => {}
+        Ok(Some(fresh)) => {
+            return rpc_error(
+                id,
+                -32041,
+                "task changed while planning",
+                Some(fresh.state.to_string()),
+            );
+        }
         Ok(None) => return rpc_error(id, -32040, "task is missing", None),
         Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
-    };
-    if task.state == TaskState::AwaitingPreparationApproval {
-        return rpc_result(id, json!(task));
     }
-    if task.state != TaskState::Discovered {
-        return rpc_error(
-            id,
-            -32041,
-            "task cannot be planned from its current state",
-            Some(task.state.to_string()),
-        );
+    task.contract_version = contract.version();
+    if let Err(error) = store.save_task_contract(&contract) {
+        return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
     }
     for (next, summary) in [
         (TaskState::Assessing, "Task source and repository assessed"),
@@ -1160,14 +1648,172 @@ fn task_plan(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
     rpc_result(id, json!(task))
 }
 
+async fn ensure_planning_repository(
+    task: &Task,
+    binding: &RepositoryBinding,
+) -> std::result::Result<(), String> {
+    let repository = Path::new(&task.repository_path);
+    if crate::RepositoryService::inspect(repository).is_ok() {
+        return Ok(());
+    }
+    if repository.exists() || binding.managed_clone() != Some(task.repository_path.as_str()) {
+        return Err("bound repository is unavailable or invalid".into());
+    }
+    let token = github_app_installation_token(
+        binding.full_name(),
+        binding.github_repository_id(),
+        InstallationPermissions::ingestion(),
+    )
+    .await
+    .map_err(|error| format!("managed repository authentication failed: {error}"))?;
+    if token.installation_id() != binding.installation_id() {
+        return Err("GitHub App installation identity mismatch".into());
+    }
+    crate::GitTransport::clone_repository(
+        binding.clone_url(),
+        binding.full_name(),
+        repository,
+        Path::new(binding.state_root()),
+        token.expose_for_authorization_header(),
+    )
+    .map_err(|error| format!("managed repository clone failed: {error}"))
+}
+
+fn task_contract(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let task_id = match required_task_id(params) {
+        Ok(task_id) => task_id,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    match store
+        .lock()
+        .expect("event store lock poisoned")
+        .task_contract(task_id)
+    {
+        Ok(Some(contract)) => rpc_result(id, json!(contract)),
+        Ok(None) => rpc_error(id, -32045, "task contract is missing", None),
+        Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    }
+}
+
+fn task_preparation_preview(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let task_id = match required_task_id(params) {
+        Ok(task_id) => task_id,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    match preview_preparation(&store.lock().expect("event store lock poisoned"), task_id) {
+        Ok(preview) => rpc_result(id, json!(preview)),
+        Err(error) => rpc_error(
+            id,
+            -32042,
+            "preparation preview failed",
+            Some(error.to_string()),
+        ),
+    }
+}
+
+fn task_preparation_approve(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let preview = match encoded_parameter(params, "preview") {
+        Ok(preview) => preview,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    let approved_by = params
+        .get("approvedBy")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match approve_preparation(
+        &store.lock().expect("event store lock poisoned"),
+        &preview,
+        approved_by,
+    ) {
+        Ok(approval) => rpc_result(id, json!(approval)),
+        Err(error) => rpc_error(
+            id,
+            -32045,
+            "preparation approval failed",
+            Some(error.to_string()),
+        ),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn task_prepare(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
     let task_id = match required_task_id(params) {
         Ok(task_id) => task_id,
         Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
     };
-    let (mut task, binding, contract) = {
+    let preview: crate::PreparationPreview = match encoded_parameter(params, "preview") {
+        Ok(preview) => preview,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    if preview.task_id != task_id {
+        return rpc_error(
+            id,
+            -32602,
+            "invalid parameters",
+            Some("preview taskId does not match taskId".into()),
+        );
+    }
+    let Some(approval_id) = params
+        .get("approvalId")
+        .and_then(Value::as_str)
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+    else {
+        return rpc_error(
+            id,
+            -32602,
+            "invalid parameters",
+            Some("approvalId is required".into()),
+        );
+    };
+    if let Err(error) = authorize_preparation(
+        &store.lock().expect("event store lock poisoned"),
+        &preview,
+        approval_id,
+    ) {
+        return rpc_error(
+            id,
+            -32046,
+            "preparation authorization failed",
+            Some(error.to_string()),
+        );
+    }
+    let response = task_prepare_claimed(id.clone(), task_id, &preview, store).await;
+    let result = if response.get("error").is_some() {
+        "failed"
+    } else {
+        "succeeded"
+    };
+    if let Err(error) = store
+        .lock()
+        .expect("event store lock poisoned")
+        .complete_preparation_claim(approval_id, result)
+    {
+        return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+    }
+    response
+}
+
+#[allow(clippy::too_many_lines)]
+async fn task_prepare_claimed(
+    id: Value,
+    task_id: TaskId,
+    preview: &crate::PreparationPreview,
+    store: &Mutex<EventStore>,
+) -> Value {
+    let (mut task, binding) = {
         let store = store.lock().expect("event store lock poisoned");
+        match preview_preparation(&store, task_id) {
+            Ok(fresh) if fresh == *preview => {}
+            Ok(_) => return rpc_error(id, -32046, "preparation preview is stale", None),
+            Err(error) => {
+                return rpc_error(
+                    id,
+                    -32046,
+                    "preparation preview is stale",
+                    Some(error.to_string()),
+                );
+            }
+        }
         let task = match store.load_task(task_id) {
             Ok(Some(task)) => task,
             Ok(None) => return rpc_error(id, -32040, "task is missing", None),
@@ -1175,9 +1821,6 @@ async fn task_prepare(id: Value, params: &Value, store: &Mutex<EventStore>) -> V
                 return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
             }
         };
-        if task.state == TaskState::Preparing {
-            return rpc_result(id, json!(task));
-        }
         if task.state != TaskState::AwaitingPreparationApproval {
             return rpc_error(
                 id,
@@ -1196,19 +1839,9 @@ async fn task_prepare(id: Value, params: &Value, store: &Mutex<EventStore>) -> V
                 return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
             }
         };
-        let contract = match store.task_contract(task_id) {
-            Ok(Some(contract)) => contract,
-            Ok(None) => return rpc_error(id, -32042, "task contract is missing", None),
-            Err(error) => {
-                return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
-            }
-        };
-        (task, binding, contract)
+        (task, binding)
     };
-    let Some(repository_path) = binding.managed_clone().or_else(|| binding.user_checkout()) else {
-        return rpc_error(id, -32043, "managed repository is unavailable", None);
-    };
-    let repository = Path::new(repository_path);
+    let repository = Path::new(&preview.repository_path);
     if !repository.is_dir() {
         let token = match github_app_installation_token(
             binding.full_name(),
@@ -1250,13 +1883,13 @@ async fn task_prepare(id: Value, params: &Value, store: &Mutex<EventStore>) -> V
             );
         }
     }
-    let worktree = Path::new(binding.worktree_root()).join(task.id.to_string());
-    let branch = format!("patchwright/{}", task.id);
-    let start_sha = contract.head_sha().or_else(|| contract.base_sha());
+    let worktree = Path::new(&preview.worktree_path);
+    let branch = &preview.branch;
+    let start_sha = Some(preview.source_sha.as_str());
     if worktree.exists() {
-        match crate::RepositoryService::inspect(&worktree) {
+        match crate::RepositoryService::inspect(worktree) {
             Ok(inspection)
-                if inspection.branch == branch
+                if inspection.branch == *branch
                     && start_sha.is_none_or(|expected| inspection.head_sha == expected) => {}
             Ok(_) => {
                 return rpc_error(id, -32043, "existing task worktree does not match", None);
@@ -1271,7 +1904,7 @@ async fn task_prepare(id: Value, params: &Value, store: &Mutex<EventStore>) -> V
             }
         }
     } else if let Err(error) =
-        crate::WorktreeService::prepare_at(repository, &worktree, &branch, start_sha)
+        crate::WorktreeService::prepare_at(repository, worktree, branch, start_sha)
     {
         return rpc_error(
             id,
@@ -1280,7 +1913,7 @@ async fn task_prepare(id: Value, params: &Value, store: &Mutex<EventStore>) -> V
             Some(error.to_string()),
         );
     }
-    task.repository_path = worktree.to_string_lossy().into_owned();
+    task.repository_path.clone_from(&preview.worktree_path);
     if let Err(error) = task.transition(TaskState::Preparing) {
         return rpc_error(
             id,
@@ -1315,76 +1948,15 @@ async fn task_prepare(id: Value, params: &Value, store: &Mutex<EventStore>) -> V
     rpc_result(id, json!(task))
 }
 
-fn task_ready_for_delivery(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+async fn task_ready_for_delivery(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
     let task_id = match required_task_id(params) {
         Ok(task_id) => task_id,
         Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
     };
-    let store = store.lock().expect("event store lock poisoned");
-    let mut task = match store.load_task(task_id) {
-        Ok(Some(task)) => task,
-        Ok(None) => return rpc_error(id, -32040, "task is missing", None),
-        Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
-    };
-    if task.state == TaskState::AwaitingDeliveryApproval {
-        return rpc_result(id, json!(task));
+    match crate::verify_task_for_delivery(task_id, store).await {
+        Ok(task) => rpc_result(id, json!(task)),
+        Err(error) => rpc_error(id, -32045, "verification failed", Some(error.to_string())),
     }
-    if task.state == TaskState::Implementing {
-        if let Err(error) = task.transition(TaskState::Verifying) {
-            return rpc_error(id, -32045, "verification failed", Some(error.to_string()));
-        }
-        if let Err(error) = store.save_task(&task, "Implementation submitted for verification") {
-            return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
-        }
-    }
-    if task.state != TaskState::Verifying {
-        return rpc_error(
-            id,
-            -32045,
-            "task is not ready for verification",
-            Some(task.state.to_string()),
-        );
-    }
-    let inspection = match crate::RepositoryService::inspect(Path::new(&task.repository_path)) {
-        Ok(inspection) => inspection,
-        Err(error) => return rpc_error(id, -32045, "verification failed", Some(error.to_string())),
-    };
-    if inspection.dirty {
-        return rpc_error(
-            id,
-            -32045,
-            "verification failed",
-            Some("task worktree has uncommitted changes".into()),
-        );
-    }
-    if let Err(error) = task.transition(TaskState::Reviewing) {
-        return rpc_error(id, -32045, "review failed", Some(error.to_string()));
-    }
-    if let Err(error) = store.save_task(&task, "Clean task worktree reviewed") {
-        return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
-    }
-    if let Err(error) = task.transition(TaskState::AwaitingDeliveryApproval) {
-        return rpc_error(id, -32045, "delivery gate failed", Some(error.to_string()));
-    }
-    let checkpoint = match crate::TaskCheckpoint::new(
-        task.id,
-        task.state,
-        "Verified clean commit is awaiting exact GitHub delivery approval",
-    ) {
-        Ok(checkpoint) => checkpoint,
-        Err(error) => {
-            return rpc_error(id, -32045, "delivery gate failed", Some(error.to_string()));
-        }
-    };
-    task.checkpoint_id = Some(checkpoint.id());
-    if let Err(error) = store.save_task_with_checkpoint(
-        &task,
-        "Task is ready for approval-bound GitHub delivery",
-        &checkpoint,
-    ) {
-        return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
-    }
-    rpc_result(id, json!(task))
 }
 
 fn github_status(id: Value, store: &Mutex<EventStore>) -> Value {

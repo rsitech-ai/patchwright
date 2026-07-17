@@ -64,6 +64,19 @@ ln -sfn "$APP_BUNDLE" "$DIST_APP_BUNDLE"
 verify_bundle() {
   /usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
 }
+verify_engine_health() {
+  local socket="$HOME/.patchwright/engine.sock"
+  local response=""
+  for _ in {1..100}; do
+    if [[ -S "$socket" ]]; then
+      response="$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"system.health","params":{}}' | nc -w 1 -U "$socket" 2>/dev/null || true)"
+      [[ "$response" == *'"status":"ok"'* ]] && return 0
+    fi
+    sleep 0.05
+  done
+  echo "engine RPC health check failed" >&2
+  return 1
+}
 open_app() { /usr/bin/open -n "$APP_BUNDLE"; verify_bundle; }
 case "$MODE" in
   run) open_app ;;
@@ -75,6 +88,9 @@ case "$MODE" in
     for _ in {1..100}; do pgrep -x "$APP_NAME" >/dev/null && break; sleep 0.05; done
     pgrep -x "$APP_NAME" >/dev/null
     for _ in {1..100}; do pgrep -f "^$ENGINE_HELPER serve --socket " >/dev/null && break; sleep 0.05; done
+    pgrep -f "^$ENGINE_HELPER serve --socket " >/dev/null
+    verify_engine_health
+    sleep 1
     pgrep -f "^$ENGINE_HELPER serve --socket " >/dev/null
     verify_bundle
     ;;

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use std::{fs::OpenOptions, io::Write, path::Path, process::Command};
+use std::{env, fs::OpenOptions, io::Write, path::Path, process::Command};
 
 const ASKPASS_SCRIPT: &str = r#"#!/bin/sh
 case "$1" in
@@ -35,7 +35,8 @@ impl GitTransport {
             .context("managed clone destination has no parent")?;
         std::fs::create_dir_all(parent).context("create managed clone parent")?;
         let askpass = prepare_askpass(state_root)?;
-        let output = Command::new("git")
+        let mut command = isolated_credential_git_command();
+        let output = command
             .args(["clone", "--no-checkout", "--origin", "origin"])
             .arg(clone_url)
             .arg(destination)
@@ -98,10 +99,11 @@ impl GitTransport {
             bail!("task worktree origin does not match the approved repository");
         }
         let askpass = prepare_askpass(state_root)?;
-        let output = Command::new("git")
+        let mut command = isolated_credential_git_command();
+        let output = command
             .arg("-C")
             .arg(repository)
-            .args(["push", "origin"])
+            .args(["push", "--no-verify", "origin"])
             .arg(format!("HEAD:refs/heads/{branch}"))
             .env("GIT_ASKPASS", &askpass)
             .env("GIT_ASKPASS_REQUIRE", "force")
@@ -118,6 +120,29 @@ impl GitTransport {
         }
         Ok(())
     }
+}
+
+fn isolated_credential_git_command() -> Command {
+    let mut command = Command::new("git");
+    for (key, _) in env::vars_os() {
+        if key.to_string_lossy().starts_with("GIT_CONFIG_") || key == "GIT_CONFIG_PARAMETERS" {
+            command.env_remove(key);
+        }
+    }
+    command
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "credential.helper=",
+            "-c",
+            "http.extraHeader=",
+        ])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env_remove("GIT_TEMPLATE_DIR");
+    command
 }
 
 fn prepare_askpass(state_root: &Path) -> Result<std::path::PathBuf> {
