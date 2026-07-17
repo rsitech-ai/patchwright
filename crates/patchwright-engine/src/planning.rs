@@ -24,7 +24,9 @@ impl RepositoryPlanner {
             .ok_or(PlanningError::SourceShaMissing)?;
         let inspection = RepositoryService::inspect(Path::new(&task.repository_path))
             .map_err(|error| PlanningError::Repository(error.to_string()))?;
-        if inspection.dirty {
+        // Managed sources are intentionally cloned without a checkout. Planning reads the
+        // evidence below from the captured commit, so Git's synthetic deletions are irrelevant.
+        if inspection.dirty && !is_bound_managed_source(&inspection.root, binding) {
             return Err(PlanningError::RepositoryDirty);
         }
         if !commit_exists(&inspection.root, captured_sha)? {
@@ -95,6 +97,13 @@ impl RepositoryPlanner {
         })
         .map_err(|error| PlanningError::Contract(error.to_string()))
     }
+}
+
+fn is_bound_managed_source(root: &Path, binding: &RepositoryBinding) -> bool {
+    binding
+        .managed_clone()
+        .and_then(|path| Path::new(path).canonicalize().ok())
+        .is_some_and(|managed_root| managed_root == root)
 }
 
 #[derive(Default)]
