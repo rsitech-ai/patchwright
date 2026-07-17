@@ -5,12 +5,7 @@ import Foundation
 public final class WorkspaceStore: ObservableObject {
     @Published public private(set) var connectionState: EngineConnectionState = .disconnected
     @Published public private(set) var tasks: [EngineeringTask] = []
-    @Published public var primarySelection: WorkspaceSection = .queue {
-        didSet {
-            guard primarySelection != oldValue else { return }
-            clearDetailSelection()
-        }
-    }
+    @Published public private(set) var primarySelection: WorkspaceSection = .queue
     @Published public var selectedTaskID: EngineeringTask.ID?
     @Published public var selectedRepositoryID: GitHubRepository.ID?
     @Published public var selectedWorkItemID: GitHubWorkItem.ID?
@@ -718,6 +713,12 @@ public final class WorkspaceStore: ObservableObject {
     public func setWorkspaceFilter(_ filter: WorkspaceFilter) {
         presentationPreferences.filter = filter
         savePresentationPreferences()
+    }
+
+    public func selectSection(_ section: WorkspaceSection) {
+        guard section != primarySelection else { return }
+        primarySelection = section
+        clearDetailSelection()
     }
 
     private func savePresentationPreferences() {
