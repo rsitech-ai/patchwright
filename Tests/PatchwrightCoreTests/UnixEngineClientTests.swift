@@ -19,6 +19,26 @@ final class UnixEngineClientTests: XCTestCase {
         }
     }
 
+    func testReadyForDeliveryUsesLongRunningTimeout() async throws {
+        let response = Data(
+            #"{"jsonrpc":"2.0","id":"test","result":{"status":"ok","version":"0.1.0"}}"#.utf8
+        ) + Data([0x0A])
+        let server = try UnixSocketServer(response: response, responseDelay: 0.1)
+        let client = UnixEngineClient(
+            socketPath: server.socketPath,
+            timeout: .milliseconds(50),
+            longRunningTimeout: .seconds(1)
+        )
+
+        let health: HealthResponse = try await client.call(
+            method: "task.readyForDelivery",
+            params: [:],
+            as: HealthResponse.self
+        )
+
+        XCTAssertEqual(health.status, "ok")
+    }
+
     func testCancellingCallCancelsThePendingSocketExchange() async throws {
         let server = try UnixSocketServer(response: nil)
         let client = UnixEngineClient(socketPath: server.socketPath, timeout: .seconds(5))
@@ -78,7 +98,7 @@ private final class UnixSocketServer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "ai.patchwright.tests.unix-server")
     private let requestSignal = SocketRequestSignal()
 
-    init(response: Data?) throws {
+    init(response: Data?, responseDelay: TimeInterval = 0) throws {
         socketPath = FileManager.default.temporaryDirectory
             .appending(path: "patchwright-\(UUID().uuidString).sock")
             .path
@@ -117,6 +137,9 @@ private final class UnixSocketServer: @unchecked Sendable {
             guard Darwin.recv(client, &request, request.count, 0) > 0 else { return }
             Task { await requestSignal.markReceived() }
             if let response {
+                if responseDelay > 0 {
+                    Thread.sleep(forTimeInterval: responseDelay)
+                }
                 response.withUnsafeBytes { buffer in
                     guard let baseAddress = buffer.baseAddress else { return }
                     _ = Darwin.send(client, baseAddress, buffer.count, 0)

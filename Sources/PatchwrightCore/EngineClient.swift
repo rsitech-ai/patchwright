@@ -315,15 +315,19 @@ struct JSONLineFramer: Sendable {
 public actor UnixEngineClient: EngineServing {
     private let socketPath: String
     private let timeout: Duration
+    private let longRunningTimeout: Duration
     private let maximumResponseBytes: Int
 
     public init(
         socketPath: String,
         timeout: Duration = .seconds(10),
+        // Planning emits at most two verification commands; the engine permits five minutes each.
+        longRunningTimeout: Duration = .seconds(11 * 60),
         maximumResponseBytes: Int = 64 * 1_024 * 1_024
     ) {
         self.socketPath = socketPath
         self.timeout = max(timeout, .milliseconds(1))
+        self.longRunningTimeout = max(longRunningTimeout, .milliseconds(1))
         self.maximumResponseBytes = max(1, maximumResponseBytes)
     }
 
@@ -334,7 +338,8 @@ public actor UnixEngineClient: EngineServing {
     ) async throws -> Result {
         var payload = try JSONEncoder().encode(RPCRequest(id: UUID().uuidString, method: method, params: params))
         payload.append(0x0A)
-        let data = try await exchange(payload)
+        let requestTimeout = method == "task.readyForDelivery" ? longRunningTimeout : timeout
+        let data = try await exchange(payload, timeout: requestTimeout)
         let response: RPCResponse<Result>
         do {
             response = try JSONDecoder.patchwright.decode(RPCResponse<Result>.self, from: data)
@@ -346,9 +351,8 @@ public actor UnixEngineClient: EngineServing {
         throw EngineError.invalidResponse
     }
 
-    private func exchange(_ payload: Data) async throws -> Data {
+    private func exchange(_ payload: Data, timeout: Duration) async throws -> Data {
         let path = socketPath
-        let timeout = timeout
         let maximumResponseBytes = maximumResponseBytes
         let operation = EngineExchangeOperation()
         return try await withTaskCancellationHandler {
