@@ -3,7 +3,7 @@ use patchwright_core::{
     ApprovalClass, Capability, CredentialHealth, GitHubAction, GitHubActionPreview,
     GitHubPullRequestSourceInput, InstructionDigest, MergeMethod, RemoteIdentity,
     RemotePrecondition, RepositoryBinding, RepositoryBindingDraft, RepositoryPermissionSnapshot,
-    RiskClass, Task, TaskContract, TaskContractDraft, TaskSource,
+    RiskClass, Task, TaskContract, TaskContractDraft, TaskSource, TaskState,
 };
 use patchwright_engine::{
     DeliveryError, EventStore, GitHubRepository, GitHubRepositoryPermissions,
@@ -12,6 +12,10 @@ use patchwright_engine::{
 };
 
 fn fixture(store: &EventStore) -> Task {
+    fixture_with_capability(store, Capability::PostComment)
+}
+
+fn fixture_with_capability(store: &EventStore, capability: Capability) -> Task {
     let binding = RepositoryBinding::try_from(RepositoryBindingDraft {
         github_repository_id: 42,
         full_name: "octocat/hello".into(),
@@ -43,7 +47,7 @@ fn fixture(store: &EventStore) -> Task {
         head_sha: None,
         instruction_digests: vec![InstructionDigest::new("AGENTS.md", "d".repeat(64), 1).unwrap()],
         verification_commands: Vec::new(),
-        required_capabilities: vec![Capability::PostComment],
+        required_capabilities: vec![capability],
         risk: RiskClass::Moderate,
         sensitive_paths: Vec::new(),
         dependencies: Vec::new(),
@@ -51,6 +55,21 @@ fn fixture(store: &EventStore) -> Task {
     .unwrap();
     store.save_task_contract(&contract).unwrap();
     task
+}
+
+fn advance_to_delivery_approval(task: &mut Task) {
+    for state in [
+        TaskState::Assessing,
+        TaskState::Planned,
+        TaskState::AwaitingPreparationApproval,
+        TaskState::Preparing,
+        TaskState::Implementing,
+        TaskState::Verifying,
+        TaskState::Reviewing,
+        TaskState::AwaitingDeliveryApproval,
+    ] {
+        task.transition(state).unwrap();
+    }
 }
 
 #[test]
@@ -216,18 +235,7 @@ fn successful_merge_atomically_completes_delivery_and_task_lifecycle() {
     })
     .unwrap();
     store.save_task_contract(&contract).unwrap();
-    for state in [
-        patchwright_core::TaskState::Assessing,
-        patchwright_core::TaskState::Planned,
-        patchwright_core::TaskState::AwaitingPreparationApproval,
-        patchwright_core::TaskState::Preparing,
-        patchwright_core::TaskState::Implementing,
-        patchwright_core::TaskState::Verifying,
-        patchwright_core::TaskState::Reviewing,
-        patchwright_core::TaskState::AwaitingDeliveryApproval,
-    ] {
-        task.transition(state).unwrap();
-    }
+    advance_to_delivery_approval(&mut task);
     store.save_task(&task, "ready for delivery").unwrap();
     let action = GitHubActionPreview::new(
         RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
@@ -253,6 +261,73 @@ fn successful_merge_atomically_completes_delivery_and_task_lifecycle() {
     let timeline = store.timeline(task.id).unwrap();
     assert!(timeline.iter().any(|event| event.contains("deliver")));
     assert!(timeline.iter().any(|event| event.contains("completed")));
+    assert!(
+        timeline
+            .iter()
+            .any(|event| event.contains("awaitingMergeApproval"))
+    );
+    assert!(timeline.iter().any(|event| event.contains("merging")));
+}
+
+#[test]
+fn successful_close_actions_complete_without_merge_lifecycle_states() {
+    let actions = [
+        (
+            Capability::CloseIssue,
+            GitHubAction::close_issue(7).unwrap(),
+        ),
+        (
+            Capability::ClosePullRequest,
+            GitHubAction::close_pull_request(7).unwrap(),
+        ),
+    ];
+
+    for (capability, action) in actions {
+        let directory = tempfile::tempdir().unwrap();
+        let store = EventStore::open(&directory.path().join("engine.sqlite3")).unwrap();
+        let mut task = fixture_with_capability(&store, capability);
+        advance_to_delivery_approval(&mut task);
+        store
+            .save_task(&task, "ready for terminal delivery")
+            .unwrap();
+        let action = GitHubActionPreview::new(
+            RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
+            action,
+            RemotePrecondition::new(None, Some(&"a".repeat(40)), 4).unwrap(),
+        )
+        .unwrap();
+        let preview = preview_delivery(&store, task.id, action).unwrap();
+        let approval = approve_delivery(&store, &preview, "owner").unwrap();
+        let key = authorize_execution(&store, &preview, approval.id()).unwrap();
+
+        complete_successful_delivery(
+            &store,
+            &preview,
+            &key,
+            r#"{"state":"succeeded","result":{"state":"closed"}}"#,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.load_task(task.id).unwrap().unwrap().state,
+            TaskState::Completed
+        );
+        let timeline = store.timeline(task.id).unwrap();
+        assert!(timeline.iter().any(|event| event.contains("delivering")));
+        assert!(timeline.iter().any(|event| event.contains("monitoring")));
+        assert!(timeline.iter().any(|event| event.contains("completed")));
+        assert!(
+            !timeline
+                .iter()
+                .any(|event| event.contains("awaitingMergeApproval")),
+            "{capability:?} fabricated merge approval"
+        );
+        assert!(
+            !timeline.iter().any(|event| event.contains("merging")),
+            "{capability:?} fabricated merging"
+        );
+    }
 }
 
 fn completed_pull_snapshot(head_sha: &str, merged: bool) -> GitHubRepositorySnapshot {
