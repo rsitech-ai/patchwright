@@ -76,6 +76,14 @@ SOURCE_DIGEST="$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')"
 "$SOURCE_VERIFIER" --repo "$REPO" --commit "$COMMIT" --tag v0.1.0 \
   --source-archive "$ARCHIVE" --source-archive-sha256 "$SOURCE_DIGEST" >/dev/null
 
+FORGED_ARCHIVE="$TMP_ROOT/forged-source.tar.gz"
+printf 'unrelated source bytes\n' >"$TMP_ROOT/wrong-source.txt"
+tar -czf "$FORGED_ARCHIVE" -C "$TMP_ROOT" wrong-source.txt
+FORGED_DIGEST="$(shasum -a 256 "$FORGED_ARCHIVE" | awk '{print $1}')"
+assert_rejected "source archive content differs from candidate commit" \
+  "$SOURCE_VERIFIER" --repo "$REPO" --commit "$COMMIT" --tag v0.1.0 \
+  --source-archive "$FORGED_ARCHIVE" --source-archive-sha256 "$FORGED_DIGEST"
+
 printf 'dirty\n' >>"$REPO/README.md"
 assert_rejected "release worktree differs from candidate commit" \
   "$SOURCE_VERIFIER" --repo "$REPO" --commit "$COMMIT" --tag v0.1.0 \
