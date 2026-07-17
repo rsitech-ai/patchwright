@@ -146,7 +146,7 @@ fn exact_preview_approval_claim_is_single_use_and_stale_safe() {
     let action = GitHubActionPreview::new(
         RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
         GitHubAction::comment(7, "Patchwright verified this change.").unwrap(),
-        RemotePrecondition::new(None, Some(&"a".repeat(40)), 3).unwrap(),
+        RemotePrecondition::new(None, None, 3).unwrap(),
     )
     .unwrap();
     let preview = preview_delivery(&store, task.id, action).unwrap();
@@ -175,7 +175,7 @@ fn exact_preview_approval_claim_is_single_use_and_stale_safe() {
     let changed = GitHubActionPreview::new(
         RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
         GitHubAction::comment(7, "Different body").unwrap(),
-        RemotePrecondition::new(None, Some(&"a".repeat(40)), 3).unwrap(),
+        RemotePrecondition::new(None, None, 3).unwrap(),
     )
     .unwrap();
     let changed_preview = preview_delivery(&store, task.id, changed).unwrap();
@@ -242,7 +242,7 @@ fn delivery_preview_requires_the_exact_approval_state() {
         GitHubActionPreview::new(
             RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
             GitHubAction::comment(7, "body").unwrap(),
-            RemotePrecondition::new(None, Some(&"a".repeat(40)), 3).unwrap(),
+            RemotePrecondition::new(None, None, 3).unwrap(),
         )
         .unwrap()
     };
@@ -336,7 +336,6 @@ fn delivery_target_and_branch_are_bound_to_the_task_contract() {
             "Draft",
             &format!("patchwright/{}", pull_task.id),
             "main",
-            &"f".repeat(40),
             "Resolves the task",
         )
         .unwrap(),
@@ -365,7 +364,7 @@ fn successful_review_delivery_enters_monitoring_before_merge_approval() {
             Vec::new(),
         )
         .unwrap(),
-        RemotePrecondition::new(Some(&"b".repeat(40)), Some(&"a".repeat(40)), 4).unwrap(),
+        RemotePrecondition::new(Some(&"b".repeat(40)), None, 4).unwrap(),
     )
     .unwrap();
     let preview = preview_delivery(&store, task.id, action).unwrap();
@@ -421,7 +420,7 @@ fn merge_uses_a_separate_merge_class_and_exact_head_sha() {
     let mismatched_inner = GitHubActionPreview::new(
         RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
         GitHubAction::merge_pull_request(7, &"c".repeat(40), MergeMethod::Squash).unwrap(),
-        RemotePrecondition::new(Some(&"b".repeat(40)), Some(&"a".repeat(40)), 4).unwrap(),
+        RemotePrecondition::new(Some(&"b".repeat(40)), None, 4).unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -431,7 +430,7 @@ fn merge_uses_a_separate_merge_class_and_exact_head_sha() {
     let action = GitHubActionPreview::new(
         RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
         GitHubAction::merge_pull_request(7, &"b".repeat(40), MergeMethod::Squash).unwrap(),
-        RemotePrecondition::new(Some(&"b".repeat(40)), Some(&"a".repeat(40)), 4).unwrap(),
+        RemotePrecondition::new(Some(&"b".repeat(40)), None, 4).unwrap(),
     )
     .unwrap();
     let preview = preview_delivery(&store, task.id, action).unwrap();
@@ -442,7 +441,7 @@ fn merge_uses_a_separate_merge_class_and_exact_head_sha() {
     let changed = GitHubActionPreview::new(
         RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
         GitHubAction::merge_pull_request(7, &"c".repeat(40), MergeMethod::Squash).unwrap(),
-        RemotePrecondition::new(Some(&"c".repeat(40)), Some(&"a".repeat(40)), 5).unwrap(),
+        RemotePrecondition::new(Some(&"c".repeat(40)), None, 5).unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -480,7 +479,7 @@ fn successful_merge_atomically_completes_delivery_and_task_lifecycle() {
     let action = GitHubActionPreview::new(
         RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
         GitHubAction::merge_pull_request(7, &"b".repeat(40), MergeMethod::Squash).unwrap(),
-        RemotePrecondition::new(Some(&"b".repeat(40)), Some(&"a".repeat(40)), 4).unwrap(),
+        RemotePrecondition::new(Some(&"b".repeat(40)), None, 4).unwrap(),
     )
     .unwrap();
     let preview = preview_delivery(&store, task.id, action).unwrap();
@@ -526,7 +525,7 @@ fn definitive_merge_failure_restores_the_approval_gate() {
     let action = GitHubActionPreview::new(
         RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
         GitHubAction::merge_pull_request(7, &"b".repeat(40), MergeMethod::Squash).unwrap(),
-        RemotePrecondition::new(Some(&"b".repeat(40)), Some(&"a".repeat(40)), 4).unwrap(),
+        RemotePrecondition::new(Some(&"b".repeat(40)), None, 4).unwrap(),
     )
     .unwrap();
     let preview = preview_delivery(&store, task.id, action).unwrap();
@@ -552,7 +551,7 @@ fn definitive_merge_failure_restores_the_approval_gate() {
 
 #[test]
 fn ambiguous_merge_reconciliation_completes_or_restores_a_fresh_approval_gate() {
-    for merged in [true, false] {
+    for (merged, remote_state) in [(true, "closed"), (false, "open"), (false, "closed")] {
         let directory = tempfile::tempdir().unwrap();
         let store = EventStore::open(&directory.path().join("engine.sqlite3")).unwrap();
         let mut task = fixture_with_capability(&store, Capability::MergePullRequest);
@@ -560,7 +559,7 @@ fn ambiguous_merge_reconciliation_completes_or_restores_a_fresh_approval_gate() 
         let action = GitHubActionPreview::new(
             RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
             GitHubAction::merge_pull_request(7, &"b".repeat(40), MergeMethod::Squash).unwrap(),
-            RemotePrecondition::new(Some(&"b".repeat(40)), Some(&"a".repeat(40)), 4).unwrap(),
+            RemotePrecondition::new(Some(&"b".repeat(40)), None, 4).unwrap(),
         )
         .unwrap();
         let preview = preview_delivery(&store, task.id, action).unwrap();
@@ -573,12 +572,10 @@ fn ambiguous_merge_reconciliation_completes_or_restores_a_fresh_approval_gate() 
         )
         .unwrap();
 
-        let reconciled = reconcile_completed_task_from_snapshot(
-            &store,
-            task.id,
-            &completed_pull_snapshot(&"b".repeat(40), merged),
-        )
-        .unwrap();
+        let mut snapshot = completed_pull_snapshot(&"b".repeat(40), merged);
+        snapshot.work_items[0].state = remote_state.into();
+        let reconciled =
+            reconcile_completed_task_from_snapshot(&store, task.id, &snapshot).unwrap();
 
         if merged {
             assert_eq!(reconciled.state, TaskState::Completed);
@@ -615,7 +612,7 @@ fn successful_close_actions_complete_without_merge_lifecycle_states() {
         ),
         (
             Capability::ClosePullRequest,
-            GitHubAction::close_pull_request(7, &"b".repeat(40)).unwrap(),
+            GitHubAction::close_pull_request(7).unwrap(),
         ),
     ];
 
@@ -624,23 +621,10 @@ fn successful_close_actions_complete_without_merge_lifecycle_states() {
         let store = EventStore::open(&directory.path().join("engine.sqlite3")).unwrap();
         let mut task = fixture_with_capability(&store, capability);
         save_at_delivery_approval(&store, &mut task);
-        let expected_head = (capability == Capability::ClosePullRequest).then(|| "b".repeat(40));
-        if capability == Capability::ClosePullRequest {
-            let mismatched_inner = GitHubActionPreview::new(
-                RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
-                GitHubAction::close_pull_request(7, &"c".repeat(40)).unwrap(),
-                RemotePrecondition::new(Some(&"b".repeat(40)), Some(&"a".repeat(40)), 4).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(
-                preview_delivery(&store, task.id, mismatched_inner),
-                Err(DeliveryError::PreconditionMismatch)
-            );
-        }
         let action = GitHubActionPreview::new(
             RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
             action,
-            RemotePrecondition::new(expected_head.as_deref(), Some(&"a".repeat(40)), 4).unwrap(),
+            RemotePrecondition::new(None, None, 4).unwrap(),
         )
         .unwrap();
         let preview = preview_delivery(&store, task.id, action).unwrap();

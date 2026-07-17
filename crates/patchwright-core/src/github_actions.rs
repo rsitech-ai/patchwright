@@ -61,8 +61,6 @@ pub enum GitHubAction {
         pull_request_number: u64,
         #[serde(alias = "thread_id")]
         thread_id: String,
-        #[serde(alias = "expected_head_sha")]
-        expected_head_sha: String,
     },
     CheckRun {
         name: String,
@@ -75,8 +73,6 @@ pub enum GitHubAction {
         title: String,
         head: String,
         base: String,
-        #[serde(alias = "expected_base_sha")]
-        expected_base_sha: String,
         body: String,
     },
     UpdatePullRequestBranch {
@@ -88,14 +84,10 @@ pub enum GitHubAction {
     ReadyPullRequest {
         #[serde(alias = "pull_request_number")]
         pull_request_number: u64,
-        #[serde(alias = "expected_head_sha")]
-        expected_head_sha: String,
     },
     ClosePullRequest {
         #[serde(alias = "pull_request_number")]
         pull_request_number: u64,
-        #[serde(alias = "expected_head_sha")]
-        expected_head_sha: String,
     },
     CloseIssue {
         #[serde(alias = "issue_number")]
@@ -153,8 +145,6 @@ enum GitHubActionWire {
         pull_request_number: u64,
         #[serde(alias = "thread_id")]
         thread_id: String,
-        #[serde(alias = "expected_head_sha")]
-        expected_head_sha: String,
     },
     CheckRun {
         name: String,
@@ -167,8 +157,6 @@ enum GitHubActionWire {
         title: String,
         head: String,
         base: String,
-        #[serde(alias = "expected_base_sha")]
-        expected_base_sha: String,
         body: String,
     },
     UpdatePullRequestBranch {
@@ -180,14 +168,10 @@ enum GitHubActionWire {
     ReadyPullRequest {
         #[serde(alias = "pull_request_number")]
         pull_request_number: u64,
-        #[serde(alias = "expected_head_sha")]
-        expected_head_sha: String,
     },
     ClosePullRequest {
         #[serde(alias = "pull_request_number")]
         pull_request_number: u64,
-        #[serde(alias = "expected_head_sha")]
-        expected_head_sha: String,
     },
     CloseIssue {
         #[serde(alias = "issue_number")]
@@ -238,8 +222,7 @@ impl<'de> Deserialize<'de> for GitHubAction {
             GitHubActionWire::ResolveReviewThread {
                 pull_request_number,
                 thread_id,
-                expected_head_sha,
-            } => Self::resolve_review_thread(pull_request_number, &thread_id, &expected_head_sha),
+            } => Self::resolve_review_thread(pull_request_number, &thread_id),
             GitHubActionWire::CheckRun {
                 name,
                 head_sha,
@@ -250,21 +233,18 @@ impl<'de> Deserialize<'de> for GitHubAction {
                 title,
                 head,
                 base,
-                expected_base_sha,
                 body,
-            } => Self::draft_pull_request(&title, &head, &base, &expected_base_sha, &body),
+            } => Self::draft_pull_request(&title, &head, &base, &body),
             GitHubActionWire::UpdatePullRequestBranch {
                 pull_request_number,
                 expected_head_sha,
             } => Self::update_pull_request_branch(pull_request_number, &expected_head_sha),
             GitHubActionWire::ReadyPullRequest {
                 pull_request_number,
-                expected_head_sha,
-            } => Self::ready_pull_request(pull_request_number, &expected_head_sha),
+            } => Self::ready_pull_request(pull_request_number),
             GitHubActionWire::ClosePullRequest {
                 pull_request_number,
-                expected_head_sha,
-            } => Self::close_pull_request(pull_request_number, &expected_head_sha),
+            } => Self::close_pull_request(pull_request_number),
             GitHubActionWire::CloseIssue { issue_number } => Self::close_issue(issue_number),
             GitHubActionWire::EnqueuePullRequest {
                 pull_request_number,
@@ -329,12 +309,10 @@ impl GitHubAction {
     pub fn resolve_review_thread(
         pull_request_number: u64,
         thread_id: &str,
-        expected_head_sha: &str,
     ) -> Result<Self, GitHubActionError> {
         Ok(Self::ResolveReviewThread {
             pull_request_number: validate_number(pull_request_number)?,
             thread_id: validate_node_id(thread_id)?,
-            expected_head_sha: validate_sha(expected_head_sha)?,
         })
     }
 
@@ -364,14 +342,12 @@ impl GitHubAction {
         title: &str,
         head: &str,
         base: &str,
-        expected_base_sha: &str,
         body: &str,
     ) -> Result<Self, GitHubActionError> {
         Ok(Self::DraftPullRequest {
             title: validate_text(title, 256, "title")?,
             head: validate_ref(head)?,
             base: validate_ref(base)?,
-            expected_base_sha: validate_sha(expected_base_sha)?,
             body: validate_body(body)?,
         })
     }
@@ -386,23 +362,15 @@ impl GitHubAction {
         })
     }
 
-    pub fn close_pull_request(
-        pull_request_number: u64,
-        expected_head_sha: &str,
-    ) -> Result<Self, GitHubActionError> {
+    pub fn close_pull_request(pull_request_number: u64) -> Result<Self, GitHubActionError> {
         Ok(Self::ClosePullRequest {
             pull_request_number: validate_number(pull_request_number)?,
-            expected_head_sha: validate_sha(expected_head_sha)?,
         })
     }
 
-    pub fn ready_pull_request(
-        pull_request_number: u64,
-        expected_head_sha: &str,
-    ) -> Result<Self, GitHubActionError> {
+    pub fn ready_pull_request(pull_request_number: u64) -> Result<Self, GitHubActionError> {
         Ok(Self::ReadyPullRequest {
             pull_request_number: validate_number(pull_request_number)?,
-            expected_head_sha: validate_sha(expected_head_sha)?,
         })
     }
 
@@ -511,16 +479,7 @@ impl GitHubAction {
             Self::Review {
                 expected_head_sha, ..
             }
-            | Self::ResolveReviewThread {
-                expected_head_sha, ..
-            }
             | Self::UpdatePullRequestBranch {
-                expected_head_sha, ..
-            }
-            | Self::ReadyPullRequest {
-                expected_head_sha, ..
-            }
-            | Self::ClosePullRequest {
                 expected_head_sha, ..
             }
             | Self::EnqueuePullRequest {
@@ -536,9 +495,7 @@ impl GitHubAction {
     #[must_use]
     pub fn expected_base_sha(&self) -> Option<&str> {
         match self {
-            Self::DraftPullRequest {
-                expected_base_sha, ..
-            } => Some(expected_base_sha),
+            Self::CreateBranch { from_sha, .. } => Some(from_sha),
             _ => None,
         }
     }
