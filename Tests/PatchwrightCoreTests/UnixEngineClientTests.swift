@@ -29,6 +29,7 @@ final class UnixEngineClientTests: XCTestCase {
                 as: HealthResponse.self
             )
         }
+        await server.waitUntilRequestReceived()
         call.cancel()
 
         do {
@@ -75,6 +76,7 @@ private final class UnixSocketServer: @unchecked Sendable {
     let socketPath: String
     private let descriptor: Int32
     private let queue = DispatchQueue(label: "ai.patchwright.tests.unix-server")
+    private let requestSignal = SocketRequestSignal()
 
     init(response: Data?) throws {
         socketPath = FileManager.default.temporaryDirectory
@@ -106,12 +108,14 @@ private final class UnixSocketServer: @unchecked Sendable {
         }
 
         let listeningDescriptor = descriptor
+        let requestSignal = requestSignal
         queue.async {
             let client = Darwin.accept(listeningDescriptor, nil, nil)
             guard client >= 0 else { return }
             defer { Darwin.close(client) }
             var request = [UInt8](repeating: 0, count: 4_096)
             guard Darwin.recv(client, &request, request.count, 0) > 0 else { return }
+            Task { await requestSignal.markReceived() }
             if let response {
                 response.withUnsafeBytes { buffer in
                     guard let baseAddress = buffer.baseAddress else { return }
@@ -123,8 +127,29 @@ private final class UnixSocketServer: @unchecked Sendable {
         }
     }
 
+    func waitUntilRequestReceived() async {
+        await requestSignal.wait()
+    }
+
     deinit {
         Darwin.close(descriptor)
         Darwin.unlink(socketPath)
+    }
+}
+
+private actor SocketRequestSignal {
+    private var received = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !received else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func markReceived() {
+        received = true
+        let waiters = waiters
+        self.waiters.removeAll()
+        waiters.forEach { $0.resume() }
     }
 }
