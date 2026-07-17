@@ -2,6 +2,16 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fail() {
+  printf 'blocked:external — %s\n' "$1" >&2
+  exit 78
+}
+
+die() {
+  printf 'GitHub App qualification failed — %s\n' "$1" >&2
+  exit 1
+}
+
 TARGET_OWNER="${PATCHWRIGHT_GITHUB_E2E_OWNER:-}"
 TARGET_REPOSITORY="${PATCHWRIGHT_GITHUB_E2E_REPOSITORY:-}"
 TARGET_REPOSITORY_ID="${PATCHWRIGHT_GITHUB_E2E_REPOSITORY_ID:-}"
@@ -18,16 +28,6 @@ if [[ -n "$EXISTING_ISSUE_NUMBER" ]]; then
   [[ "$EXISTING_ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ]] \
     || fail "PATCHWRIGHT_GITHUB_E2E_EXISTING_ISSUE_NUMBER must be positive"
 fi
-
-fail() {
-  printf 'blocked:external — %s\n' "$1" >&2
-  exit 78
-}
-
-die() {
-  printf 'GitHub App qualification failed — %s\n' "$1" >&2
-  exit 1
-}
 
 [[ -n "$TARGET_OWNER" && -n "$TARGET_REPOSITORY" ]] || fail "set the disposable owner and repository"
 [[ "$NORMALIZED_TARGET" != "s1korrrr/patchwright" ]] || fail "the Patchwright production repository is forbidden"
@@ -342,8 +342,6 @@ if strings "$DATABASE" "$ENGINE_LOG" | grep -Eq 'BEGIN (RSA )?PRIVATE KEY|ghs_[A
   die "credential material appeared in durable qualification evidence"
 fi
 EVIDENCE_DIR="${PATCHWRIGHT_GITHUB_E2E_EVIDENCE_DIR:-$HOME/.patchwright/evidence}"
-mkdir -p "$EVIDENCE_DIR"
-chmod 700 "$EVIDENCE_DIR"
 EVIDENCE="$EVIDENCE_DIR/github-app-e2e-$RUN_ID.json"
 jq -n \
   --arg completedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -370,6 +368,6 @@ jq -n \
     issueTaskId:$issueTaskId,pullRequestTaskId:$pullRequestTaskId,
     actions:{branch:$branchResult,check:$checkResult,comment:$commentResult,
       draftPullRequest:$pullRequestResult,review:$reviewResult,merge:$mergeResult},
-    credentialPersistenceCheck:"passed"}' >"$EVIDENCE"
-chmod 600 "$EVIDENCE"
+    credentialPersistenceCheck:"passed"}' \
+  | "$ROOT_DIR/script/write_owner_evidence.py" --directory "$EVIDENCE_DIR" --name "$(basename "$EVIDENCE")" >/dev/null
 printf 'GitHub App E2E passed: %s\nEvidence: %s\n' "$PR_URL" "$EVIDENCE"

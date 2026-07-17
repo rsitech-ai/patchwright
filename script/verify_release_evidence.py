@@ -28,14 +28,25 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 BUILD = re.compile(r"^[1-9][0-9]*$")
-IDENTITY_KEYS = ("artifact_filename", "artifact_sha256", "git_commit", "tag", "version", "build")
+IDENTITY_KEYS = (
+    "artifact_filename", "artifact_sha256", "git_commit", "tag", "version", "build",
+    "source_archive_path", "source_archive_sha256",
+)
 GATE_CHECKS = {
     "repo": {"source_verify", "clean_source", "tag_binding"},
     "secret_scan": {"tracked", "all_refs", "candidate_root", "no_findings"},
     "compliance": {"spdx_2_3", "dependency_licenses", "post_signing_component_hashes"},
     "codex": {"signed_in_runtime", "task_start", "resume", "approval", "cancel"},
     "github": {"authorized_sandbox", "app_identity", "delivery", "exact_sha_approval", "merge", "kill_switch"},
-    "clean_machine": {"checksum", "dmg_signature", "dmg_ticket", "dmg_gatekeeper", "app_signature", "app_ticket", "app_gatekeeper", "first_launch", "relaunch"},
+}
+CLEAN_MACHINE_CHECKS = {
+    "checksum", "dmg_signature", "dmg_ticket", "dmg_gatekeeper", "app_signature",
+    "app_ticket", "app_gatekeeper", "first_launch", "relaunch",
+    "missing_integration_guidance", "codex_thread_resume", "github_ingestion_without_gh",
+    "offline_state", "expired_token_state", "revoked_installation_state",
+    "missing_permission_state", "approval_delivery", "stale_head_rejection",
+    "exact_sha_merge", "queue_advancement", "migration", "update_relaunch",
+    "uninstall_data_retention", "explicit_data_removal",
 }
 
 
@@ -173,6 +184,10 @@ def require_identity(value: dict[str, Any], label: str) -> dict[str, str]:
         raise VerificationError(f"{label}.tag must equal v<version>")
     if identity["artifact_filename"] != f"Patchwright-{identity['version']}.dmg":
         raise VerificationError(f"{label}.artifact_filename mismatch")
+    if identity["source_archive_path"] != "reproducibility/source.tar.gz":
+        raise VerificationError(f"{label}.source_archive_path mismatch")
+    if not HEX64.fullmatch(identity["source_archive_sha256"]):
+        raise VerificationError(f"{label}.source_archive_sha256 is not canonical SHA-256")
     return identity
 
 
@@ -180,6 +195,22 @@ def compare_identity(expected: dict[str, str], actual: dict[str, str], label: st
     for key in IDENTITY_KEYS:
         if actual[key] != expected[key]:
             raise VerificationError(f"{label}.{key} does not match candidate")
+
+
+def verify_notary_summary(value: Any, label: str) -> None:
+    required = {"log_sha256", "issue_count", "error_count", "warning_count", "info_count", "warning_policy"}
+    if not isinstance(value, dict) or set(value) != required:
+        raise VerificationError(f"{label} notary evidence has no sanitized log summary")
+    counts = [value.get(name) for name in ("error_count", "warning_count", "info_count")]
+    if (
+        not HEX64.fullmatch(value.get("log_sha256", ""))
+        or any(not isinstance(count, int) or isinstance(count, bool) or count < 0 for count in counts)
+        or value.get("issue_count") != sum(counts)
+        or value.get("error_count") != 0
+        or value.get("warning_policy") not in {"reject", "allow"}
+        or (value.get("warning_policy") == "reject" and value.get("warning_count") != 0)
+    ):
+        raise VerificationError(f"{label} notary log summary is invalid")
 
 
 def verify_ed25519(public_key: str, signature: str, path: Path, signed_length: int | None, label: str) -> None:
@@ -208,20 +239,70 @@ def verify_ed25519(public_key: str, signature: str, path: Path, signed_length: i
 def verify_gate(path: Path, expected_gate: str, identity: dict[str, str], now: datetime, candidate_time: datetime) -> tuple[dict[str, Any], str]:
     before = regular_file(path, f"{expected_gate} gate")
     gate = load_json(path, f"{expected_gate} gate")
-    if gate.get("schema_version") != 1 or gate.get("gate") != expected_gate or gate.get("status") != "pass":
+    expected_schema = 2 if expected_gate == "clean_machine" else 1
+    if gate.get("schema_version") != expected_schema or gate.get("gate") != expected_gate or gate.get("status") != "pass":
         raise VerificationError(f"invalid {expected_gate} gate envelope")
     compare_identity(identity, require_identity(gate, f"{expected_gate} gate"), f"{expected_gate} gate")
     completed = parse_time(gate.get("completed_at"), f"{expected_gate}.completed_at", now)
     if expected_gate in {"codex", "github", "clean_machine"} and completed + CLOCK_SKEW < candidate_time:
         raise VerificationError(f"{expected_gate} gate predates candidate")
     checks = gate.get("checks")
-    required = GATE_CHECKS[expected_gate]
-    if not isinstance(checks, dict) or set(checks) != required or any(checks[name] is not True for name in required):
-        raise VerificationError(f"{expected_gate} gate required checks are not exactly true")
     if expected_gate == "clean_machine":
+        required = CLEAN_MACHINE_CHECKS
+        if not isinstance(checks, dict) or set(checks) != required:
+            raise VerificationError("clean_machine gate does not cover the documented matrix")
         guest = gate.get("guest")
         if not isinstance(guest, dict) or guest.get("gatekeeper_enabled") is not True or guest.get("architecture") != "arm64":
             raise VerificationError("clean_machine guest evidence is invalid")
+        reviewer = gate.get("reviewer")
+        if (
+            not isinstance(reviewer, dict)
+            or set(reviewer) != {"name", "identity", "independent"}
+            or not isinstance(reviewer.get("name"), str)
+            or not reviewer["name"].strip()
+            or not isinstance(reviewer.get("identity"), str)
+            or not reviewer["identity"].strip()
+            or reviewer.get("independent") is not True
+        ):
+            raise VerificationError("clean_machine reviewer identity is invalid")
+        manifest_reference = gate.get("evidence_manifest")
+        if (
+            not isinstance(manifest_reference, dict)
+            or set(manifest_reference) != {"path", "sha256"}
+            or not HEX64.fullmatch(manifest_reference.get("sha256", ""))
+        ):
+            raise VerificationError("clean_machine evidence manifest reference is invalid")
+        manifest_path = resolve_relative(path.parent, manifest_reference.get("path"), "clean_machine.evidence_manifest.path")
+        if digest(manifest_path, "clean_machine evidence manifest") != manifest_reference["sha256"]:
+            raise VerificationError("clean_machine evidence manifest digest mismatch")
+        manifest = load_json(manifest_path, "clean_machine evidence manifest")
+        manifest_checks = manifest.get("checks")
+        if (
+            manifest.get("schema_version") != 1
+            or manifest.get("kind") != "patchwright.clean-machine-evidence-manifest"
+            or not isinstance(manifest_checks, dict)
+            or set(manifest_checks) != required
+        ):
+            raise VerificationError("clean_machine evidence manifest is incomplete")
+        for name in required:
+            check = checks[name]
+            if not isinstance(check, dict) or set(check) != {"status", "evidence"} or check.get("status") != "pass":
+                raise VerificationError(f"clean_machine check is invalid: {name}")
+            evidence = check.get("evidence")
+            if (
+                not isinstance(evidence, dict)
+                or set(evidence) != {"path", "sha256"}
+                or not HEX64.fullmatch(evidence.get("sha256", ""))
+                or manifest_checks[name] != evidence
+            ):
+                raise VerificationError(f"clean_machine evidence binding is invalid: {name}")
+            check_path = resolve_relative(path.parent, evidence["path"], f"clean_machine.checks.{name}.evidence.path")
+            if digest(check_path, f"clean_machine check evidence {name}") != evidence["sha256"]:
+                raise VerificationError(f"clean_machine check evidence digest mismatch: {name}")
+    else:
+        required = GATE_CHECKS[expected_gate]
+        if not isinstance(checks, dict) or set(checks) != required or any(checks[name] is not True for name in required):
+            raise VerificationError(f"{expected_gate} gate required checks are not exactly true")
     gate_digest = digest(path, f"{expected_gate} gate")
     after = regular_file(path, f"{expected_gate} gate")
     if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
@@ -401,6 +482,11 @@ def verify_candidate(candidate_path: Path, repo: Path, now: datetime) -> tuple[d
         raise VerificationError("assembly is not bound to post-signing compliance")
     build_metadata = load_json(evidence_paths["build_metadata"], "build metadata")
     compare_identity(identity, require_identity(build_metadata, "build metadata"), "build metadata")
+    if build_metadata.get("dirty") is not False:
+        raise VerificationError("build metadata must record dirty=false")
+    source_archive = resolve_relative(release_root, identity["source_archive_path"], "source_archive_path")
+    if digest(source_archive, "source archive") != identity["source_archive_sha256"]:
+        raise VerificationError("source archive digest does not match candidate")
     secret_scan = load_json(evidence_paths["secret_scan"], "secret scan evidence")
     if secret_scan.get("schema_version") != 1 or secret_scan.get("clean") is not True or secret_scan.get("findings") != []:
         raise VerificationError("secret scan evidence is not clean")
@@ -408,6 +494,7 @@ def verify_candidate(candidate_path: Path, repo: Path, now: datetime) -> tuple[d
         notary = load_json(evidence_paths[evidence_key], f"{kind} notary evidence")
         if notary.get("schema_version") != 1 or notary.get("kind") != kind or notary.get("status") != "Accepted" or notary.get("stapled") is not True or notary.get("stapler_validated") is not True or not isinstance(notary.get("request_id"), str) or not notary["request_id"]:
             raise VerificationError(f"{kind} notary evidence is not accepted and stapled")
+        verify_notary_summary(notary.get("log_summary"), kind)
         if kind == "dmg" and notary.get("final_sha256") != identity["artifact_sha256"]:
             raise VerificationError("DMG notary evidence does not bind the final artifact")
     distribution = load_json(evidence_paths["distribution"], "distribution evidence")
@@ -471,6 +558,23 @@ def verify_candidate(candidate_path: Path, repo: Path, now: datetime) -> tuple[d
         raise VerificationError("candidate tag is absent") from error
     if tagged != identity["git_commit"]:
         raise VerificationError("candidate tag does not resolve to candidate commit")
+    source_check = subprocess.run(
+        [
+            str(Path(__file__).with_name("verify_release_source.py")),
+            "--repo", str(repo_path),
+            "--commit", identity["git_commit"],
+            "--tag", identity["tag"],
+            "--source-archive", str(source_archive),
+            "--source-archive-sha256", identity["source_archive_sha256"],
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if source_check.returncode != 0:
+        detail = source_check.stderr.strip().removeprefix("release source verification failed: ")
+        raise VerificationError(detail or "final release source verification failed")
     candidate["_asset_relatives"] = asset_relatives
     candidate["_asset_hashes"] = asset_hashes
     candidate["_asset_sizes"] = asset_sizes
@@ -531,6 +635,9 @@ def main() -> int:
         for name, path in {**package_gate_paths, **external_gate_paths}.items():
             gate, gate_hash = verify_gate(path, name, identity, now, created)
             gate_summaries[name] = {"status": gate["status"], "completed_at": gate["completed_at"], "checks": gate["checks"]}
+            if name == "clean_machine":
+                gate_summaries[name]["reviewer"] = gate["reviewer"]
+                gate_summaries[name]["evidence_manifest"] = gate["evidence_manifest"]
             evidence_hashes[name] = gate_hash
         requested_output = arguments.output_dir
         if requested_output.exists() or requested_output.is_symlink():
@@ -572,8 +679,18 @@ def main() -> int:
         assets.append({"name": evidence_output.name, "path": evidence_output.name, "sha256": digest(evidence_output, "release evidence"), "size": evidence_output.stat().st_size, "media_type": "application/json"})
         asset_output = output / "release-assets.json"
         write_json(asset_output, {"schema_version": 1, "kind": "patchwright.release-assets", "identity": identity, "assets": assets})
+        promotion_manifest_output = output / "promotion-manifest.json"
+        write_json(promotion_manifest_output, {
+            "schema_version": 1,
+            "kind": "patchwright.promotion-manifest",
+            "identity": identity,
+            "candidate_sha256": digest(arguments.candidate, "candidate manifest"),
+            "evidence_sha256": evidence_hashes,
+            "release_evidence_sha256": digest(evidence_output, "release evidence"),
+            "release_assets_sha256": digest(asset_output, "release asset manifest"),
+        })
         readiness_output = output / "promotion-readiness.json"
-        write_json(readiness_output, {"schema_version": 1, "kind": "patchwright.promotion-readiness", "ready": True, "identity": identity, "evidence_sha256": evidence_hashes, "release_assets_sha256": digest(asset_output, "release asset manifest")})
+        write_json(readiness_output, {"schema_version": 1, "kind": "patchwright.promotion-readiness", "ready": True, "identity": identity, "evidence_sha256": evidence_hashes, "release_assets_sha256": digest(asset_output, "release asset manifest"), "promotion_manifest_sha256": digest(promotion_manifest_output, "promotion manifest")})
         os.rename(temporary_output, resolved_output)
         temporary_output = None
         print(f"PATCHWRIGHT_PROMOTION_READINESS={resolved_output / readiness_output.name}\nPATCHWRIGHT_RELEASE_ASSET_MANIFEST={resolved_output / asset_output.name}\nPATCHWRIGHT_STATUS=promoted-release")

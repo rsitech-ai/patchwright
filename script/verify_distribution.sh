@@ -2,8 +2,10 @@
 set -euo pipefail
 
 DMG_PATH="${1:?notarized DMG required}"
+CHECKSUM_PATH="${2:?existing checksum sidecar required}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-[[ -f "$DMG_PATH" && "$DMG_PATH" == *.dmg ]] || { echo "distribution verification failed: invalid DMG path" >&2; exit 65; }
+[[ -f "$DMG_PATH" && ! -L "$DMG_PATH" && "$DMG_PATH" == *.dmg ]] || { echo "distribution verification failed: invalid DMG path" >&2; exit 65; }
+"$ROOT_DIR/script/verify_checksum_sidecar.py" --artifact "$DMG_PATH" --sidecar "$CHECKSUM_PATH"
 /usr/bin/codesign --verify --verbose=2 "$DMG_PATH"
 xcrun stapler validate "$DMG_PATH"
 /usr/sbin/spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG_PATH"
@@ -19,5 +21,4 @@ if /usr/bin/xattr -lr "$MOUNT/Patchwright.app" 2>/dev/null | grep -Eq 'com\.appl
   echo "distribution verification failed: forbidden xattr" >&2
   exit 65
 fi
-shasum -a 256 "$DMG_PATH" >"$DMG_PATH.sha256"
 echo "notarized distribution verified: $DMG_PATH"
