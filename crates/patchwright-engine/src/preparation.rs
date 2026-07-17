@@ -2,7 +2,7 @@ use crate::{EventStore, PreparationClaimOutcome};
 use chrono::{Duration, Utc};
 use patchwright_core::{
     ActionFingerprint, ActionFingerprintDraft, Approval, ApprovalClass, Capability, Policy,
-    PolicyDecision, RepositoryBindingId, TaskId, TaskState,
+    PolicyDecision, RepositoryBindingId, TaskContract, TaskId, TaskState,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -22,6 +22,7 @@ pub struct PreparationPreview {
     pub invalidation_generation: u64,
     pub policy_sha256: String,
     pub instruction_sha256: String,
+    pub contract: TaskContract,
     pub fingerprint: ActionFingerprint,
 }
 
@@ -36,6 +37,7 @@ struct PreparationPayload<'a> {
     worktree_path: &'a str,
     branch: &'a str,
     invalidation_generation: u64,
+    contract_sha256: &'a str,
 }
 
 pub fn preview_preparation(
@@ -84,6 +86,8 @@ pub fn preview_preparation(
         &serde_json::to_vec(contract.instruction_digests())
             .map_err(|_| PreparationError::Serialization)?,
     );
+    let contract_sha256 =
+        digest(&serde_json::to_vec(&contract).map_err(|_| PreparationError::Serialization)?);
     let payload_sha256 = digest(
         &serde_json::to_vec(&PreparationPayload {
             task_id,
@@ -94,6 +98,7 @@ pub fn preview_preparation(
             worktree_path: &worktree_path,
             branch: &branch,
             invalidation_generation,
+            contract_sha256: &contract_sha256,
         })
         .map_err(|_| PreparationError::Serialization)?,
     );
@@ -123,6 +128,7 @@ pub fn preview_preparation(
         invalidation_generation,
         policy_sha256,
         instruction_sha256,
+        contract,
         fingerprint,
     })
 }

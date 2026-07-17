@@ -8,6 +8,7 @@ mod github;
 mod jobs;
 mod lease;
 mod monitoring;
+mod planning;
 mod preparation;
 mod repository;
 mod rpc;
@@ -35,6 +36,7 @@ pub use monitoring::{
     CIState, Mergeability, MonitorOutcome, MonitorRecord, MonitorState, MonitoringError,
     RemoteObservation, ReviewState,
 };
+pub use planning::{PlanningError, RepositoryPlanner};
 pub use preparation::{
     PreparationError, PreparationPreview, approve_preparation, authorize_preparation,
     preview_preparation,

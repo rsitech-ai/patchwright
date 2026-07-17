@@ -11,6 +11,7 @@ public struct PreparationPreview: Codable, Equatable, Identifiable, Sendable {
     public let invalidationGeneration: UInt64
     public let policySha256: String
     public let instructionSha256: String
+    public let contract: TaskContract
     public let fingerprint: DeliveryFingerprint
 
     public var id: UUID { taskId }

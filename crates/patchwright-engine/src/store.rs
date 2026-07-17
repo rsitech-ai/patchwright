@@ -686,20 +686,7 @@ impl EventStore {
             .collect::<Result<Vec<_>>>()
     }
 
-    pub fn create_converted_task(
-        &self,
-        task: &Task,
-        contract: &TaskContract,
-        source_key: &str,
-    ) -> Result<(Task, bool)> {
-        anyhow::ensure!(
-            task.id == contract.task_id(),
-            "task contract ID does not match"
-        );
-        anyhow::ensure!(
-            task.repository_binding_id == Some(contract.repository_binding_id()),
-            "task contract binding does not match"
-        );
+    pub fn create_converted_task(&self, task: &Task, source_key: &str) -> Result<(Task, bool)> {
         anyhow::ensure!(!source_key.is_empty(), "source key is required");
         let transaction = self.connection.unchecked_transaction()?;
         let existing_task_id: Option<String> = transaction
@@ -729,17 +716,6 @@ impl EventStore {
             "INSERT INTO task_events(task_id, summary, payload, occurred_at)
              VALUES (?1, 'task created from GitHub snapshot', ?2, ?3)",
             params![task.id.to_string(), task_payload, occurred_at],
-        )?;
-        transaction.execute(
-            "INSERT INTO task_contracts(task_id, binding_id, version, payload, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                task.id.to_string(),
-                contract.repository_binding_id().to_string(),
-                contract.version(),
-                serde_json::to_string(contract)?,
-                occurred_at,
-            ],
         )?;
         transaction.execute(
             "INSERT INTO task_sources(source_key, task_id, created_at) VALUES (?1, ?2, ?3)",
