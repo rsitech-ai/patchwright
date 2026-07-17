@@ -6,7 +6,8 @@ use patchwright_core::{
     TaskSource, TaskState, VerificationCommand,
 };
 use patchwright_engine::{
-    CancellationState, EventStore, Job, JobCheckpoint, JobKind, JobState, TaskCheckpoint,
+    CancellationState, EventStore, Job, JobCheckpoint, JobKind, JobState, PreparationClaimOutcome,
+    TaskCheckpoint,
 };
 use rusqlite::{Connection, params};
 use tempfile::tempdir;
@@ -74,7 +75,10 @@ fn legacy_database_migrates_without_losing_existing_tasks() {
         .unwrap()
         .unwrap();
     assert_eq!(loaded.state, TaskState::AwaitingPreparationApproval);
-    assert_eq!(store.schema_versions().unwrap(), vec![1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(
+        store.schema_versions().unwrap(),
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    );
     drop(store);
 
     let connection = Connection::open(database).unwrap();
@@ -101,6 +105,9 @@ fn legacy_database_migrates_without_losing_existing_tasks() {
         "task_checkpoints",
         "codex_sessions",
         "codex_events",
+        "preparation_claims",
+        "verification_evidence",
+        "github_webhook_deliveries",
     ] {
         let present: bool = connection
             .query_row(
@@ -111,6 +118,129 @@ fn legacy_database_migrates_without_losing_existing_tasks() {
             .unwrap();
         assert!(present, "missing migrated table {table}");
     }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn preparation_approval_claim_is_atomic_single_use_and_short_lived() {
+    let directory = tempdir().unwrap();
+    let store = EventStore::open(&directory.path().join("events.sqlite")).unwrap();
+    let task_id = patchwright_core::TaskId::new();
+    let fingerprint = ActionFingerprint::try_from(ActionFingerprintDraft {
+        task_id,
+        github_repository_id: 42,
+        repository_full_name: "octocat/hello".into(),
+        action_kind: Capability::PrepareWorktree.action_kind().into(),
+        pull_request_number: None,
+        branch: Some(format!("patchwright/{task_id}")),
+        head_sha: Some("a".repeat(40)),
+        base_sha: None,
+        payload_sha256: "c".repeat(64),
+        policy_sha256: "d".repeat(64),
+        instruction_sha256: "e".repeat(64),
+        invalidation_generation: 1,
+    })
+    .unwrap();
+    let approval = Approval::new(
+        ApprovalClass::Preparation,
+        Capability::PrepareWorktree,
+        fingerprint.clone(),
+        "owner",
+        now(),
+        now() + Duration::minutes(5),
+    )
+    .unwrap();
+    store.save_approval(&approval).unwrap();
+
+    assert_eq!(
+        store
+            .claim_preparation(approval.id(), task_id, &fingerprint.digest_sha256(), now(),)
+            .unwrap(),
+        PreparationClaimOutcome::Claimed
+    );
+    assert_eq!(
+        store
+            .claim_preparation(approval.id(), task_id, &fingerprint.digest_sha256(), now(),)
+            .unwrap(),
+        PreparationClaimOutcome::AlreadyClaimed
+    );
+
+    let wrong_fingerprint = ActionFingerprint::try_from(ActionFingerprintDraft {
+        payload_sha256: "f".repeat(64),
+        ..ActionFingerprintDraft {
+            task_id,
+            github_repository_id: 42,
+            repository_full_name: "octocat/hello".into(),
+            action_kind: Capability::PrepareWorktree.action_kind().into(),
+            pull_request_number: None,
+            branch: Some(format!("patchwright/{task_id}")),
+            head_sha: Some("a".repeat(40)),
+            base_sha: None,
+            payload_sha256: "c".repeat(64),
+            policy_sha256: "d".repeat(64),
+            instruction_sha256: "e".repeat(64),
+            invalidation_generation: 1,
+        }
+    })
+    .unwrap();
+    let wrong = Approval::new(
+        ApprovalClass::Preparation,
+        Capability::PrepareWorktree,
+        wrong_fingerprint.clone(),
+        "owner",
+        now(),
+        now() + Duration::minutes(5),
+    )
+    .unwrap();
+    store.save_approval(&wrong).unwrap();
+    assert_eq!(
+        store
+            .claim_preparation(
+                wrong.id(),
+                task_id,
+                &wrong_fingerprint.digest_sha256(),
+                now(),
+            )
+            .unwrap(),
+        PreparationClaimOutcome::TaskInProgress
+    );
+
+    store
+        .complete_preparation_claim(approval.id(), "failed")
+        .unwrap();
+    assert_eq!(
+        store
+            .claim_preparation(
+                wrong.id(),
+                task_id,
+                &wrong_fingerprint.digest_sha256(),
+                now(),
+            )
+            .unwrap(),
+        PreparationClaimOutcome::Claimed
+    );
+
+    let expired = Approval::new(
+        ApprovalClass::Preparation,
+        Capability::PrepareWorktree,
+        fingerprint.clone(),
+        "owner",
+        now(),
+        now() + Duration::minutes(1),
+    )
+    .unwrap();
+    store.save_approval(&expired).unwrap();
+    assert_eq!(
+        store
+            .claim_preparation(
+                expired.id(),
+                task_id,
+                &fingerprint.digest_sha256(),
+                now() + Duration::minutes(2),
+            )
+            .unwrap(),
+        PreparationClaimOutcome::ApprovalUnavailable
+    );
 }
 
 #[test]
@@ -153,6 +283,8 @@ fn bindings_contracts_and_approval_action_digests_survive_restart() {
         acceptance_criteria: vec!["Restart passes".into()],
         base_sha: Some("a".repeat(40)),
         head_sha: None,
+        source_sha256: "b".repeat(64),
+        repository_sha256: "c".repeat(64),
         instruction_digests: vec![InstructionDigest::new("AGENTS.md", "d".repeat(64), 1).unwrap()],
         verification_commands: vec![VerificationCommand::new("cargo", ["test"]).unwrap()],
         required_capabilities: vec![Capability::PushBranch],
@@ -201,6 +333,53 @@ fn bindings_contracts_and_approval_action_digests_survive_restart() {
         store.approval_action_digest(approval.id()).unwrap(),
         Some(fingerprint.digest_sha256())
     );
+}
+
+#[test]
+fn persisted_task_contracts_revalidate_the_verification_boundary_on_load() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("events.sqlite");
+    let store = EventStore::open(&database).unwrap();
+    let binding = binding();
+    store.save_repository_binding(&binding).unwrap();
+    let task = Task::new("Durable validation", "/tmp/repo").unwrap();
+    let contract = TaskContract::try_from(TaskContractDraft {
+        task_id: task.id,
+        source: TaskSource::LocalRequest,
+        repository_binding_id: binding.id(),
+        goal: "Reject corrupt persisted commands".into(),
+        acceptance_criteria: vec!["Reload remains fail closed".into()],
+        base_sha: Some("a".repeat(40)),
+        head_sha: None,
+        source_sha256: "b".repeat(64),
+        repository_sha256: "c".repeat(64),
+        instruction_digests: vec![
+            InstructionDigest::new("resolvedInstructions", "d".repeat(64), 0).unwrap(),
+        ],
+        verification_commands: vec![VerificationCommand::new("cargo", ["test"]).unwrap()],
+        required_capabilities: Vec::new(),
+        risk: RiskClass::Moderate,
+        sensitive_paths: Vec::new(),
+        dependencies: Vec::new(),
+    })
+    .unwrap();
+    store.save_task_contract(&contract).unwrap();
+    drop(store);
+
+    let mut payload = serde_json::to_value(&contract).unwrap();
+    payload["verificationCommands"] = serde_json::json!([]);
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "UPDATE task_contracts SET payload = ?1 WHERE task_id = ?2",
+            rusqlite::params![payload.to_string(), task.id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let reopened = EventStore::open(&database).unwrap();
+    let error = format!("{:#}", reopened.task_contract(task.id).unwrap_err());
+    assert!(error.contains("verificationCommands"), "{error}");
 }
 
 #[test]

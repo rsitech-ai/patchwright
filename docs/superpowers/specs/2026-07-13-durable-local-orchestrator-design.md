@@ -161,7 +161,7 @@ Every Patchwright approval records:
 
 - capability and typed action preview
 - repository and task
-- relevant branch, PR, head SHA, and base SHA
+- relevant branch and PR identity, plus head/base SHAs only when the GitHub mutation atomically consumes them
 - approver and timestamp
 - short expiration
 - policy and instruction hashes
@@ -173,14 +173,15 @@ Merge approval binds to:
 
 - repository and installation
 - PR number
-- exact head and base SHAs
+- exact head SHA consumed atomically by GitHub's merge endpoint
+- configured base-branch identity (GitHub does not expose an atomic expected-base-SHA merge parameter)
 - merge method
 - required-check snapshot
 - review-decision snapshot
 - approval identity and expiration
 - idempotency key
 
-Immediately before execution, Patchwright re-fetches the PR, checks, reviews, branch rules, and mergeability. It rejects the approval if any bound value changed, required checks regressed, reviews changed, conflicts appeared, or policy no longer permits the merge.
+Before the merge approval gate, Patchwright refreshes the PR, checks, reviews, branch rules, and mergeability. It rejects stale monitored evidence if the head or base changed, required checks regressed, reviews changed, conflicts appeared, or policy no longer permits the merge. The merge mutation itself carries the exact approved head SHA; the base is branch-identity-bound because GitHub offers no atomic expected-base-SHA parameter.
 
 Patchwright never uses administrator bypass. If the repository requires GitHub's native merge queue, Patchwright enqueues the approved PR and monitors the merge-group result. Otherwise it uses the merge endpoint with the expected head SHA. A successful response is recorded with the remote merge SHA before the next queue item may advance.
 

@@ -24,15 +24,20 @@ mkdir -p "$OUTPUT_ROOT/evidence"
 
 write_metadata() {
   [[ -d "$APP_PATH" ]] || { echo "app path required for metadata phase" >&2; exit 64; }
-  local version build commit dirty
+  local version build commit dirty source_archive source_archive_sha256
   version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist")
   build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Contents/Info.plist")
   commit=$(git -C "$ROOT_DIR" rev-parse HEAD)
   dirty=false; [[ -z "$(git -C "$ROOT_DIR" status --porcelain)" ]] || dirty=true
+  source_archive="$OUTPUT_ROOT/reproducibility/source.tar.gz"
+  [[ -f "$source_archive" && ! -L "$source_archive" ]] \
+    || { echo "source archive must be a regular non-symlink file" >&2; exit 65; }
+  source_archive_sha256="$(shasum -a 256 "$source_archive" | awk '{print $1}')"
   jq -n --arg version "$version" --arg build "$build" --arg git_commit "$commit" \
     --arg tag "v$version" --arg artifact_filename "Patchwright-$version.dmg" \
     --arg artifact_sha256 "${PATCHWRIGHT_ARTIFACT_SHA256:-}" --argjson dirty "$dirty" \
-    '{schema_version:1,version:$version,build:$build,git_commit:$git_commit,tag:$tag,artifact_filename:$artifact_filename,artifact_sha256:$artifact_sha256,dirty:$dirty,architecture:"arm64",minimum_macos:"26.0"}' \
+    --arg source_archive_path "reproducibility/source.tar.gz" --arg source_archive_sha256 "$source_archive_sha256" \
+    '{schema_version:1,version:$version,build:$build,git_commit:$git_commit,tag:$tag,artifact_filename:$artifact_filename,artifact_sha256:$artifact_sha256,dirty:$dirty,source_archive_path:$source_archive_path,source_archive_sha256:$source_archive_sha256,architecture:"arm64",minimum_macos:"26.0"}' \
     >"$OUTPUT_ROOT/evidence/build-metadata.json"
   "$ROOT_DIR/script/generate_symlink_manifest.py" --root "$OUTPUT_ROOT" --output "$OUTPUT_ROOT/evidence/SYMLINKS.json"
 }

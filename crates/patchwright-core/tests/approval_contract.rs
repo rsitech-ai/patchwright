@@ -40,9 +40,10 @@ fn fingerprint_for(capability: Capability) -> ActionFingerprint {
 }
 
 #[test]
-fn approvals_retain_four_separate_authority_classes() {
+fn approvals_retain_separate_authority_classes() {
     let current = now();
     for (class, capability) in [
+        (ApprovalClass::Preparation, Capability::PrepareWorktree),
         (ApprovalClass::CodexRuntime, Capability::RunKnownCommand),
         (ApprovalClass::LocalCapability, Capability::AccessNetwork),
         (ApprovalClass::GitHubDelivery, Capability::PushBranch),
@@ -60,6 +61,35 @@ fn approvals_retain_four_separate_authority_classes() {
         assert_eq!(approval.class(), class);
         assert_eq!(approval.capability(), capability);
     }
+}
+
+#[test]
+fn preparation_authority_is_distinct_from_runtime_and_delivery() {
+    let fingerprint = fingerprint_for(Capability::PrepareWorktree);
+    let now = Utc::now();
+    let runtime = Approval::new(
+        ApprovalClass::CodexRuntime,
+        Capability::PrepareWorktree,
+        fingerprint.clone(),
+        "operator",
+        now,
+        now + Duration::minutes(5),
+    );
+    let delivery = Approval::new(
+        ApprovalClass::GitHubDelivery,
+        Capability::PrepareWorktree,
+        fingerprint.clone(),
+        "operator",
+        now,
+        now + Duration::minutes(5),
+    );
+
+    assert!(runtime.is_err());
+    assert!(delivery.is_err());
+    assert!(matches!(
+        Policy::default().authorize(Capability::PrepareWorktree, &fingerprint, None, now),
+        PolicyDecision::ApprovalRequired(_)
+    ));
 }
 
 #[test]

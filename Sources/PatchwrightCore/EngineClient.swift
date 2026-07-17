@@ -4,12 +4,14 @@ import Network
 public enum EngineError: Error, LocalizedError, Sendable {
     case connectionFailed(String)
     case invalidResponse
+    case timedOut
     case remote(code: Int, message: String)
 
     public var errorDescription: String? {
         switch self {
         case .connectionFailed(let message): message
         case .invalidResponse: "The engine returned an invalid response."
+        case .timedOut: "The engine did not respond before the request timed out."
         case .remote(_, let message): message
         }
     }
@@ -148,10 +150,44 @@ public extension EngineServing {
         )
     }
 
-    func prepareTask(taskID: UUID) async throws -> EngineeringTask {
+    func taskContract(taskID: UUID) async throws -> TaskContract {
+        try await call(
+            method: "task.contract",
+            params: ["taskId": taskID.uuidString],
+            as: TaskContract.self
+        )
+    }
+
+    func previewPreparation(taskID: UUID) async throws -> PreparationPreview {
+        try await call(
+            method: "task.preparation.preview",
+            params: ["taskId": taskID.uuidString],
+            as: PreparationPreview.self
+        )
+    }
+
+    func approvePreparation(
+        _ preview: PreparationPreview,
+        approvedBy: String
+    ) async throws -> PreparationApproval {
+        try await call(
+            method: "task.preparation.approve",
+            params: ["preview": try encodeRPCParameter(preview), "approvedBy": approvedBy],
+            as: PreparationApproval.self
+        )
+    }
+
+    func prepareTask(
+        preview: PreparationPreview,
+        approvalID: UUID
+    ) async throws -> EngineeringTask {
         try await call(
             method: "task.prepare",
-            params: ["taskId": taskID.uuidString],
+            params: [
+                "taskId": preview.taskId.uuidString,
+                "preview": try encodeRPCParameter(preview),
+                "approvalId": approvalID.uuidString,
+            ],
             as: EngineeringTask.self
         )
     }
@@ -267,7 +303,7 @@ struct JSONLineFramer: Sendable {
     }
 
     mutating func append(_ chunk: Data) throws -> Data? {
-        guard buffer.count <= maximumBytes - chunk.count else {
+        guard chunk.count <= maximumBytes, buffer.count <= maximumBytes - chunk.count else {
             throw EngineError.invalidResponse
         }
         buffer.append(chunk)
@@ -278,8 +314,22 @@ struct JSONLineFramer: Sendable {
 
 public actor UnixEngineClient: EngineServing {
     private let socketPath: String
+    private let timeout: Duration
+    private let longRunningTimeout: Duration
+    private let maximumResponseBytes: Int
 
-    public init(socketPath: String) { self.socketPath = socketPath }
+    public init(
+        socketPath: String,
+        timeout: Duration = .seconds(10),
+        // Planning emits at most two verification commands; the engine permits five minutes each.
+        longRunningTimeout: Duration = .seconds(11 * 60),
+        maximumResponseBytes: Int = 64 * 1_024 * 1_024
+    ) {
+        self.socketPath = socketPath
+        self.timeout = max(timeout, .milliseconds(1))
+        self.longRunningTimeout = max(longRunningTimeout, .milliseconds(1))
+        self.maximumResponseBytes = max(1, maximumResponseBytes)
+    }
 
     public func call<Result: Decodable & Sendable>(
         method: String,
@@ -288,44 +338,141 @@ public actor UnixEngineClient: EngineServing {
     ) async throws -> Result {
         var payload = try JSONEncoder().encode(RPCRequest(id: UUID().uuidString, method: method, params: params))
         payload.append(0x0A)
-        let data = try await exchange(payload)
-        let response = try JSONDecoder.patchwright.decode(RPCResponse<Result>.self, from: data)
+        let requestTimeout = method == "task.readyForDelivery" ? longRunningTimeout : timeout
+        let data = try await exchange(payload, timeout: requestTimeout)
+        let response: RPCResponse<Result>
+        do {
+            response = try JSONDecoder.patchwright.decode(RPCResponse<Result>.self, from: data)
+        } catch {
+            throw EngineError.invalidResponse
+        }
         if let result = response.result { return result }
         if let error = response.error { throw EngineError.remote(code: error.code, message: error.message) }
         throw EngineError.invalidResponse
     }
 
-    private func exchange(_ payload: Data) async throws -> Data {
+    private func exchange(_ payload: Data, timeout: Duration) async throws -> Data {
         let path = socketPath
-        return try await withCheckedThrowingContinuation { continuation in
-            let connection = NWConnection(to: .unix(path: path), using: .tcp)
-            let queue = DispatchQueue(label: "ai.patchwright.engine-client")
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    connection.stateUpdateHandler = nil
-                    connection.send(content: payload, completion: .contentProcessed { error in
-                        if let error {
-                            connection.cancel()
-                            continuation.resume(throwing: EngineError.connectionFailed(error.localizedDescription))
-                            return
-                        }
-                        receiveJSONLine(
-                            connection: connection,
-                            framer: JSONLineFramer(maximumBytes: 64 * 1_024 * 1_024)
-                        ) { result in
-                            connection.cancel()
-                            continuation.resume(with: result)
-                        }
-                    })
-                case .failed(let error):
-                    connection.cancel()
-                    continuation.resume(throwing: EngineError.connectionFailed(error.localizedDescription))
-                default: break
+        let maximumResponseBytes = maximumResponseBytes
+        let operation = EngineExchangeOperation()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                operation.install(continuation)
+                guard !Task.isCancelled else {
+                    operation.finish(.failure(CancellationError()))
+                    return
                 }
+                let connection = NWConnection(to: .unix(path: path), using: .tcp)
+                guard operation.attach(connection) else { return }
+                let queue = DispatchQueue(label: "ai.patchwright.engine-client")
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        connection.stateUpdateHandler = nil
+                        connection.send(content: payload, completion: .contentProcessed { error in
+                            if let error {
+                                operation.finish(
+                                    .failure(EngineError.connectionFailed(error.localizedDescription))
+                                )
+                                return
+                            }
+                            receiveJSONLine(
+                                connection: connection,
+                                framer: JSONLineFramer(maximumBytes: maximumResponseBytes)
+                            ) { result in
+                                operation.finish(result)
+                            }
+                        })
+                    case .failed(let error):
+                        operation.finish(.failure(EngineError.connectionFailed(error.localizedDescription)))
+                    case .cancelled:
+                        operation.finish(
+                            .failure(EngineError.connectionFailed("The engine connection was cancelled."))
+                        )
+                    case .setup, .preparing, .waiting:
+                        break
+                    @unknown default:
+                        break
+                    }
+                }
+                operation.attachTimeoutTask(Task {
+                    do {
+                        try await Task.sleep(for: timeout)
+                    } catch {
+                        return
+                    }
+                    operation.finish(.failure(EngineError.timedOut))
+                })
+                connection.start(queue: queue)
             }
-            connection.start(queue: queue)
+        } onCancel: {
+            operation.finish(.failure(CancellationError()))
         }
+    }
+}
+
+private final class EngineExchangeOperation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Data, Error>?
+    private var connection: NWConnection?
+    private var timeoutTask: Task<Void, Never>?
+    private var pendingResult: Result<Data, Error>?
+    private var finished = false
+
+    func install(_ continuation: CheckedContinuation<Data, Error>) {
+        lock.lock()
+        if let pendingResult {
+            lock.unlock()
+            continuation.resume(with: pendingResult)
+        } else {
+            self.continuation = continuation
+            lock.unlock()
+        }
+    }
+
+    func attach(_ connection: NWConnection) -> Bool {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            connection.cancel()
+            return false
+        }
+        self.connection = connection
+        lock.unlock()
+        return true
+    }
+
+    func attachTimeoutTask(_ task: Task<Void, Never>) {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            task.cancel()
+            return
+        }
+        timeoutTask = task
+        lock.unlock()
+    }
+
+    func finish(_ result: Result<Data, Error>) {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        let continuation = continuation
+        let connection = connection
+        let timeoutTask = timeoutTask
+        self.continuation = nil
+        self.connection = nil
+        self.timeoutTask = nil
+        if continuation == nil { pendingResult = result }
+        lock.unlock()
+
+        timeoutTask?.cancel()
+        connection?.stateUpdateHandler = nil
+        connection?.cancel()
+        continuation?.resume(with: result)
     }
 }
 

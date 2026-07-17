@@ -445,9 +445,7 @@ impl InstructionDigest {
         let source = source.into();
         nonempty(&source, "instructionSource")?;
         let sha256 = sha256.into();
-        if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(ContractError::InvalidField("instructionSha256"));
-        }
+        validate_sha256(&sha256, "instructionSha256")?;
         Ok(Self {
             source,
             sha256,
@@ -471,11 +469,28 @@ impl InstructionDigest {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationCommand {
     program: String,
     args: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VerificationCommandWire {
+    program: String,
+    args: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for VerificationCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = VerificationCommandWire::deserialize(deserializer)?;
+        Self::new(wire.program, wire.args).map_err(serde::de::Error::custom)
+    }
 }
 
 impl VerificationCommand {
@@ -575,6 +590,8 @@ pub struct TaskContractDraft {
     pub acceptance_criteria: Vec<String>,
     pub base_sha: Option<String>,
     pub head_sha: Option<String>,
+    pub source_sha256: String,
+    pub repository_sha256: String,
     pub instruction_digests: Vec<InstructionDigest>,
     pub verification_commands: Vec<VerificationCommand>,
     pub required_capabilities: Vec<Capability>,
@@ -583,7 +600,7 @@ pub struct TaskContractDraft {
     pub dependencies: Vec<TaskId>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskContract {
     version: u32,
@@ -594,6 +611,8 @@ pub struct TaskContract {
     acceptance_criteria: Vec<String>,
     base_sha: Option<String>,
     head_sha: Option<String>,
+    source_sha256: String,
+    repository_sha256: String,
     instruction_digests: Vec<InstructionDigest>,
     verification_commands: Vec<VerificationCommand>,
     required_capabilities: Vec<Capability>,
@@ -602,12 +621,66 @@ pub struct TaskContract {
     dependencies: Vec<TaskId>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TaskContractWire {
+    version: u32,
+    task_id: TaskId,
+    source: TaskSource,
+    repository_binding_id: RepositoryBindingId,
+    goal: String,
+    acceptance_criteria: Vec<String>,
+    base_sha: Option<String>,
+    head_sha: Option<String>,
+    source_sha256: String,
+    repository_sha256: String,
+    instruction_digests: Vec<InstructionDigest>,
+    verification_commands: Vec<VerificationCommand>,
+    required_capabilities: Vec<Capability>,
+    risk: RiskClass,
+    sensitive_paths: Vec<SensitivePath>,
+    dependencies: Vec<TaskId>,
+}
+
+impl<'de> Deserialize<'de> for TaskContract {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = TaskContractWire::deserialize(deserializer)?;
+        if wire.version != 1 {
+            return Err(serde::de::Error::custom(
+                "unsupported task contract version",
+            ));
+        }
+        Self::try_from(TaskContractDraft {
+            task_id: wire.task_id,
+            source: wire.source,
+            repository_binding_id: wire.repository_binding_id,
+            goal: wire.goal,
+            acceptance_criteria: wire.acceptance_criteria,
+            base_sha: wire.base_sha,
+            head_sha: wire.head_sha,
+            source_sha256: wire.source_sha256,
+            repository_sha256: wire.repository_sha256,
+            instruction_digests: wire.instruction_digests,
+            verification_commands: wire.verification_commands,
+            required_capabilities: wire.required_capabilities,
+            risk: wire.risk,
+            sensitive_paths: wire.sensitive_paths,
+            dependencies: wire.dependencies,
+        })
+        .map_err(serde::de::Error::custom)
+    }
+}
+
 impl TryFrom<TaskContractDraft> for TaskContract {
     type Error = ContractError;
 
     fn try_from(mut draft: TaskContractDraft) -> Result<Self, Self::Error> {
         let goal = draft.goal.trim().to_owned();
         nonempty(&goal, "goal")?;
+        draft.source = revalidate_task_source(draft.source)?;
         for criterion in &mut draft.acceptance_criteria {
             *criterion = criterion.trim().to_owned();
         }
@@ -622,6 +695,26 @@ impl TryFrom<TaskContractDraft> for TaskContract {
         if let Some(sha) = draft.head_sha.as_deref() {
             validate_git_sha(sha, "headSha")?;
         }
+        validate_sha256(&draft.source_sha256, "sourceSha256")?;
+        validate_sha256(&draft.repository_sha256, "repositorySha256")?;
+        if draft.verification_commands.is_empty() {
+            return Err(ContractError::InvalidField("verificationCommands"));
+        }
+        draft.instruction_digests = draft
+            .instruction_digests
+            .into_iter()
+            .map(|digest| InstructionDigest::new(digest.source, digest.sha256, digest.precedence))
+            .collect::<Result<Vec<_>, _>>()?;
+        draft.verification_commands = draft
+            .verification_commands
+            .into_iter()
+            .map(|command| VerificationCommand::new(command.program, command.args))
+            .collect::<Result<Vec<_>, _>>()?;
+        draft.sensitive_paths = draft
+            .sensitive_paths
+            .into_iter()
+            .map(|path| SensitivePath::new(path.path, path.reason))
+            .collect::<Result<Vec<_>, _>>()?;
         if let TaskSource::GitHubPullRequest(source) = &draft.source {
             if draft.base_sha.as_deref() != Some(source.base_sha.as_str())
                 || draft.head_sha.as_deref() != Some(source.head_sha.as_str())
@@ -644,6 +737,8 @@ impl TryFrom<TaskContractDraft> for TaskContract {
             acceptance_criteria: draft.acceptance_criteria,
             base_sha: draft.base_sha,
             head_sha: draft.head_sha,
+            source_sha256: draft.source_sha256,
+            repository_sha256: draft.repository_sha256,
             instruction_digests: draft.instruction_digests,
             verification_commands: draft.verification_commands,
             required_capabilities: draft.required_capabilities,
@@ -651,6 +746,32 @@ impl TryFrom<TaskContractDraft> for TaskContract {
             sensitive_paths: draft.sensitive_paths,
             dependencies: draft.dependencies,
         })
+    }
+}
+
+fn revalidate_task_source(source: TaskSource) -> Result<TaskSource, ContractError> {
+    match source {
+        TaskSource::LocalRequest => Ok(TaskSource::LocalRequest),
+        TaskSource::GitHubIssue(source) => TaskSource::github_issue(GitHubIssueSourceInput {
+            repository_id: source.repository_id,
+            repository_full_name: source.repository_full_name,
+            number: source.number,
+            html_url: source.html_url,
+            snapshot_at: source.snapshot_at,
+        }),
+        TaskSource::GitHubPullRequest(source) => {
+            TaskSource::github_pull_request(GitHubPullRequestSourceInput {
+                repository_id: source.repository_id,
+                repository_full_name: source.repository_full_name,
+                number: source.number,
+                html_url: source.html_url,
+                snapshot_at: source.snapshot_at,
+                base_ref: source.base_ref,
+                base_sha: source.base_sha,
+                head_ref: source.head_ref,
+                head_sha: source.head_sha,
+            })
+        }
     }
 }
 
@@ -693,6 +814,16 @@ impl TaskContract {
     #[must_use]
     pub fn head_sha(&self) -> Option<&str> {
         self.head_sha.as_deref()
+    }
+
+    #[must_use]
+    pub fn source_sha256(&self) -> &str {
+        &self.source_sha256
+    }
+
+    #[must_use]
+    pub fn repository_sha256(&self) -> &str {
+        &self.repository_sha256
     }
 
     #[must_use]
@@ -780,6 +911,13 @@ fn validate_https_url(value: &str, field: &'static str) -> Result<(), ContractEr
 
 fn validate_git_sha(value: &str, field: &'static str) -> Result<(), ContractError> {
     if !matches!(value.len(), 40 | 64) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ContractError::InvalidField(field));
+    }
+    Ok(())
+}
+
+fn validate_sha256(value: &str, field: &'static str) -> Result<(), ContractError> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(ContractError::InvalidField(field));
     }
     Ok(())

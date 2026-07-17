@@ -5,12 +5,7 @@ import Foundation
 public final class WorkspaceStore: ObservableObject {
     @Published public private(set) var connectionState: EngineConnectionState = .disconnected
     @Published public private(set) var tasks: [EngineeringTask] = []
-    @Published public var primarySelection: WorkspaceSection = .queue {
-        didSet {
-            guard primarySelection != oldValue else { return }
-            clearDetailSelection()
-        }
-    }
+    @Published public private(set) var primarySelection: WorkspaceSection = .queue
     @Published public var selectedTaskID: EngineeringTask.ID?
     @Published public var selectedRepositoryID: GitHubRepository.ID?
     @Published public var selectedWorkItemID: GitHubWorkItem.ID?
@@ -35,6 +30,9 @@ public final class WorkspaceStore: ObservableObject {
     @Published public private(set) var taskLifecycleBusyTaskIDs: Set<UUID> = []
     @Published public private(set) var taskLifecycleError: String?
     @Published public private(set) var worktreeByTask: [UUID: WorktreeInspection] = [:]
+    @Published public private(set) var taskContracts: [UUID: TaskContract] = [:]
+    @Published public private(set) var preparationPreviews: [UUID: PreparationPreview] = [:]
+    @Published public private(set) var preparationApprovals: [UUID: PreparationApproval] = [:]
     @Published public private(set) var repositorySnapshotByTask: [UUID: GitHubRepositorySnapshot] = [:]
     @Published public private(set) var deliveryPreviews: [UUID: DeliveryPreview] = [:]
     @Published public private(set) var deliveryApprovals: [UUID: DeliveryApproval] = [:]
@@ -48,6 +46,8 @@ public final class WorkspaceStore: ObservableObject {
     private let healthRetryDelay: Duration
     private let preferences: any WorkspacePreferencesPersisting
     private var preferencesWorkspaceID = "global"
+    private var detailSelectionGeneration: UInt64 = 0
+    private var healthRefreshGeneration: UInt64 = 0
 
     public init(
         engine: any EngineServing,
@@ -63,43 +63,69 @@ public final class WorkspaceStore: ObservableObject {
     }
 
     public func refreshHealth() async {
+        healthRefreshGeneration &+= 1
+        let generation = healthRefreshGeneration
         connectionState = .connecting
         var lastError: Error?
         for attempt in 0..<healthRetryAttempts {
             do {
                 let health = try await engine.call(method: "system.health", params: [:], as: HealthResponse.self)
+                guard generation == healthRefreshGeneration else { return }
                 connectionState = .connected(health.version)
-                await refreshTasks()
-                await refreshGitHub()
+                await refreshTasks(healthGeneration: generation)
+                await refreshGitHub(healthGeneration: generation)
                 return
             } catch {
+                guard generation == healthRefreshGeneration else { return }
                 lastError = error
                 if attempt < healthRetryAttempts - 1 { try? await Task.sleep(for: healthRetryDelay) }
             }
         }
+        guard generation == healthRefreshGeneration else { return }
         connectionState = .failed(lastError?.localizedDescription ?? "Engine unavailable")
     }
 
     public func refreshGitHub() async {
+        await refreshGitHub(healthGeneration: nil)
+    }
+
+    private func refreshGitHub(healthGeneration generation: UInt64?) async {
         do {
-            githubStatus = try await engine.call(method: "github.status", params: [:], as: GitHubStatus.self)
-            repositories = try await engine.call(method: "github.repositories", params: [:], as: [GitHubRepository].self)
-            githubWorkItems = try await engine.call(method: "github.queue", params: [:], as: [GitHubWorkItem].self)
-            if let decisions = try? await engine.call(
+            let status = try await engine.call(method: "github.status", params: [:], as: GitHubStatus.self)
+            let refreshedRepositories = try await engine.call(
+                method: "github.repositories", params: [:], as: [GitHubRepository].self
+            )
+            let workItems = try await engine.call(
+                method: "github.queue", params: [:], as: [GitHubWorkItem].self
+            )
+            let decisions = try? await engine.call(
                 method: "github.queue.decisions", params: [:], as: [PullRequestQueueDecision].self
-            ) {
-                queueDecisions = decisions
-            }
+            )
+            guard generation.map({ $0 == healthRefreshGeneration }) ?? true else { return }
+            githubStatus = status
+            repositories = refreshedRepositories
+            githubWorkItems = workItems
+            if let decisions { queueDecisions = decisions }
             githubError = nil
         } catch {
+            guard generation.map({ $0 == healthRefreshGeneration }) ?? true else { return }
             githubError = error.localizedDescription
         }
     }
 
     public func refreshTasks() async {
+        await refreshTasks(healthGeneration: nil)
+    }
+
+    private func refreshTasks(healthGeneration generation: UInt64?) async {
         do {
-            tasks = try await engine.call(method: "task.list", params: [:], as: [EngineeringTask].self)
+            let refreshedTasks = try await engine.call(
+                method: "task.list", params: [:], as: [EngineeringTask].self
+            )
+            guard generation.map({ $0 == healthRefreshGeneration }) ?? true else { return }
+            tasks = refreshedTasks
         } catch {
+            guard generation.map({ $0 == healthRefreshGeneration }) ?? true else { return }
             connectionState = .failed(error.localizedDescription)
         }
     }
@@ -156,6 +182,7 @@ public final class WorkspaceStore: ObservableObject {
         defer { taskLifecycleBusyTaskIDs.remove(taskID) }
         do {
             replaceTask(try await engine.planTask(taskID: taskID))
+            taskContracts[taskID] = try await engine.taskContract(taskID: taskID)
             taskLifecycleError = nil
             await refreshTaskTimeline(taskID: taskID)
         } catch {
@@ -163,12 +190,44 @@ public final class WorkspaceStore: ObservableObject {
         }
     }
 
-    public func prepareTask(taskID: UUID) async {
+    public func refreshTaskContract(taskID: UUID) async {
+        do {
+            taskContracts[taskID] = try await engine.taskContract(taskID: taskID)
+            taskLifecycleError = nil
+        } catch {
+            taskContracts.removeValue(forKey: taskID)
+            taskLifecycleError = error.localizedDescription
+        }
+    }
+
+    public func previewPreparation(taskID: UUID) async {
         guard !taskLifecycleBusyTaskIDs.contains(taskID) else { return }
         taskLifecycleBusyTaskIDs.insert(taskID)
         defer { taskLifecycleBusyTaskIDs.remove(taskID) }
         do {
-            replaceTask(try await engine.prepareTask(taskID: taskID))
+            preparationPreviews[taskID] = try await engine.previewPreparation(taskID: taskID)
+            taskLifecycleError = nil
+        } catch {
+            preparationPreviews.removeValue(forKey: taskID)
+            taskLifecycleError = error.localizedDescription
+        }
+    }
+
+    public func approveAndPrepare(_ preview: PreparationPreview) async {
+        let taskID = preview.taskId
+        guard !taskLifecycleBusyTaskIDs.contains(taskID), preparationPreviews[taskID] == preview else {
+            return
+        }
+        taskLifecycleBusyTaskIDs.insert(taskID)
+        defer { taskLifecycleBusyTaskIDs.remove(taskID) }
+        do {
+            let approval = try await engine.approvePreparation(
+                preview,
+                approvedBy: ProcessInfo.processInfo.userName
+            )
+            preparationApprovals[taskID] = approval
+            replaceTask(try await engine.prepareTask(preview: preview, approvalID: approval.id))
+            preparationPreviews.removeValue(forKey: taskID)
             taskLifecycleError = nil
             await refreshTaskTimeline(taskID: taskID)
             await refreshTaskWorktree(taskID: taskID)
@@ -245,26 +304,60 @@ public final class WorkspaceStore: ObservableObject {
     }
 
     public func selectRepository(_ repository: GitHubRepository) async {
+        detailSelectionGeneration &+= 1
+        let generation = detailSelectionGeneration
+        selectedRepositoryID = repository.id
+        selectedWorkItemID = nil
+        selectedTaskID = nil
+        selectedRepository = nil
         do {
-            selectedRepository = try await engine.call(
+            let snapshot = try await engine.call(
                 method: "github.repository", params: ["fullName": repository.fullName],
                 as: GitHubRepositorySnapshot?.self
             )
-            selectedRepositoryID = repository.id
-            selectedWorkItemID = nil
-            selectedTaskID = nil
+            guard generation == detailSelectionGeneration,
+                  selectedRepositoryID == repository.id else { return }
+            selectedRepository = snapshot
             loadPresentationPreferences(workspaceID: repository.fullName)
             githubError = nil
         } catch {
+            guard generation == detailSelectionGeneration,
+                  selectedRepositoryID == repository.id else { return }
             githubError = error.localizedDescription
         }
     }
 
     public func selectWorkItem(_ item: GitHubWorkItem) async {
-        if selectedRepository?.repository.fullName != item.repositoryFullName,
-           let repository = repositories.first(where: { $0.fullName == item.repositoryFullName }) {
-            await selectRepository(repository)
+        detailSelectionGeneration &+= 1
+        let generation = detailSelectionGeneration
+        selectedWorkItemID = item.id
+        selectedTaskID = nil
+        if let repository = repositories.first(where: { $0.fullName == item.repositoryFullName }) {
+            selectedRepositoryID = repository.id
+            if selectedRepository?.repository.fullName != item.repositoryFullName {
+                selectedRepository = nil
+                do {
+                    let snapshot = try await engine.call(
+                        method: "github.repository",
+                        params: ["fullName": repository.fullName],
+                        as: GitHubRepositorySnapshot?.self
+                    )
+                    guard generation == detailSelectionGeneration,
+                          selectedWorkItemID == item.id,
+                          selectedRepositoryID == repository.id else { return }
+                    selectedRepository = snapshot
+                    loadPresentationPreferences(workspaceID: repository.fullName)
+                    githubError = nil
+                } catch {
+                    guard generation == detailSelectionGeneration,
+                          selectedWorkItemID == item.id,
+                          selectedRepositoryID == repository.id else { return }
+                    githubError = error.localizedDescription
+                }
+            }
         }
+        guard generation == detailSelectionGeneration,
+              selectedWorkItemID == item.id else { return }
         selectedWorkItemID = item.id
         selectedTaskID = nil
     }
@@ -283,9 +376,10 @@ public final class WorkspaceStore: ObservableObject {
         }
     }
 
-    public func previewCommentDelivery(task: EngineeringTask, body: String) async {
+    @discardableResult
+    public func previewCommentDelivery(task: EngineeringTask, body: String) async -> DeliveryPreview? {
         let body = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !body.isEmpty, !deliveryBusyTaskIDs.contains(task.id) else { return }
+        guard !body.isEmpty, !deliveryBusyTaskIDs.contains(task.id) else { return nil }
         let number: UInt64
         switch task.source {
         case .githubIssue(let source):
@@ -293,14 +387,20 @@ public final class WorkspaceStore: ObservableObject {
         case .githubPullRequest(let source):
             number = source.number
         default:
+            invalidateDeliveryState(taskID: task.id)
             deliveryError = "GitHub delivery requires an ingested issue or pull request task."
-            return
+            return nil
         }
-        await previewDelivery(task: task, action: GitHubActionPayload(commentNumber: number, body: body))
+        return await previewDelivery(
+            task: task,
+            action: GitHubActionPayload(commentNumber: number, body: body)
+        )
     }
 
-    public func previewDelivery(task: EngineeringTask, action: GitHubActionPayload) async {
-        guard !deliveryBusyTaskIDs.contains(task.id) else { return }
+    @discardableResult
+    public func previewDelivery(task: EngineeringTask, action: GitHubActionPayload) async -> DeliveryPreview? {
+        guard !deliveryBusyTaskIDs.contains(task.id) else { return nil }
+        invalidateDeliveryState(taskID: task.id)
         let identity: (UInt64, String, String?, String?, Date)
         switch task.source {
         case .githubIssue(let source):
@@ -313,15 +413,19 @@ public final class WorkspaceStore: ObservableObject {
             )
         default:
             deliveryError = "GitHub delivery requires an ingested issue or pull request task."
-            return
+            return nil
         }
         guard let installationID = repositories.first(where: { $0.id == identity.0 })?.installationID else {
             deliveryError = "Verify Patchwright GitHub App access before preparing delivery."
-            return
+            return nil
         }
         deliveryBusyTaskIDs.insert(task.id)
         defer { deliveryBusyTaskIDs.remove(task.id) }
         do {
+            let expectedHeadSHA = [
+                "review", "updatePullRequestBranch", "enqueuePullRequest", "mergePullRequest",
+            ].contains(action.kind) ? identity.2 : nil
+            let expectedBaseSHA = action.kind == "createBranch" ? identity.3 : nil
             let draft = GitHubActionPreviewDraft(
                 remote: GitHubRemoteIdentity(
                     repositoryId: identity.0,
@@ -329,26 +433,30 @@ public final class WorkspaceStore: ObservableObject {
                     repositoryFullName: identity.1
                 ),
                 action: action,
-                expectedHeadSha: identity.2,
-                expectedBaseSha: identity.3,
+                expectedHeadSha: expectedHeadSHA,
+                expectedBaseSha: expectedBaseSHA,
                 snapshotGeneration: max(1, UInt64(identity.4.timeIntervalSince1970))
             )
-            deliveryPreviews[task.id] = try await engine.previewDelivery(taskID: task.id, draft: draft)
-            deliveryApprovals[task.id] = nil
-            deliveryExecutions[task.id] = nil
+            let preview = try await engine.previewDelivery(taskID: task.id, draft: draft)
+            deliveryPreviews[task.id] = preview
             deliveryError = nil
+            return preview
         } catch {
+            invalidateDeliveryState(taskID: task.id)
             deliveryError = error.localizedDescription
+            return nil
         }
     }
 
-    public func previewMergeDelivery(task: EngineeringTask, method: GitHubMergeMethod) async {
-        guard !deliveryBusyTaskIDs.contains(task.id) else { return }
+    @discardableResult
+    public func previewMergeDelivery(task: EngineeringTask, method: GitHubMergeMethod) async -> DeliveryPreview? {
+        guard !deliveryBusyTaskIDs.contains(task.id) else { return nil }
         guard case .githubPullRequest(let source) = task.source else {
+            invalidateDeliveryState(taskID: task.id)
             deliveryError = "Merge approval requires an ingested pull request task."
-            return
+            return nil
         }
-        await previewDelivery(
+        return await previewDelivery(
             task: task,
             action: GitHubActionPayload(
                 pullRequestNumber: source.number,
@@ -358,8 +466,10 @@ public final class WorkspaceStore: ObservableObject {
         )
     }
 
-    public func approveDelivery(taskID: UUID) async {
-        guard let preview = deliveryPreviews[taskID], !deliveryBusyTaskIDs.contains(taskID) else { return }
+    public func approveDelivery(_ preview: DeliveryPreview) async {
+        let taskID = preview.taskId
+        guard deliveryPreviews[taskID] == preview,
+              !deliveryBusyTaskIDs.contains(taskID) else { return }
         deliveryBusyTaskIDs.insert(taskID)
         defer { deliveryBusyTaskIDs.remove(taskID) }
         do {
@@ -373,9 +483,11 @@ public final class WorkspaceStore: ObservableObject {
         }
     }
 
-    public func executeDelivery(taskID: UUID) async {
-        guard let preview = deliveryPreviews[taskID],
+    public func executeDelivery(_ preview: DeliveryPreview) async {
+        let taskID = preview.taskId
+        guard deliveryPreviews[taskID] == preview,
               let approval = deliveryApprovals[taskID],
+              approval.fingerprint == preview.fingerprint,
               !deliveryBusyTaskIDs.contains(taskID) else { return }
         deliveryBusyTaskIDs.insert(taskID)
         defer { deliveryBusyTaskIDs.remove(taskID) }
@@ -387,6 +499,12 @@ public final class WorkspaceStore: ObservableObject {
         } catch {
             deliveryError = error.localizedDescription
         }
+    }
+
+    private func invalidateDeliveryState(taskID: UUID) {
+        deliveryPreviews[taskID] = nil
+        deliveryApprovals[taskID] = nil
+        deliveryExecutions[taskID] = nil
     }
 
     public func codexStatus(for taskID: UUID) -> CodexRuntimeStatus? {
@@ -601,11 +719,18 @@ public final class WorkspaceStore: ObservableObject {
         savePresentationPreferences()
     }
 
+    public func selectSection(_ section: WorkspaceSection) {
+        guard section != primarySelection else { return }
+        primarySelection = section
+        clearDetailSelection()
+    }
+
     private func savePresentationPreferences() {
         preferences.save(presentationPreferences, workspaceID: preferencesWorkspaceID)
     }
 
     private func clearDetailSelection() {
+        detailSelectionGeneration &+= 1
         selectedTaskID = nil
         selectedRepositoryID = nil
         selectedWorkItemID = nil
@@ -713,6 +838,7 @@ public final class WorkspaceStore: ObservableObject {
             var task = outcome.task
             if task.state == .discovered {
                 task = try await engine.planTask(taskID: task.id)
+                taskContracts[task.id] = try await engine.taskContract(taskID: task.id)
             }
             replaceTask(task)
             selectedTaskID = outcome.task.id
