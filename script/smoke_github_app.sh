@@ -140,6 +140,44 @@ deliver() {
     --argjson preview "$preview" '{preview:$preview,approvalId:$approvalId}')"
 }
 
+prepare_task() {
+  local task_id="$1"
+  local preview approval approval_id
+  rpc_result task.plan "$(jq -cn --arg taskId "$task_id" '{taskId:$taskId}')" >/dev/null \
+    || return 1
+  preview="$(rpc_result task.preparation.preview \
+    "$(jq -cn --arg taskId "$task_id" '{taskId:$taskId}')")" || return 1
+  approval="$(rpc_result task.preparation.approve "$(jq -cn \
+    --arg approvedBy "owner-qualified:$TARGET" --argjson preview "$preview" \
+    '{preview:$preview,approvedBy:$approvedBy}')")" || return 1
+  approval_id="$(jq -er '.id' <<<"$approval")" || return 1
+  rpc_result task.prepare "$(jq -cn --arg taskId "$task_id" \
+    --argjson preview "$preview" --arg approvalId "$approval_id" \
+    '{taskId:$taskId,preview:$preview,approvalId:$approvalId}')"
+}
+
+submit_task_for_delivery() {
+  local task_id="$1"
+  rpc_result task.readyForDelivery "$(jq -cn --arg taskId "$task_id" '{taskId:$taskId}')"
+}
+
+start_and_observe_monitor() {
+  local task_id="$1"
+  local pull_request_number="$2"
+  local expected_head_sha="$3"
+  local expected_base_sha="$4"
+  local monitor monitor_id
+  monitor="$(rpc_result monitor.start "$(jq -cn \
+    --arg taskId "$task_id" --arg repositoryFullName "$TARGET" \
+    --argjson pullRequestNumber "$pull_request_number" \
+    --arg expectedHeadSha "$expected_head_sha" --arg expectedBaseSha "$expected_base_sha" \
+    '{monitor:{taskId:$taskId,repositoryFullName:$repositoryFullName,
+      pullRequestNumber:$pullRequestNumber,expectedHeadSha:$expectedHeadSha,
+      expectedBaseSha:$expectedBaseSha,repairBudget:2}}')")" || return 1
+  monitor_id="$(jq -er '.id' <<<"$monitor")" || return 1
+  rpc_result monitor.observe "$(jq -cn --arg monitorId "$monitor_id" '{monitorId:$monitorId}')"
+}
+
 sync_until_work_item() {
   local kind="$1"
   local number="$2"
@@ -163,7 +201,7 @@ sync_until_work_item() {
   die "qualification $kind #$number was not ingested after three bounded sync attempts"
 }
 
-mkdir -p "$STATE_DIR/repository" "$STATE_DIR/state" "$STATE_DIR/worktrees"
+mkdir -p "$STATE_DIR/state" "$STATE_DIR/worktrees"
 target/debug/patchwright-engine serve --socket "$SOCKET" --database "$DATABASE" \
   >"$ENGINE_LOG" 2>&1 &
 ENGINE_PID=$!
@@ -176,7 +214,7 @@ rpc_result system.health '{}' >/dev/null || die "engine health check failed"
 
 RUN_ID="${PATCHWRIGHT_GITHUB_E2E_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$RUN_ID" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "qualification run ID is invalid"
-BRANCH="patchwright/e2e-$RUN_ID"
+BRANCH=""
 MARKER="Patchwright GitHub App qualification $RUN_ID"
 if [[ "$MANUAL_UI_FIXTURE" == true ]]; then
   ISSUE_NUMBER="$EXISTING_ISSUE_NUMBER"
@@ -185,19 +223,6 @@ else
     || die "default branch lookup failed"
   BASE_SHA="$(gh api "repos/$TARGET/commits/$BASE_BRANCH" --jq .sha)" \
     || die "default branch commit lookup failed"
-  BASE_TREE="$(gh api "repos/$TARGET/git/commits/$BASE_SHA" --jq .tree.sha)" \
-    || die "base tree lookup failed"
-  BLOB_SHA="$(gh api --method POST "repos/$TARGET/git/blobs" \
-    -f content="$MARKER" -f encoding=utf-8 --jq .sha)" \
-    || die "qualification blob creation failed"
-  TREE_SHA="$(jq -cn --arg base_tree "$BASE_TREE" --arg sha "$BLOB_SHA" \
-    '{base_tree:$base_tree,tree:[{path:"patchwright-e2e.txt",mode:"100644",type:"blob",sha:$sha}]}' \
-    | gh api --method POST "repos/$TARGET/git/trees" --input - --jq .sha)" \
-    || die "qualification tree creation failed"
-  SEED_SHA="$(jq -cn --arg message "$MARKER" --arg tree "$TREE_SHA" --arg parent "$BASE_SHA" \
-    '{message:$message,tree:$tree,parents:[$parent]}' \
-    | gh api --method POST "repos/$TARGET/git/commits" --input - --jq .sha)" \
-    || die "qualification commit creation failed"
   ISSUE="$(gh api --method POST "repos/$TARGET/issues" \
     -f title="[Patchwright E2E] Approval-gated delivery" \
     -f body="Disposable private qualification fixture: $MARKER")" \
@@ -236,22 +261,34 @@ ISSUE_TASK="$(rpc_result task.createFromGitHub "$(jq -cn \
   '{repositoryFullName:$repositoryFullName,itemNumber:$itemNumber,expectedUpdatedAt:$expectedUpdatedAt}')")" \
   || die "qualification issue task creation failed"
 ISSUE_TASK_ID="$(jq -er '.task.id' <<<"$ISSUE_TASK")" || die "qualification issue task is missing"
+BRANCH="patchwright/$ISSUE_TASK_ID"
+ISSUE_PREPARED="$(prepare_task "$ISSUE_TASK_ID")" \
+  || die "qualification issue task preparation failed"
+ISSUE_WORKTREE="$(jq -er '.repositoryPath' <<<"$ISSUE_PREPARED")" \
+  || die "qualification issue worktree is missing"
+printf '%s\n' "$MARKER" >"$ISSUE_WORKTREE/patchwright-e2e.txt"
+git -C "$ISSUE_WORKTREE" add -- patchwright-e2e.txt
+git -C "$ISSUE_WORKTREE" \
+  -c user.name="Patchwright Qualification" \
+  -c user.email="patchwright-qualification@localhost" \
+  commit --no-gpg-sign -m "$MARKER" >/dev/null \
+  || die "qualification worktree commit failed"
+SEED_SHA="$(git -C "$ISSUE_WORKTREE" rev-parse HEAD)" \
+  || die "qualification worktree head is missing"
+submit_task_for_delivery "$ISSUE_TASK_ID" >/dev/null \
+  || die "qualification issue verification failed"
 REMOTE_IDENTITY="$(jq -cn \
   --argjson repositoryId "$TARGET_REPOSITORY_ID" \
   --argjson installationId "$TARGET_INSTALLATION_ID" \
   --arg repositoryFullName "$TARGET" \
   '{repositoryId:$repositoryId,installationId:$installationId,repositoryFullName:$repositoryFullName}')"
 
-BRANCH_FROM_SHA="${SEED_SHA:-$BASE_SHA}"
-BRANCH_RESULT="$(deliver "$ISSUE_TASK_ID" "$(jq -cn --arg branch "$BRANCH" --arg fromSha "$BRANCH_FROM_SHA" \
+BRANCH_RESULT="$(deliver "$ISSUE_TASK_ID" "$(jq -cn --arg branch "$BRANCH" --arg fromSha "$BASE_SHA" \
   '{kind:"createBranch",branch:$branch,fromSha:$fromSha}')" "$BASE_SHA" "" 1)" \
   || die "approval-gated branch delivery failed"
-if [[ "$MANUAL_UI_FIXTURE" == true ]]; then
-  printf 'Patchwright branch ready for one UI fixture commit: %s/tree/%s\n' "$TARGET" "$BRANCH" >&2
-  printf 'Paste the resulting 40-character commit SHA, then press Return: ' >&2
-  IFS= read -r SEED_SHA
-  [[ "$SEED_SHA" =~ ^[0-9a-f]{40}$ ]] || die "manual fixture commit SHA is invalid"
-fi
+PUSH_RESULT="$(deliver "$ISSUE_TASK_ID" "$(jq -cn --arg branch "$BRANCH" --arg headSha "$SEED_SHA" \
+  '{kind:"pushIntent",branch:$branch,headSha:$headSha}')" "$BASE_SHA" "" 1)" \
+  || die "approval-gated branch push failed"
 CHECK_RESULT="$(deliver "$ISSUE_TASK_ID" "$(jq -cn --arg headSha "$SEED_SHA" \
   '{kind:"checkRun",name:"Patchwright Qualification",headSha:$headSha,status:"completed",conclusion:"success"}')" \
   "$BASE_SHA" "" 1)" || die "approval-gated check delivery failed"
@@ -296,9 +333,32 @@ PR_HEAD_SHA="$(jq -er --argjson number "$PR_NUMBER" \
   '.workItems[] | select(.number == $number and .kind == "pullRequest") | .headSha' \
   <<<"$SNAPSHOT")" || die "qualification pull request head SHA is missing"
 
+prepare_task "$PR_TASK_ID" >/dev/null \
+  || die "qualification pull request task preparation failed"
+submit_task_for_delivery "$PR_TASK_ID" >/dev/null \
+  || die "qualification pull request verification failed"
+
 REVIEW_RESULT="$(deliver "$PR_TASK_ID" "$(jq -cn --argjson pullRequestNumber "$PR_NUMBER" --arg expectedHeadSha "$PR_HEAD_SHA" --arg body "$MARKER" \
   '{kind:"review",pullRequestNumber:$pullRequestNumber,expectedHeadSha:$expectedHeadSha,event:"comment",body:$body,inlineComments:[]}')" \
   "$PR_BASE_SHA" "$PR_HEAD_SHA" 2)" || die "approval-gated review delivery failed"
+if [[ "$MANUAL_UI_FIXTURE" == true ]]; then
+  printf 'Approve this disposable pull request in GitHub: %s\n' "$PR_URL" >&2
+  printf 'Type approved after GitHub confirms the review: ' >&2
+  IFS= read -r REVIEW_CONFIRMATION
+  [[ "$REVIEW_CONFIRMATION" == "approved" ]] \
+    || die "manual approval confirmation is invalid"
+else
+  gh api --method POST "repos/$TARGET/pulls/$PR_NUMBER/reviews" \
+    -f event=APPROVE -f body="$MARKER owner approval" >/dev/null \
+    || die "qualification owner approval failed"
+fi
+sync_until_work_item pullRequest "$PR_NUMBER" \
+  || die "approved pull request evidence was not refreshed"
+MONITOR_RESULT="$(start_and_observe_monitor \
+  "$PR_TASK_ID" "$PR_NUMBER" "$PR_HEAD_SHA" "$PR_BASE_SHA")" \
+  || die "trusted pull request monitoring failed"
+jq -e '.outcome.state == "succeeded"' >/dev/null <<<"$MONITOR_RESULT" \
+  || die "trusted pull request evidence did not satisfy monitoring"
 MERGE_RESULT="$(deliver "$PR_TASK_ID" "$(jq -cn --argjson pullRequestNumber "$PR_NUMBER" --arg expectedHeadSha "$PR_HEAD_SHA" \
   '{kind:"mergePullRequest",pullRequestNumber:$pullRequestNumber,expectedHeadSha:$expectedHeadSha,method:"squash"}')" \
   "$PR_BASE_SHA" "$PR_HEAD_SHA" 2)" || die "approval-gated merge delivery failed"
@@ -357,17 +417,20 @@ jq -n \
   --arg issueTaskId "$ISSUE_TASK_ID" \
   --arg pullRequestTaskId "$PR_TASK_ID" \
   --argjson branchResult "$BRANCH_RESULT" \
+  --argjson pushResult "$PUSH_RESULT" \
   --argjson checkResult "$CHECK_RESULT" \
   --argjson commentResult "$COMMENT_RESULT" \
   --argjson pullRequestResult "$PR_RESULT" \
   --argjson reviewResult "$REVIEW_RESULT" \
+  --argjson monitorResult "$MONITOR_RESULT" \
   --argjson mergeResult "$MERGE_RESULT" \
   '{completedAt:$completedAt,repository:$repository,repositoryId:$repositoryId,
     installationId:$installationId,appSlug:$appSlug,issueUrl:$issueUrl,
     pullRequestUrl:$pullRequestUrl,branch:$branch,baseSha:$baseSha,headSha:$headSha,
     issueTaskId:$issueTaskId,pullRequestTaskId:$pullRequestTaskId,
-    actions:{branch:$branchResult,check:$checkResult,comment:$commentResult,
-      draftPullRequest:$pullRequestResult,review:$reviewResult,merge:$mergeResult},
+    actions:{branch:$branchResult,push:$pushResult,check:$checkResult,comment:$commentResult,
+      draftPullRequest:$pullRequestResult,review:$reviewResult,monitor:$monitorResult,
+      merge:$mergeResult},
     credentialPersistenceCheck:"passed"}' \
   | "$ROOT_DIR/script/write_owner_evidence.py" --directory "$EVIDENCE_DIR" --name "$(basename "$EVIDENCE")" >/dev/null
 printf 'GitHub App E2E passed: %s\nEvidence: %s\n' "$PR_URL" "$EVIDENCE"

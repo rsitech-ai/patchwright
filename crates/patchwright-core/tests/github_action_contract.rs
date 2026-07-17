@@ -27,7 +27,7 @@ fn every_delivery_and_merge_action_has_stable_exact_identity() {
         GitHubAction::draft_pull_request("Fix", "feat/fix", "main", "Body").unwrap(),
         GitHubAction::update_pull_request_branch(12, SHA_A).unwrap(),
         GitHubAction::ready_pull_request(12, SHA_B).unwrap(),
-        GitHubAction::close_pull_request(12).unwrap(),
+        GitHubAction::close_pull_request(12, SHA_A).unwrap(),
         GitHubAction::close_issue(13).unwrap(),
         GitHubAction::enqueue_pull_request(12, SHA_B).unwrap(),
         GitHubAction::merge_pull_request(12, SHA_B, MergeMethod::Squash).unwrap(),

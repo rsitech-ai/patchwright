@@ -81,8 +81,10 @@ impl TaskState {
                 | (Self::Reviewing, Self::AwaitingDeliveryApproval)
                 | (Self::AwaitingDeliveryApproval, Self::Delivering)
                 | (Self::Delivering, Self::Monitoring)
-                | (Self::Monitoring | Self::Merging, Self::Completed)
-                | (Self::Monitoring, Self::AwaitingMergeApproval)
+                | (
+                    Self::Monitoring | Self::Merging,
+                    Self::Completed | Self::AwaitingMergeApproval,
+                )
                 | (Self::AwaitingMergeApproval, Self::Merging)
         )
     }

@@ -1,9 +1,9 @@
 use chrono::{Duration, TimeZone, Utc};
 use patchwright_core::{
-    Capability, CredentialHealth, GitHubAction, GitHubActionPreview, InstructionDigest,
-    RemoteIdentity, RemotePrecondition, RepositoryBinding, RepositoryBindingDraft,
-    RepositoryPermissionSnapshot, RiskClass, Task, TaskContract, TaskContractDraft, TaskSource,
-    VerificationCommand,
+    Capability, CredentialHealth, GitHubAction, GitHubActionPreview, GitHubIssueSourceInput,
+    InstructionDigest, RemoteIdentity, RemotePrecondition, RepositoryBinding,
+    RepositoryBindingDraft, RepositoryPermissionSnapshot, RiskClass, Task, TaskContract,
+    TaskContractDraft, TaskSource, VerificationCommand,
 };
 use patchwright_engine::{
     CIState, EventStore, Mergeability, MonitorRecord, MonitorState, RemoteObservation, ReviewState,
@@ -31,12 +31,20 @@ fn fixture(store: &EventStore) -> Task {
     store.save_repository_binding(&binding).unwrap();
     let mut task = Task::new("Monitor delivery", "/tmp/hello").unwrap();
     task.repository_binding_id = Some(binding.id());
+    task.source = TaskSource::github_issue(GitHubIssueSourceInput {
+        repository_id: 42,
+        repository_full_name: "octocat/hello".into(),
+        number: 7,
+        html_url: "https://github.com/octocat/hello/issues/7".into(),
+        snapshot_at: Utc.with_ymd_and_hms(2026, 7, 14, 8, 0, 0).unwrap(),
+    })
+    .unwrap();
     store.save_task(&task, "task created").unwrap();
     store
         .save_task_contract(
             &TaskContract::try_from(TaskContractDraft {
                 task_id: task.id,
-                source: TaskSource::LocalRequest,
+                source: task.source.clone(),
                 repository_binding_id: binding.id(),
                 goal: "Monitor one delivered pull request".into(),
                 acceptance_criteria: vec!["CI and review converge".into()],
@@ -55,6 +63,21 @@ fn fixture(store: &EventStore) -> Task {
             })
             .unwrap(),
         )
+        .unwrap();
+    for state in [
+        patchwright_core::TaskState::Assessing,
+        patchwright_core::TaskState::Planned,
+        patchwright_core::TaskState::AwaitingPreparationApproval,
+        patchwright_core::TaskState::Preparing,
+        patchwright_core::TaskState::Implementing,
+        patchwright_core::TaskState::Verifying,
+        patchwright_core::TaskState::Reviewing,
+        patchwright_core::TaskState::AwaitingDeliveryApproval,
+    ] {
+        task.transition(state).unwrap();
+    }
+    store
+        .save_task(&task, "ready for delivery approval")
         .unwrap();
     task
 }

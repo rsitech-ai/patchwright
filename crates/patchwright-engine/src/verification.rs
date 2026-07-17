@@ -62,6 +62,14 @@ pub async fn verify_task_for_delivery(
         if task.state == TaskState::AwaitingDeliveryApproval {
             return Ok(task);
         }
+        if task.state == TaskState::Preparing {
+            task.transition(TaskState::Implementing)
+                .map_err(anyhow::Error::from)?;
+            store.save_task(
+                &task,
+                "Prepared worktree was explicitly submitted for verification",
+            )?;
+        }
         if task.state == TaskState::Implementing {
             task.transition(TaskState::Verifying)
                 .map_err(anyhow::Error::from)?;

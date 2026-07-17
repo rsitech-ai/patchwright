@@ -1,8 +1,10 @@
 use crate::{
-    CancellationState, ConversionError, ConversionRequest, EventStore, GhCliCredentialBroker,
-    GitHubAccount, GitHubRepository, GitHubSource, GitHubSyncSummary, GitHubToken, Job, JobId,
-    JobKind, JobState, MonitorRecord, RemoteObservation, RepositoryPlanner, TaskConversionService,
-    approve_delivery, approve_preparation, authorize_execution, authorize_preparation,
+    CIState, CancellationState, ConversionError, ConversionRequest, EventStore,
+    GhCliCredentialBroker, GitHubAccount, GitHubRepository, GitHubSource, GitHubSyncSummary,
+    GitHubToken, GitHubWorkItem, Job, JobId, JobKind, JobState, Mergeability, MonitorRecord,
+    MonitorState, RemoteObservation, RepositoryPlanner, ReviewState, TaskConversionService,
+    WorkItemKind, approve_delivery, approve_preparation, authorize_execution,
+    authorize_preparation,
     codex::{
         process::{CodexExecutable, CodexProcessConfig, CodexProcessFactory},
         service::{CodexRuntimeStatus, CodexService, CodexServiceError, CodexServiceState},
@@ -14,7 +16,8 @@ use anyhow::{Context, Result, bail};
 use patchwright_core::{
     CredentialHealth, GitHubAction, GitHubActionPreview, QueueCandidate, RemoteIdentity,
     RemotePrecondition, RepositoryBinding, RepositoryBindingDraft, RepositoryPermissionLevel,
-    RepositoryPermissionSnapshot, Task, TaskId, TaskState, WorkflowPreset, assess_queue,
+    RepositoryPermissionSnapshot, Task, TaskId, TaskSource, TaskState, WorkflowPreset,
+    assess_queue,
 };
 use patchwright_relay::{
     AppAuthenticator, ConfiguredKeyProvider, ForwardedWebhook, GitHubAppConfiguration,
@@ -43,6 +46,7 @@ use tokio::{
 const MAX_RPC_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_RPC_CONNECTIONS: usize = 32;
 const CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_MONITOR_SNAPSHOT_AGE: chrono::Duration = chrono::Duration::minutes(5);
 
 #[derive(Deserialize)]
 struct Request {
@@ -314,7 +318,7 @@ async fn dispatch(request: Request, state: &ServerState) -> Value {
         "task.list" => list_tasks(request.id, store),
         "task.timeline" => task_timeline(request.id, &request.params, store),
         "task.worktree" => task_worktree(request.id, &request.params, store),
-        "task.plan" => task_plan(request.id, &request.params, store),
+        "task.plan" => task_plan(request.id, &request.params, store).await,
         "task.contract" => task_contract(request.id, &request.params, store),
         "task.preparation.preview" => task_preparation_preview(request.id, &request.params, store),
         "task.preparation.approve" => task_preparation_approve(request.id, &request.params, store),
@@ -636,10 +640,19 @@ async fn delivery_execute(id: Value, params: &Value, store: &Mutex<EventStore>) 
             let encoded =
                 serde_json::to_string(&json!({"state":"failed","error":error.to_string()}))
                     .expect("failure result serializes");
-            let _ = store
-                .lock()
-                .expect("event store lock poisoned")
-                .complete_delivery(&key, &encoded);
+            if let Err(persistence) = crate::complete_failed_delivery(
+                &store.lock().expect("event store lock poisoned"),
+                &preview,
+                &key,
+                &encoded,
+            ) {
+                return rpc_error(
+                    id,
+                    -32000,
+                    "persistence failure",
+                    Some(persistence.to_string()),
+                );
+            }
             rpc_error(id, -32064, "delivery failed", Some(error.to_string()))
         }
     }
@@ -707,35 +720,92 @@ fn monitor_start(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value 
         Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
     };
     let store = store.lock().expect("event store lock poisoned");
-    match store.load_task(request.task_id) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            return rpc_error(
-                id,
-                -32070,
-                "monitor start failed",
-                Some("task is missing".into()),
-            );
-        }
-        Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
-    }
-    let monitor = match MonitorRecord::new(
-        request.task_id,
-        request.repository_full_name,
-        request.pull_request_number,
-        request.expected_head_sha,
-        request.expected_base_sha,
-        chrono::Utc::now(),
-        request.repair_budget,
-    ) {
+    let monitor = match create_verified_monitor(&store, request) {
         Ok(monitor) => monitor,
-        Err(error) => {
-            return rpc_error(id, -32602, "invalid parameters", Some(error.to_string()));
+        Err(MonitorStartFailure::Rejected(detail)) => {
+            return rpc_error(id, -32070, "monitor start failed", Some(detail));
+        }
+        Err(MonitorStartFailure::Invalid(detail)) => {
+            return rpc_error(id, -32602, "invalid parameters", Some(detail));
+        }
+        Err(MonitorStartFailure::Persistence(detail)) => {
+            return rpc_error(id, -32000, "persistence failure", Some(detail));
         }
     };
     match store.save_monitor(&monitor) {
         Ok(()) => rpc_result(id, json!(monitor)),
         Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    }
+}
+
+enum MonitorStartFailure {
+    Rejected(String),
+    Invalid(String),
+    Persistence(String),
+}
+
+fn create_verified_monitor(
+    store: &EventStore,
+    request: MonitorStartRequest,
+) -> std::result::Result<MonitorRecord, MonitorStartFailure> {
+    let task = store
+        .load_task(request.task_id)
+        .map_err(|error| MonitorStartFailure::Persistence(error.to_string()))?
+        .ok_or_else(|| MonitorStartFailure::Rejected("task is missing".into()))?;
+    if task.state != TaskState::Monitoring {
+        return Err(MonitorStartFailure::Rejected(
+            "task is not in the monitoring state".into(),
+        ));
+    }
+    let contract = store
+        .task_contract(task.id)
+        .map_err(|error| MonitorStartFailure::Persistence(error.to_string()))?
+        .ok_or_else(|| MonitorStartFailure::Rejected("task contract is missing".into()))?;
+    if contract.source() != &task.source {
+        return Err(MonitorStartFailure::Rejected(
+            "task source no longer matches its contract".into(),
+        ));
+    }
+    if task.repository_binding_id != Some(contract.repository_binding_id()) {
+        return Err(MonitorStartFailure::Rejected(
+            "task repository binding no longer matches its contract".into(),
+        ));
+    }
+    let binding = store
+        .repository_binding(contract.repository_binding_id())
+        .map_err(|error| MonitorStartFailure::Persistence(error.to_string()))?
+        .ok_or_else(|| {
+            MonitorStartFailure::Rejected("task repository binding is missing".into())
+        })?;
+    if binding.full_name() != request.repository_full_name {
+        return Err(MonitorStartFailure::Rejected(
+            "monitor repository does not match the task binding".into(),
+        ));
+    }
+    let (snapshot, snapshot_at) =
+        fresh_github_snapshot(store, &request.repository_full_name, chrono::Utc::now())
+            .map_err(MonitorStartFailure::Rejected)?;
+    let Some(item) = snapshot.work_items.iter().find(|item| {
+        item.kind == WorkItemKind::PullRequest
+            && item.repository_full_name == request.repository_full_name
+            && item.number == request.pull_request_number
+    }) else {
+        return Err(MonitorStartFailure::Rejected(
+            "pull request is missing from the fresh GitHub snapshot".into(),
+        ));
+    };
+    validate_monitor_target(&task, item, &request).map_err(MonitorStartFailure::Rejected)?;
+    match MonitorRecord::new(
+        request.task_id,
+        request.repository_full_name,
+        request.pull_request_number,
+        request.expected_head_sha,
+        request.expected_base_sha,
+        snapshot_at,
+        request.repair_budget,
+    ) {
+        Ok(monitor) => Ok(monitor),
+        Err(error) => Err(MonitorStartFailure::Invalid(error.to_string())),
     }
 }
 
@@ -768,17 +838,39 @@ fn monitor_observe(id: Value, params: &Value, store: &Mutex<EventStore>) -> Valu
             Some("monitorId is required".into()),
         );
     };
-    let observation: RemoteObservation = match encoded_parameter(params, "observation") {
-        Ok(observation) => observation,
-        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
-    };
     let store = store.lock().expect("event store lock poisoned");
     let mut monitor = match store.monitor(monitor_id) {
         Ok(Some(monitor)) => monitor,
         Ok(None) => return rpc_error(id, -32071, "monitor is missing", None),
         Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
     };
-    let outcome = match monitor.observe(observation, chrono::Utc::now()) {
+    let now = chrono::Utc::now();
+    let (snapshot, snapshot_at) =
+        match fresh_github_snapshot(&store, &monitor.repository_full_name, now) {
+            Ok(snapshot) => snapshot,
+            Err(detail) => {
+                return rpc_error(id, -32072, "monitor observation rejected", Some(detail));
+            }
+        };
+    let Some(item) = snapshot.work_items.iter().find(|item| {
+        item.kind == WorkItemKind::PullRequest
+            && item.repository_full_name == monitor.repository_full_name
+            && item.number == monitor.pull_request_number
+    }) else {
+        return rpc_error(
+            id,
+            -32072,
+            "monitor observation rejected",
+            Some("pull request is missing from the fresh GitHub snapshot".into()),
+        );
+    };
+    let observation = match observation_from_github_item(item, snapshot_at) {
+        Ok(observation) => observation,
+        Err(detail) => {
+            return rpc_error(id, -32072, "monitor observation rejected", Some(detail));
+        }
+    };
+    let outcome = match monitor.observe(observation, now) {
         Ok(outcome) => outcome,
         Err(error) => {
             return rpc_error(
@@ -794,10 +886,151 @@ fn monitor_observe(id: Value, params: &Value, store: &Mutex<EventStore>) -> Valu
             return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
         }
     }
+    if outcome.state == MonitorState::Succeeded {
+        let mut task = match store.load_task(monitor.task_id) {
+            Ok(Some(task)) => task,
+            Ok(None) => return rpc_error(id, -32040, "task is missing", None),
+            Err(error) => {
+                return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+            }
+        };
+        if task.state != TaskState::Monitoring {
+            return rpc_error(
+                id,
+                -32072,
+                "monitor observation rejected",
+                Some("task is not in the monitoring state".into()),
+            );
+        }
+        if let Err(error) = task.transition(TaskState::AwaitingMergeApproval) {
+            return rpc_error(
+                id,
+                -32072,
+                "monitor observation rejected",
+                Some(error.to_string()),
+            );
+        }
+        return match store.save_monitor_with_task_event(
+            &monitor,
+            &task,
+            "GitHub evidence satisfied monitoring; merge approval is required",
+        ) {
+            Ok(()) => rpc_result(id, json!({"monitor":monitor,"outcome":outcome})),
+            Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+        };
+    }
     match store.save_monitor(&monitor) {
         Ok(()) => rpc_result(id, json!({"monitor":monitor,"outcome":outcome})),
         Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
     }
+}
+
+fn fresh_github_snapshot(
+    store: &EventStore,
+    repository_full_name: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> std::result::Result<
+    (
+        crate::GitHubRepositorySnapshot,
+        chrono::DateTime<chrono::Utc>,
+    ),
+    String,
+> {
+    let (snapshot, snapshot_at) = store
+        .github_repository_with_snapshot_at(repository_full_name)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "repository is missing from the GitHub snapshot".to_owned())?;
+    let age = now.signed_duration_since(snapshot_at);
+    if age < chrono::Duration::zero() || age > MAX_MONITOR_SNAPSHOT_AGE {
+        return Err("GitHub snapshot is stale; sync the repository before monitoring".into());
+    }
+    Ok((snapshot, snapshot_at))
+}
+
+fn validate_monitor_target(
+    task: &Task,
+    item: &GitHubWorkItem,
+    request: &MonitorStartRequest,
+) -> std::result::Result<(), String> {
+    if item.head_sha.as_deref() != Some(request.expected_head_sha.as_str())
+        || item.base_sha.as_deref() != Some(request.expected_base_sha.as_str())
+    {
+        return Err("monitor SHA identity does not match the fresh pull request".into());
+    }
+    match &task.source {
+        TaskSource::GitHubPullRequest(_) => {
+            if task.source.repository_full_name() != Some(request.repository_full_name.as_str())
+                || task.source.item_number() != Some(request.pull_request_number)
+                || task.source.head_sha() != Some(request.expected_head_sha.as_str())
+                || task.source.base_sha() != Some(request.expected_base_sha.as_str())
+            {
+                return Err("monitor target does not match the task pull-request source".into());
+            }
+        }
+        TaskSource::GitHubIssue(_) => {
+            if task.source.repository_full_name() != Some(request.repository_full_name.as_str()) {
+                return Err("monitor repository does not match the task issue source".into());
+            }
+            let expected_branch = format!("patchwright/{}", task.id);
+            if item.head_ref.as_deref() != Some(expected_branch.as_str()) {
+                return Err("monitor pull request is not the task's prepared branch".into());
+            }
+        }
+        TaskSource::LocalRequest => {
+            let expected_branch = format!("patchwright/{}", task.id);
+            if item.head_ref.as_deref() != Some(expected_branch.as_str()) {
+                return Err("monitor pull request is not the task's prepared branch".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn observation_from_github_item(
+    item: &GitHubWorkItem,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) -> std::result::Result<RemoteObservation, String> {
+    let head_sha = item
+        .head_sha
+        .clone()
+        .ok_or_else(|| "pull request head SHA is missing".to_owned())?;
+    let base_sha = item
+        .base_sha
+        .clone()
+        .ok_or_else(|| "pull request base SHA is missing".to_owned())?;
+    let ci = match item.ci_health.as_deref() {
+        Some("passing") => CIState::Success,
+        Some("failing") => CIState::Failure,
+        Some("pending" | "unknown") | None => CIState::Pending,
+        Some(_) => return Err("pull request CI state is unsupported".into()),
+    };
+    let review = match item.review_decision.as_deref() {
+        Some("approved") => ReviewState::Approved,
+        Some("changesRequested") => ReviewState::ChangesRequested,
+        Some("approvalDismissed") => ReviewState::ApprovalDismissed,
+        Some("reviewRequired") | None => ReviewState::Pending,
+        Some(_) => return Err("pull request review state is unsupported".into()),
+    };
+    let mergeability = if item.has_conflicts == Some(true) {
+        Mergeability::Conflicting
+    } else {
+        match item.mergeable {
+            Some(true) => Mergeability::Mergeable,
+            Some(false) => Mergeability::Conflicting,
+            None => Mergeability::Unknown,
+        }
+    };
+    Ok(RemoteObservation {
+        observed_at,
+        head_sha,
+        base_sha,
+        ci,
+        review,
+        mergeability,
+        repository_accessible: true,
+        network_available: true,
+        rate_limited_until: None,
+    })
 }
 
 fn monitor_wake(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
@@ -1312,58 +1545,82 @@ fn task_worktree(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value 
     }
 }
 
-fn task_plan(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+async fn task_plan(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
     let task_id = match required_task_id(params) {
         Ok(task_id) => task_id,
         Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
     };
-    let store = store.lock().expect("event store lock poisoned");
-    let mut task = match store.load_task(task_id) {
-        Ok(Some(task)) => task,
-        Ok(None) => return rpc_error(id, -32040, "task is missing", None),
-        Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
-    };
-    if task.state == TaskState::AwaitingPreparationApproval {
-        return match store.task_contract(task_id) {
-            Ok(Some(_)) => rpc_result(id, json!(task)),
-            Ok(None) => rpc_error(id, -32045, "task contract is missing", None),
-            Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    let (mut task, binding) = {
+        let store = store.lock().expect("event store lock poisoned");
+        let task = match store.load_task(task_id) {
+            Ok(Some(task)) => task,
+            Ok(None) => return rpc_error(id, -32040, "task is missing", None),
+            Err(error) => {
+                return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+            }
         };
-    }
-    if task.state != TaskState::Discovered {
-        return rpc_error(
-            id,
-            -32041,
-            "task cannot be planned from its current state",
-            Some(task.state.to_string()),
-        );
-    }
-    let Some(binding_id) = task.repository_binding_id else {
-        return rpc_error(
-            id,
-            -32041,
-            "task planning failed",
-            Some("task repository binding is missing".into()),
-        );
-    };
-    let binding = match store.repository_binding(binding_id) {
-        Ok(Some(binding)) => binding,
-        Ok(None) => {
+        if task.state == TaskState::AwaitingPreparationApproval {
+            return match store.task_contract(task_id) {
+                Ok(Some(_)) => rpc_result(id, json!(task)),
+                Ok(None) => rpc_error(id, -32045, "task contract is missing", None),
+                Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+            };
+        }
+        if task.state != TaskState::Discovered {
+            return rpc_error(
+                id,
+                -32041,
+                "task cannot be planned from its current state",
+                Some(task.state.to_string()),
+            );
+        }
+        let Some(binding_id) = task.repository_binding_id else {
             return rpc_error(
                 id,
                 -32041,
                 "task planning failed",
                 Some("task repository binding is missing".into()),
             );
-        }
-        Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+        };
+        let binding = match store.repository_binding(binding_id) {
+            Ok(Some(binding)) => binding,
+            Ok(None) => {
+                return rpc_error(
+                    id,
+                    -32041,
+                    "task planning failed",
+                    Some("task repository binding is missing".into()),
+                );
+            }
+            Err(error) => {
+                return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
+            }
+        };
+        (task, binding)
     };
+    if let Err(error) = ensure_planning_repository(&task, &binding).await {
+        return rpc_error(id, -32041, "task planning failed", Some(error));
+    }
     let contract = match RepositoryPlanner::assess(&task, &binding) {
         Ok(contract) => contract,
         Err(error) => {
             return rpc_error(id, -32041, "task planning failed", Some(error.to_string()));
         }
     };
+    let store = store.lock().expect("event store lock poisoned");
+    match store.load_task(task_id) {
+        Ok(Some(fresh)) if fresh == task => {}
+        Ok(Some(fresh)) => {
+            return rpc_error(
+                id,
+                -32041,
+                "task changed while planning",
+                Some(fresh.state.to_string()),
+            );
+        }
+        Ok(None) => return rpc_error(id, -32040, "task is missing", None),
+        Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    }
     task.contract_version = contract.version();
     if let Err(error) = store.save_task_contract(&contract) {
         return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
@@ -1384,6 +1641,37 @@ fn task_plan(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
         }
     }
     rpc_result(id, json!(task))
+}
+
+async fn ensure_planning_repository(
+    task: &Task,
+    binding: &RepositoryBinding,
+) -> std::result::Result<(), String> {
+    let repository = Path::new(&task.repository_path);
+    if crate::RepositoryService::inspect(repository).is_ok() {
+        return Ok(());
+    }
+    if repository.exists() || binding.managed_clone() != Some(task.repository_path.as_str()) {
+        return Err("bound repository is unavailable or invalid".into());
+    }
+    let token = github_app_installation_token(
+        binding.full_name(),
+        binding.github_repository_id(),
+        InstallationPermissions::ingestion(),
+    )
+    .await
+    .map_err(|error| format!("managed repository authentication failed: {error}"))?;
+    if token.installation_id() != binding.installation_id() {
+        return Err("GitHub App installation identity mismatch".into());
+    }
+    crate::GitTransport::clone_repository(
+        binding.clone_url(),
+        binding.full_name(),
+        repository,
+        Path::new(binding.state_root()),
+        token.expose_for_authorization_header(),
+    )
+    .map_err(|error| format!("managed repository clone failed: {error}"))
 }
 
 fn task_contract(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {

@@ -120,7 +120,7 @@ async fn emits_exact_branch_comment_review_check_draft_and_merge_requests() {
         GitHubAction::draft_pull_request("title", "feat/test", "main", "body").unwrap(),
         GitHubAction::update_pull_request_branch(4, sha).unwrap(),
         GitHubAction::ready_pull_request(4, sha).unwrap(),
-        GitHubAction::close_pull_request(4).unwrap(),
+        GitHubAction::close_pull_request(4, sha).unwrap(),
         GitHubAction::close_issue(5).unwrap(),
         GitHubAction::merge_pull_request(4, sha, MergeMethod::Squash).unwrap(),
     ];
@@ -166,9 +166,11 @@ async fn emits_exact_branch_comment_review_check_draft_and_merge_requests() {
     assert_eq!(requests[7].0, Method::POST);
     assert_eq!(requests[7].1, "/graphql");
     assert_eq!(requests[7].2["variables"]["pullRequestId"], "PR_node");
-    assert_eq!(requests[8].2, json!({"state":"closed"}));
+    assert_eq!(requests[8].0, Method::GET);
+    assert_eq!(requests[8].1, "/repos/octo/fixture/pulls/4");
+    assert_eq!(requests[9].2, json!({"state":"closed"}));
     assert_eq!(
-        requests[9],
+        requests[10],
         (
             Method::PATCH,
             "/repos/octo/fixture/issues/5".into(),
@@ -176,7 +178,7 @@ async fn emits_exact_branch_comment_review_check_draft_and_merge_requests() {
         )
     );
     assert_eq!(
-        requests[10],
+        requests[11],
         (
             Method::PUT,
             "/repos/octo/fixture/pulls/4/merge".into(),
@@ -271,6 +273,22 @@ async fn preflight_read_with_unparseable_body_is_a_definite_invalid_response() {
         .unwrap_err();
 
     assert!(matches!(error, MutationError::InvalidResponse));
+}
+
+#[tokio::test]
+async fn close_pull_request_rejects_a_stale_live_head_before_patch() {
+    let client = test_client(Router::new().route("/{*path}", any(ready_response))).await;
+    let error = client
+        .execute(
+            "octo",
+            "fixture",
+            &GitHubAction::close_pull_request(4, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .unwrap(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, MutationError::StaleRemoteHead));
 }
 
 #[tokio::test]

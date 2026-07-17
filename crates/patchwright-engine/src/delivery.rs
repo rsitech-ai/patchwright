@@ -1,8 +1,8 @@
 use crate::{EventStore, GitHubRepositorySnapshot, WorkItemKind};
 use chrono::{Duration, Utc};
 use patchwright_core::{
-    ActionFingerprint, ActionFingerprintDraft, Approval, ApprovalClass, Capability,
-    GitHubActionPreview, Policy, PolicyDecision, TaskId, TaskState,
+    ActionFingerprint, ActionFingerprintDraft, Approval, ApprovalClass, Capability, GitHubAction,
+    GitHubActionPreview, Policy, PolicyDecision, TaskId, TaskSource, TaskState,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,10 +29,19 @@ pub fn preview_delivery(
         .task_contract(task_id)
         .map_err(persistence)?
         .ok_or(DeliveryError::ContractMissing)?;
-    if !contract
-        .required_capabilities()
-        .contains(&action.action().capability())
-    {
+    let capability = action.action().capability();
+    let expected_state = if matches!(
+        capability,
+        Capability::MergePullRequest | Capability::EnqueuePullRequest
+    ) {
+        TaskState::AwaitingMergeApproval
+    } else {
+        TaskState::AwaitingDeliveryApproval
+    };
+    if task.state != expected_state {
+        return Err(DeliveryError::TaskStateInvalid);
+    }
+    if !contract.required_capabilities().contains(&capability) {
         return Err(DeliveryError::CapabilityNotDeclared);
     }
     let binding_id = task
@@ -51,6 +60,19 @@ pub fn preview_delivery(
     {
         return Err(DeliveryError::RemoteMismatch);
     }
+    if contract
+        .source()
+        .repository_id()
+        .is_some_and(|repository_id| repository_id != binding.github_repository_id())
+        || contract
+            .source()
+            .repository_full_name()
+            .is_some_and(|full_name| full_name != binding.full_name())
+    {
+        return Err(DeliveryError::SourceMismatch);
+    }
+    validate_action_target(&contract, &binding, task_id, action.action())?;
+    validate_action_sha(&task, &contract, action.action())?;
     if contract.head_sha().is_some()
         && action.precondition().expected_head_sha() != contract.head_sha()
     {
@@ -150,7 +172,24 @@ pub fn authorize_execution(
         PolicyDecision::Denied(_) => return Err(DeliveryError::PolicyDenied),
     }
     let key = preview.action.idempotency_sha256().to_owned();
-    if !store.claim_delivery(&key).map_err(persistence)? {
+    let task_event = if matches!(
+        preview.action.action().capability(),
+        Capability::MergePullRequest | Capability::EnqueuePullRequest
+    ) {
+        let mut task = store
+            .load_task(preview.task_id)
+            .map_err(persistence)?
+            .ok_or(DeliveryError::TaskMissing)?;
+        task.transition(TaskState::Merging)
+            .map_err(|error| DeliveryError::Persistence(error.to_string()))?;
+        Some((task, "Approved merge execution started".to_owned()))
+    } else {
+        None
+    };
+    if !store
+        .claim_delivery_with_task_event(&key, task_event.as_ref())
+        .map_err(persistence)?
+    {
         return Err(DeliveryError::AlreadyClaimed);
     }
     Ok(key)
@@ -168,7 +207,14 @@ pub fn complete_successful_delivery(
         capability,
         Capability::CloseIssue | Capability::ClosePullRequest
     ) || (capability == Capability::MergePullRequest && merged);
-    if !terminal {
+    let enters_monitoring = matches!(
+        capability,
+        Capability::CreatePullRequest
+            | Capability::PostReview
+            | Capability::UpdatePullRequestBranch
+            | Capability::ReadyPullRequest
+    );
+    if !terminal && !enters_monitoring {
         return store
             .complete_delivery(key, encoded_result)
             .map_err(persistence);
@@ -178,33 +224,11 @@ pub fn complete_successful_delivery(
         .load_task(preview.task_id)
         .map_err(persistence)?
         .ok_or(DeliveryError::TaskMissing)?;
-    let merge_lifecycle = [
-        (
-            TaskState::AwaitingDeliveryApproval,
-            TaskState::Delivering,
-            "Approved terminal GitHub delivery started",
-        ),
-        (
-            TaskState::Delivering,
-            TaskState::Monitoring,
-            "GitHub accepted the terminal delivery; reconciling remote state",
-        ),
-        (
-            TaskState::Monitoring,
-            TaskState::AwaitingMergeApproval,
-            "Remote completion preconditions reconciled",
-        ),
-        (
-            TaskState::AwaitingMergeApproval,
-            TaskState::Merging,
-            "Approved merge delivery is being finalized",
-        ),
-        (
-            TaskState::Merging,
-            TaskState::Completed,
-            "GitHub confirmed the merged task outcome completed",
-        ),
-    ];
+    let merge_lifecycle = [(
+        TaskState::Merging,
+        TaskState::Completed,
+        "GitHub confirmed the approved merge completed",
+    )];
     let close_lifecycle = [
         (
             TaskState::AwaitingDeliveryApproval,
@@ -222,8 +246,22 @@ pub fn complete_successful_delivery(
             "GitHub confirmed the closed task outcome completed",
         ),
     ];
+    let monitoring_lifecycle = [
+        (
+            TaskState::AwaitingDeliveryApproval,
+            TaskState::Delivering,
+            "Approved GitHub delivery started",
+        ),
+        (
+            TaskState::Delivering,
+            TaskState::Monitoring,
+            "GitHub accepted the delivery; fresh CI and review evidence is required",
+        ),
+    ];
     let lifecycle = if capability == Capability::MergePullRequest {
         merge_lifecycle.as_slice()
+    } else if enters_monitoring {
+        monitoring_lifecycle.as_slice()
     } else {
         close_lifecycle.as_slice()
     };
@@ -245,6 +283,41 @@ pub fn complete_successful_delivery(
     }
     store
         .complete_delivery_with_task_events(key, encoded_result, &events)
+        .map_err(persistence)
+}
+
+pub fn complete_failed_delivery(
+    store: &EventStore,
+    preview: &DeliveryPreview,
+    key: &str,
+    encoded_result: &str,
+) -> Result<(), DeliveryError> {
+    if !matches!(
+        preview.action.action().capability(),
+        Capability::MergePullRequest | Capability::EnqueuePullRequest
+    ) {
+        return store
+            .complete_delivery(key, encoded_result)
+            .map_err(persistence);
+    }
+    let mut task = store
+        .load_task(preview.task_id)
+        .map_err(persistence)?
+        .ok_or(DeliveryError::TaskMissing)?;
+    if task.state != TaskState::Merging {
+        return store
+            .complete_delivery(key, encoded_result)
+            .map_err(persistence);
+    }
+    task.transition(TaskState::AwaitingMergeApproval)
+        .map_err(|error| DeliveryError::Persistence(error.to_string()))?;
+    store
+        .complete_failed_merge_delivery(
+            key,
+            encoded_result,
+            &task,
+            "GitHub definitively rejected the merge; fresh merge approval is required",
+        )
         .map_err(persistence)
 }
 
@@ -341,6 +414,90 @@ fn digest(input: &[u8]) -> String {
     format!("{:x}", Sha256::digest(input))
 }
 
+fn validate_action_target(
+    contract: &patchwright_core::TaskContract,
+    binding: &patchwright_core::RepositoryBinding,
+    task_id: TaskId,
+    action: &GitHubAction,
+) -> Result<(), DeliveryError> {
+    let source_number = contract.source().item_number();
+    let action_number = action.pull_request_number();
+    if action_number.is_some() && action_number != source_number {
+        return Err(DeliveryError::ActionTargetMismatch);
+    }
+    match (action, contract.source()) {
+        (
+            GitHubAction::CloseIssue { .. } | GitHubAction::Comment { .. },
+            TaskSource::GitHubIssue(_),
+        )
+        | (
+            GitHubAction::Comment { .. }
+            | GitHubAction::Review { .. }
+            | GitHubAction::ResolveReviewThread { .. }
+            | GitHubAction::UpdatePullRequestBranch { .. }
+            | GitHubAction::ReadyPullRequest { .. }
+            | GitHubAction::ClosePullRequest { .. }
+            | GitHubAction::EnqueuePullRequest { .. }
+            | GitHubAction::MergePullRequest { .. },
+            TaskSource::GitHubPullRequest(_),
+        ) => {}
+        (
+            GitHubAction::Comment { .. }
+            | GitHubAction::Review { .. }
+            | GitHubAction::ResolveReviewThread { .. }
+            | GitHubAction::UpdatePullRequestBranch { .. }
+            | GitHubAction::ReadyPullRequest { .. }
+            | GitHubAction::ClosePullRequest { .. }
+            | GitHubAction::CloseIssue { .. }
+            | GitHubAction::EnqueuePullRequest { .. }
+            | GitHubAction::MergePullRequest { .. },
+            _,
+        ) => return Err(DeliveryError::ActionTargetMismatch),
+        _ => {}
+    }
+    let prepared_branch = format!("patchwright/{task_id}");
+    if action
+        .branch()
+        .is_some_and(|branch| branch != prepared_branch)
+    {
+        return Err(DeliveryError::BranchMismatch);
+    }
+    if let GitHubAction::DraftPullRequest { base, .. } = action
+        && base != binding.default_branch()
+    {
+        return Err(DeliveryError::BranchMismatch);
+    }
+    Ok(())
+}
+
+fn validate_action_sha(
+    task: &patchwright_core::Task,
+    contract: &patchwright_core::TaskContract,
+    action: &GitHubAction,
+) -> Result<(), DeliveryError> {
+    match action {
+        GitHubAction::CreateBranch { from_sha, .. } => {
+            if contract.base_sha() != Some(from_sha.as_str()) {
+                return Err(DeliveryError::PreconditionMismatch);
+            }
+        }
+        GitHubAction::CheckRun { head_sha, .. } => {
+            let expected = if let Some(contract_head) = contract.head_sha() {
+                contract_head.to_owned()
+            } else {
+                crate::RepositoryService::inspect(std::path::Path::new(&task.repository_path))
+                    .map_err(|_| DeliveryError::PreconditionMismatch)?
+                    .head_sha
+            };
+            if *head_sha != expected {
+                return Err(DeliveryError::PreconditionMismatch);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn persistence(error: anyhow::Error) -> DeliveryError {
     DeliveryError::Persistence(error.to_string())
 }
@@ -351,6 +508,8 @@ pub enum DeliveryError {
     TaskMissing,
     #[error("delivery task contract is missing")]
     ContractMissing,
+    #[error("delivery task is not awaiting the required approval class")]
+    TaskStateInvalid,
     #[error("delivery action capability is not declared by the task contract")]
     CapabilityNotDeclared,
     #[error("delivery repository binding is missing")]
@@ -359,6 +518,10 @@ pub enum DeliveryError {
     BindingMismatch,
     #[error("delivery remote identity does not match the task binding")]
     RemoteMismatch,
+    #[error("delivery action target does not match the task source")]
+    ActionTargetMismatch,
+    #[error("delivery branch does not match the prepared task branch")]
+    BranchMismatch,
     #[error("delivery source SHA precondition changed")]
     PreconditionMismatch,
     #[error("GitHub reconciliation source does not match the task")]

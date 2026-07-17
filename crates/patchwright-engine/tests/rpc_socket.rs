@@ -1,4 +1,13 @@
-use patchwright_engine::{serve, serve_until};
+use chrono::Utc;
+use patchwright_core::{
+    Capability, CredentialHealth, GitHubPullRequestSourceInput, RepositoryBinding,
+    RepositoryBindingDraft, RepositoryPermissionSnapshot, RiskClass, Task, TaskContract,
+    TaskContractDraft, TaskSource, TaskState, VerificationCommand,
+};
+use patchwright_engine::{
+    EventStore, GitHubRepository, GitHubRepositoryPermissions, GitHubRepositorySnapshot,
+    GitHubWorkItem, WorkItemKind, serve, serve_until,
+};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use tokio::{
@@ -124,39 +133,11 @@ async fn assert_monitor_rpc(stream: &mut BufReader<UnixStream>, task_id: &str) {
         }),
     )
     .await;
-    assert_eq!(started["result"]["state"], "pending");
-    let monitor_id = started["result"]["id"].as_str().unwrap();
-    let observed = call(
-        stream,
-        json!({
-            "jsonrpc":"2.0","id":6,"method":"monitor.observe",
-            "params":{
-                "monitorId":monitor_id,
-                "observation":json!({
-                    "observedAt":"2026-07-14T09:00:00Z",
-                    "headSha":"b".repeat(40),
-                    "baseSha":"a".repeat(40),
-                    "ci":"success",
-                    "review":"approved",
-                    "mergeability":"mergeable",
-                    "repositoryAccessible":true,
-                    "networkAvailable":true,
-                    "rateLimitedUntil":null
-                }).to_string()
-            }
-        }),
-    )
-    .await;
-    assert_eq!(observed["result"]["outcome"]["state"], "succeeded");
-    let status = call(
-        stream,
-        json!({
-            "jsonrpc":"2.0","id":7,"method":"monitor.status",
-            "params":{"monitorId":monitor_id}
-        }),
-    )
-    .await;
-    assert_eq!(status["result"]["state"], "succeeded");
+    assert_eq!(started["error"]["code"], -32070);
+    assert_eq!(
+        started["error"]["data"],
+        "task is not in the monitoring state"
+    );
 }
 
 #[tokio::test]
@@ -384,6 +365,232 @@ async fn rpc_rejects_a_forged_action_preview_before_delivery_lookup() {
 
     assert_eq!(response["error"]["code"], -32602);
     server.abort();
+}
+
+#[tokio::test]
+async fn monitoring_is_bound_to_the_task_and_uses_engine_synced_github_evidence() {
+    let directory = owner_only_tempdir();
+    let socket = directory.path().join("engine.sock");
+    let database = directory.path().join("engine.sqlite3");
+    let (task_id, head_sha, base_sha) = seed_monitoring_task(&database);
+    let server_socket = socket.clone();
+    let server = tokio::spawn(async move { serve(&server_socket, &database).await });
+    wait_for_socket(&socket).await;
+    let mut stream = BufReader::new(UnixStream::connect(&socket).await.unwrap());
+
+    let wrong_target = call(
+        &mut stream,
+        json!({
+            "jsonrpc":"2.0","id":40,"method":"monitor.start",
+            "params":{"monitor":json!({
+                "taskId":task_id,
+                "repositoryFullName":"octocat/hello",
+                "pullRequestNumber":8,
+                "expectedHeadSha":head_sha,
+                "expectedBaseSha":base_sha,
+                "repairBudget":2
+            }).to_string()}
+        }),
+    )
+    .await;
+    assert_eq!(wrong_target["error"]["code"], -32070);
+
+    let started = call(
+        &mut stream,
+        json!({
+            "jsonrpc":"2.0","id":41,"method":"monitor.start",
+            "params":{"monitor":json!({
+                "taskId":task_id,
+                "repositoryFullName":"octocat/hello",
+                "pullRequestNumber":7,
+                "expectedHeadSha":head_sha,
+                "expectedBaseSha":base_sha,
+                "repairBudget":2
+            }).to_string()}
+        }),
+    )
+    .await;
+    assert_eq!(started["result"]["state"], "pending");
+    let monitor_id = started["result"]["id"].as_str().unwrap();
+
+    let observed = call(
+        &mut stream,
+        json!({
+            "jsonrpc":"2.0","id":42,"method":"monitor.observe",
+            "params":{
+                "monitorId":monitor_id,
+                "observation":json!({
+                    "observedAt":"2020-01-01T00:00:00Z",
+                    "headSha":"f".repeat(40),
+                    "baseSha":"e".repeat(40),
+                    "ci":"failure",
+                    "review":"changesRequested",
+                    "mergeability":"conflicting",
+                    "repositoryAccessible":false,
+                    "networkAvailable":false,
+                    "rateLimitedUntil":null
+                }).to_string()
+            }
+        }),
+    )
+    .await;
+    assert_eq!(observed["result"]["outcome"]["state"], "succeeded");
+    assert_eq!(
+        observed["result"]["monitor"]["latestObservation"]["headSha"],
+        head_sha
+    );
+    let tasks = call(
+        &mut stream,
+        json!({"jsonrpc":"2.0","id":43,"method":"task.list","params":{}}),
+    )
+    .await;
+    assert_eq!(tasks["result"][0]["state"], "awaitingMergeApproval");
+    server.abort();
+}
+
+fn seed_monitoring_task(database: &std::path::Path) -> (String, String, String) {
+    let store = EventStore::open(database).unwrap();
+    let head_sha = "b".repeat(40);
+    let base_sha = "a".repeat(40);
+    let binding = RepositoryBinding::try_from(RepositoryBindingDraft {
+        github_repository_id: 42,
+        full_name: "octocat/hello".into(),
+        installation_id: 84,
+        clone_url: "https://github.com/octocat/hello.git".into(),
+        html_url: "https://github.com/octocat/hello".into(),
+        default_branch: "main".into(),
+        user_checkout: Some("/tmp/hello".into()),
+        managed_clone: None,
+        state_root: "/tmp/patchwright/state".into(),
+        worktree_root: "/tmp/patchwright/worktrees".into(),
+        default_branch_sha: Some(base_sha.clone()),
+        default_branch_committed_at: Some(Utc::now()),
+        permissions: RepositoryPermissionSnapshot::read_only(),
+        credential_health: CredentialHealth::Healthy,
+    })
+    .unwrap();
+    store.save_repository_binding(&binding).unwrap();
+    let mut task = Task::new("Monitor exact pull request", "/tmp/hello").unwrap();
+    task.repository_binding_id = Some(binding.id());
+    task.source = TaskSource::github_pull_request(GitHubPullRequestSourceInput {
+        repository_id: 42,
+        repository_full_name: "octocat/hello".into(),
+        number: 7,
+        html_url: "https://github.com/octocat/hello/pull/7".into(),
+        snapshot_at: Utc::now(),
+        base_ref: "main".into(),
+        base_sha: base_sha.clone(),
+        head_ref: "repair-ci".into(),
+        head_sha: head_sha.clone(),
+    })
+    .unwrap();
+    store.save_task(&task, "task created").unwrap();
+    store
+        .save_task_contract(
+            &TaskContract::try_from(TaskContractDraft {
+                task_id: task.id,
+                source: task.source.clone(),
+                repository_binding_id: binding.id(),
+                goal: "Monitor exact pull request".into(),
+                acceptance_criteria: vec!["CI and review pass".into()],
+                base_sha: Some(base_sha.clone()),
+                head_sha: Some(head_sha.clone()),
+                source_sha256: "c".repeat(64),
+                repository_sha256: "d".repeat(64),
+                instruction_digests: Vec::new(),
+                verification_commands: vec![VerificationCommand::new("cargo", ["test"]).unwrap()],
+                required_capabilities: vec![Capability::MergePullRequest],
+                risk: RiskClass::Moderate,
+                sensitive_paths: Vec::new(),
+                dependencies: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    for state in [
+        TaskState::Assessing,
+        TaskState::Planned,
+        TaskState::AwaitingPreparationApproval,
+        TaskState::Preparing,
+        TaskState::Implementing,
+        TaskState::Verifying,
+        TaskState::Reviewing,
+        TaskState::AwaitingDeliveryApproval,
+        TaskState::Delivering,
+        TaskState::Monitoring,
+    ] {
+        task.transition(state).unwrap();
+    }
+    store.save_task(&task, "monitoring delivery").unwrap();
+    store
+        .replace_github_snapshot(&monitoring_snapshot(&head_sha, &base_sha))
+        .unwrap();
+    (task.id.to_string(), head_sha, base_sha)
+}
+
+fn monitoring_snapshot(head_sha: &str, base_sha: &str) -> GitHubRepositorySnapshot {
+    GitHubRepositorySnapshot {
+        repository: GitHubRepository {
+            id: 42,
+            full_name: "octocat/hello".into(),
+            description: None,
+            private: true,
+            archived: false,
+            default_branch: "main".into(),
+            html_url: "https://github.com/octocat/hello".into(),
+            updated_at: Utc::now().to_rfc3339(),
+            pushed_at: Some(Utc::now().to_rfc3339()),
+            open_issues_count: 0,
+            open_pull_request_count: 1,
+            failing_check_count: 0,
+            default_branch_sha: Some(base_sha.into()),
+            default_branch_committed_at: Some(Utc::now().to_rfc3339()),
+            installation_id: Some(84),
+            permissions: GitHubRepositoryPermissions::default(),
+        },
+        work_items: vec![GitHubWorkItem {
+            id: 700,
+            repository_full_name: "octocat/hello".into(),
+            number: 7,
+            kind: WorkItemKind::PullRequest,
+            title: "Repair CI".into(),
+            state: "open".into(),
+            state_reason: None,
+            body: None,
+            author: "octocat".into(),
+            html_url: "https://github.com/octocat/hello/pull/7".into(),
+            draft: false,
+            comments_count: 0,
+            base_ref: Some("main".into()),
+            base_sha: Some(base_sha.into()),
+            head_ref: Some("repair-ci".into()),
+            head_sha: Some(head_sha.into()),
+            merged: Some(false),
+            merge_commit_sha: None,
+            created_at: Some(Utc::now().to_rfc3339()),
+            head_committed_at: Some(Utc::now().to_rfc3339()),
+            latest_review_at: Some(Utc::now().to_rfc3339()),
+            updated_at: Utc::now().to_rfc3339(),
+            review_decision: Some("approved".into()),
+            ci_health: Some("passing".into()),
+            mergeable: Some(true),
+            mergeable_state: Some("clean".into()),
+            rebaseable: Some(true),
+            has_conflicts: Some(false),
+            head_repository_full_name: Some("octocat/hello".into()),
+            head_repository_fork: false,
+            maintainer_can_modify: true,
+            additions: 1,
+            deletions: 0,
+            changed_files: 1,
+            labels: Vec::new(),
+            assignees: Vec::new(),
+            milestone: None,
+        }],
+        discussions: Vec::new(),
+        checks: Vec::new(),
+        workflow_runs: Vec::new(),
+    }
 }
 
 fn owner_only_tempdir() -> tempfile::TempDir {

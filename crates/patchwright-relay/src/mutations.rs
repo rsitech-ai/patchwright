@@ -304,7 +304,21 @@ impl GitHubMutationClient {
             }
             GitHubAction::ClosePullRequest {
                 pull_request_number,
+                expected_head_sha,
             } => {
+                let pull = self
+                    .request_value(
+                        Method::GET,
+                        &format!("{prefix}/pulls/{pull_request_number}"),
+                        None,
+                        RequestEffect::Read,
+                    )
+                    .await?;
+                if pull.pointer("/head/sha").and_then(Value::as_str)
+                    != Some(expected_head_sha.as_str())
+                {
+                    return Err(MutationError::StaleRemoteHead);
+                }
                 self.request(
                     Method::PATCH,
                     &format!("{prefix}/pulls/{pull_request_number}"),
