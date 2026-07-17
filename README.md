@@ -75,12 +75,16 @@ cargo run -p patchwright-engine -- serve \
 
 PATCHWRIGHT_GITHUB_WEBHOOK_SECRET_FILE="$HOME/.patchwright/webhook-secret" \
 PATCHWRIGHT_RELAY_DATABASE="$HOME/.patchwright/relay.sqlite" \
+PATCHWRIGHT_ENGINE_SOCKET="$HOME/.patchwright/engine.sock" \
 cargo run -p patchwright-relay -- serve --address 127.0.0.1:8787
 ```
 
-The relay binds to loopback by default. Create the webhook secret file outside
-the checkout with owner-only mode `0600`; the file contains the raw webhook
-secret and must never be committed or passed as a command-line argument. GitHub
+The relay accepts only IPv4 or IPv6 loopback addresses; terminate authenticated
+HTTPS or a tunnel in front of it. Create the webhook secret file outside the
+checkout with owner-only mode `0400` or `0600`; the file contains the raw webhook
+secret and must never be committed or passed as a command-line argument. The
+relay durably retries accepted sanitized events to the owner-only engine socket;
+an engine outage does not require GitHub redelivery. GitHub
 App metadata and a Keychain or owner-only protected-key reference are your
 configuration and are never committed. See [Choose only the access you
 need](#choose-only-the-access-you-need). The engine brokers repository-scoped,

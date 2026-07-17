@@ -27,6 +27,13 @@ pub enum PreparationClaimOutcome {
     TaskInProgress,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookIngestOutcome {
+    pub inserted: bool,
+    pub monitors_woken: usize,
+}
+
 impl EventStore {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -53,6 +60,109 @@ impl EventStore {
         let rows = statement.query_map([], |row| row.get(0))?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("load schema migration versions")
+    }
+
+    pub fn ingest_github_webhook(
+        &self,
+        delivery: &patchwright_relay::ForwardedWebhook,
+    ) -> Result<WebhookIngestOutcome> {
+        validate_forwarded_webhook(delivery)?;
+        let transaction = self.connection.unchecked_transaction()?;
+        let inserted = transaction.execute(
+            "INSERT OR IGNORE INTO github_webhook_deliveries(
+                 delivery_id, event, action, repository_full_name,
+                 entity_number, payload_sha256, received_at, ingested_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                delivery.delivery_id,
+                delivery.envelope.event,
+                delivery.envelope.action,
+                delivery.envelope.repository_full_name,
+                delivery.envelope.entity_number,
+                delivery.payload_sha256,
+                delivery.received_at,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )? == 1;
+        if !inserted {
+            transaction.rollback()?;
+            return Ok(WebhookIngestOutcome {
+                inserted: false,
+                monitors_woken: 0,
+            });
+        }
+
+        let mut monitors = Vec::new();
+        if let Some(repository) = delivery.envelope.repository_full_name.as_deref() {
+            let mut statement = if delivery.envelope.entity_number.is_some() {
+                transaction.prepare(
+                    "SELECT payload FROM monitors
+                     WHERE state = 'pending' AND repository_full_name = ?1
+                       AND pull_request_number = ?2
+                     ORDER BY id",
+                )?
+            } else {
+                transaction.prepare(
+                    "SELECT payload FROM monitors
+                     WHERE state = 'pending' AND repository_full_name = ?1
+                     ORDER BY id",
+                )?
+            };
+            if let Some(number) = delivery.envelope.entity_number {
+                let rows = statement
+                    .query_map(params![repository, number], |row| row.get::<_, String>(0))?;
+                for row in rows {
+                    monitors.push(
+                        serde_json::from_str::<MonitorRecord>(&row?)
+                            .context("decode webhook monitor")?,
+                    );
+                }
+            } else {
+                let rows = statement.query_map([repository], |row| row.get::<_, String>(0))?;
+                for row in rows {
+                    monitors.push(
+                        serde_json::from_str::<MonitorRecord>(&row?)
+                            .context("decode webhook monitor")?,
+                    );
+                }
+            }
+        }
+
+        let now = chrono::Utc::now();
+        let mut monitors_woken = 0;
+        for monitor in &mut monitors {
+            if !monitor.wake(now) {
+                continue;
+            }
+            transaction.execute(
+                "UPDATE monitors
+                 SET state = ?2, next_attempt_at = ?3, payload = ?4, updated_at = ?5
+                 WHERE id = ?1 AND state = 'pending'",
+                params![
+                    monitor.id.to_string(),
+                    enum_name(monitor.state),
+                    monitor.next_attempt_at.map(|value| value.to_rfc3339()),
+                    serde_json::to_string(monitor)?,
+                    monitor.updated_at.to_rfc3339(),
+                ],
+            )?;
+            monitors_woken += 1;
+        }
+        transaction.commit()?;
+        Ok(WebhookIngestOutcome {
+            inserted: true,
+            monitors_woken,
+        })
+    }
+
+    pub fn github_webhook_delivery_count(&self) -> Result<usize> {
+        self.connection
+            .query_row(
+                "SELECT COUNT(*) FROM github_webhook_deliveries",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     pub fn save_task(&self, task: &Task, summary: &str) -> Result<()> {
@@ -1205,6 +1315,70 @@ fn validate_codex_event_kind(value: &str) -> Result<String> {
     Ok(value.to_owned())
 }
 
+fn validate_forwarded_webhook(delivery: &patchwright_relay::ForwardedWebhook) -> Result<()> {
+    anyhow::ensure!(
+        !delivery.delivery_id.is_empty()
+            && delivery.delivery_id.len() <= 128
+            && !delivery.delivery_id.chars().any(char::is_control),
+        "invalid GitHub webhook delivery ID"
+    );
+    anyhow::ensure!(
+        delivery.envelope.schema_version == 1,
+        "unsupported webhook schema"
+    );
+    anyhow::ensure!(
+        !delivery.envelope.event.is_empty()
+            && delivery.envelope.event.len() <= 64
+            && !delivery.envelope.event.chars().any(char::is_control),
+        "invalid webhook event"
+    );
+    anyhow::ensure!(
+        !delivery.envelope.action.is_empty()
+            && delivery.envelope.action.len() <= 64
+            && !delivery.envelope.action.chars().any(char::is_control),
+        "invalid webhook action"
+    );
+    if delivery.envelope.event != "ping" {
+        anyhow::ensure!(
+            delivery.envelope.repository_id.is_some()
+                && delivery.envelope.repository_full_name.is_some(),
+            "webhook repository identity is missing"
+        );
+    }
+    if let Some(repository) = delivery.envelope.repository_full_name.as_deref() {
+        let Some((owner, name)) = repository.split_once('/') else {
+            bail!("invalid webhook repository identity");
+        };
+        anyhow::ensure!(
+            !owner.is_empty()
+                && !name.is_empty()
+                && !name.contains('/')
+                && repository.len() <= 255
+                && !repository.chars().any(char::is_whitespace),
+            "invalid webhook repository identity"
+        );
+    }
+    anyhow::ensure!(
+        delivery
+            .envelope
+            .entity_number
+            .is_none_or(|value| value > 0)
+            && delivery.envelope.entity_id.is_none_or(|value| value > 0),
+        "invalid webhook entity identity"
+    );
+    anyhow::ensure!(
+        delivery.payload_sha256.len() == 64
+            && delivery
+                .payload_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit()),
+        "invalid webhook payload digest"
+    );
+    chrono::DateTime::parse_from_rfc3339(&delivery.received_at)
+        .context("invalid webhook receive time")?;
+    Ok(())
+}
+
 fn validate_codex_identity(value: &str, field: &'static str) -> Result<()> {
     anyhow::ensure!(
         !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control),
@@ -1472,5 +1646,20 @@ const MIGRATIONS: &[(u32, &str)] = &[
          );
          CREATE INDEX IF NOT EXISTS verification_evidence_task
              ON verification_evidence(task_id, completed_at);",
+    ),
+    (
+        10,
+        "CREATE TABLE IF NOT EXISTS github_webhook_deliveries (
+             delivery_id TEXT PRIMARY KEY NOT NULL,
+             event TEXT NOT NULL,
+             action TEXT NOT NULL,
+             repository_full_name TEXT,
+             entity_number INTEGER,
+             payload_sha256 TEXT NOT NULL,
+             received_at TEXT NOT NULL,
+             ingested_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS github_webhook_repository
+             ON github_webhook_deliveries(repository_full_name, entity_number, ingested_at);",
     ),
 ];

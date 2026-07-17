@@ -77,7 +77,7 @@ fn legacy_database_migrates_without_losing_existing_tasks() {
     assert_eq!(loaded.state, TaskState::AwaitingPreparationApproval);
     assert_eq!(
         store.schema_versions().unwrap(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     );
     drop(store);
 
@@ -107,6 +107,7 @@ fn legacy_database_migrates_without_losing_existing_tasks() {
         "codex_events",
         "preparation_claims",
         "verification_evidence",
+        "github_webhook_deliveries",
     ] {
         let present: bool = connection
             .query_row(

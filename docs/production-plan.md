@@ -22,7 +22,7 @@ only Developer ID-signed, Apple-notarized binaries through GitHub Releases.
 ## Runtime operations
 
 - Engine shutdown: terminate the `patchwright-engine serve` process; in-flight tasks remain recoverable in SQLite.
-- Relay shutdown: terminate `patchwright-relay`; accepted deliveries remain in the durable relay inbox. GitHub does not automatically redeliver failed deliveries. After restart, an authorized GitHub App owner must inspect **Advanced → Recent deliveries** and request **Redeliver** for each failed delivery (or use GitHub's authenticated App-delivery redelivery API). The relay deduplicates the original delivery ID; restarting it does not request redelivery.
+- Relay shutdown: terminate `patchwright-relay`; accepted deliveries remain in the durable relay inbox and resume bounded forwarding to the engine after restart. GitHub does not automatically redeliver ingress attempts that failed before the relay returned `202`; an authorized GitHub App owner must request those from **Advanced → Recent deliveries** (or use GitHub's authenticated App-delivery redelivery API). The relay and engine both deduplicate the original delivery ID.
 - Task kill switch: cancel a task in the app or call `task.cancel`; the engine kills only the owned child process group and leaves the worktree intact.
 - Global kill switch: set `PATCHWRIGHT_AUTOMATION_DISABLED=1`; read-only inspection remains available while all mutating capabilities fail closed.
 - Rollback: stop app/engine/relay, revert the release commit, and retain the SQLite database plus task worktrees for inspection.

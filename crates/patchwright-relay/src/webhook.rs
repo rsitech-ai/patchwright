@@ -7,22 +7,36 @@ use axum::{
     routing::{get, post},
 };
 use hmac::{Hmac, Mac};
-use rusqlite::{Connection, params};
-use serde::Deserialize;
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::{
     fs::{self, OpenOptions},
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    future::Future,
+    os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
 };
 
 const MAX_BODY_BYTES: usize = 1024 * 1024;
+const MAX_RPC_FRAME_BYTES: usize = 1024 * 1024;
+const DEFAULT_QUEUE_CAPACITY: usize = 10_000;
+const FORWARD_BATCH_SIZE: usize = 32;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const RPC_TIMEOUT: Duration = Duration::from_secs(5);
+const INITIAL_RETRY_MILLIS: i64 = 200;
+const MAX_RETRY_MILLIS: i64 = 60_000;
 
 #[derive(Clone)]
 pub struct RelayState {
     secret: Arc<Vec<u8>>,
     inbox: Arc<Mutex<Connection>>,
+    queue_capacity: usize,
 }
 
 impl RelayState {
@@ -33,6 +47,7 @@ impl RelayState {
         Self {
             secret: Arc::new(secret),
             inbox: Arc::new(Mutex::new(connection)),
+            queue_capacity: DEFAULT_QUEUE_CAPACITY,
         }
     }
 
@@ -51,6 +66,7 @@ impl RelayState {
         Ok(Self {
             secret: Arc::new(secret),
             inbox: Arc::new(Mutex::new(connection)),
+            queue_capacity: DEFAULT_QUEUE_CAPACITY,
         })
     }
 
@@ -65,12 +81,46 @@ impl RelayState {
             .expect("count relay inbox deliveries")
     }
 
-    fn record(&self, delivery: &WebhookDelivery) -> anyhow::Result<RecordOutcome> {
+    /// Returns the number of accepted deliveries that the engine has not acknowledged.
+    pub fn pending_delivery_count(&self) -> anyhow::Result<usize> {
         let connection = self
             .inbox
             .lock()
             .map_err(|_| anyhow::anyhow!("relay inbox lock poisoned"))?;
-        let inserted = connection.execute(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM webhook_deliveries WHERE forwarded_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    fn record(&self, delivery: &WebhookDelivery) -> anyhow::Result<RecordOutcome> {
+        let mut connection = self
+            .inbox
+            .lock()
+            .map_err(|_| anyhow::anyhow!("relay inbox lock poisoned"))?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM webhook_deliveries WHERE delivery_id = ?1)",
+            [&delivery.delivery_id],
+            |row| row.get(0),
+        )?;
+        if existing {
+            transaction.rollback()?;
+            return Ok(RecordOutcome::Duplicate);
+        }
+        let pending: usize = transaction.query_row(
+            "SELECT COUNT(*) FROM webhook_deliveries WHERE forwarded_at IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        if pending >= self.queue_capacity {
+            transaction.rollback()?;
+            return Ok(RecordOutcome::Full);
+        }
+        transaction.execute(
             "INSERT OR IGNORE INTO webhook_deliveries
                 (delivery_id, event, action, payload, payload_sha256, received_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -83,11 +133,184 @@ impl RelayState {
                 chrono::Utc::now().to_rfc3339(),
             ],
         )?;
-        if inserted == 1 {
-            return Ok(RecordOutcome::Accepted);
-        }
-        Ok(RecordOutcome::Duplicate)
+        transaction.commit()?;
+        Ok(RecordOutcome::Accepted)
     }
+
+    /// Attempts one bounded batch of due outbox entries.
+    ///
+    /// Transport failures are converted into durable bounded backoff so a relay
+    /// restart continues retrying without requiring GitHub to redeliver.
+    pub async fn forward_pending_once(
+        &self,
+        engine_socket: &Path,
+    ) -> anyhow::Result<ForwardSummary> {
+        let state = self.clone();
+        let deliveries = tokio::task::spawn_blocking(move || state.due_deliveries())
+            .await
+            .map_err(|error| anyhow::anyhow!("relay outbox worker failed: {error}"))??;
+        let mut summary = ForwardSummary {
+            attempted: deliveries.len(),
+            forwarded: 0,
+        };
+        for delivery in deliveries {
+            match forward_delivery(engine_socket, &delivery).await {
+                Ok(()) => {
+                    let state = self.clone();
+                    let delivery_id = delivery.delivery_id.clone();
+                    tokio::task::spawn_blocking(move || state.mark_forwarded(&delivery_id))
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!("relay outbox worker failed: {error}")
+                        })??;
+                    summary.forwarded += 1;
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, delivery_id = %delivery.delivery_id, "engine webhook forwarding deferred");
+                    let state = self.clone();
+                    let delivery_id = delivery.delivery_id.clone();
+                    tokio::task::spawn_blocking(move || state.defer_delivery(&delivery_id))
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!("relay outbox worker failed: {error}")
+                        })??;
+                }
+            }
+        }
+        Ok(summary)
+    }
+
+    /// Runs the durable forwarder until shutdown, with a bounded polling interval.
+    pub async fn run_forwarder_until<F>(
+        &self,
+        engine_socket: &Path,
+        shutdown: F,
+    ) -> anyhow::Result<()>
+    where
+        F: Future<Output = ()> + Send,
+    {
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                () = &mut shutdown => return Ok(()),
+                result = self.forward_pending_once(engine_socket) => {
+                    result?;
+                }
+            }
+            tokio::select! {
+                () = &mut shutdown => return Ok(()),
+                () = tokio::time::sleep(Duration::from_millis(200)) => {}
+            }
+        }
+    }
+
+    fn due_deliveries(&self) -> anyhow::Result<Vec<ForwardedWebhook>> {
+        let connection = self
+            .inbox
+            .lock()
+            .map_err(|_| anyhow::anyhow!("relay inbox lock poisoned"))?;
+        let mut statement = connection.prepare(
+            "SELECT delivery_id, payload, payload_sha256, received_at
+             FROM webhook_deliveries
+             WHERE forwarded_at IS NULL
+               AND (next_attempt_at IS NULL OR julianday(next_attempt_at) <= julianday(?1))
+             ORDER BY received_at, delivery_id
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(
+            params![
+                chrono::Utc::now().to_rfc3339(),
+                i64::try_from(FORWARD_BATCH_SIZE).expect("batch size fits in i64")
+            ],
+            |row| {
+                let payload: Vec<u8> = row.get(1)?;
+                let envelope = serde_json::from_slice(&payload).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        payload.len(),
+                        rusqlite::types::Type::Blob,
+                        Box::new(error),
+                    )
+                })?;
+                Ok(ForwardedWebhook {
+                    delivery_id: row.get(0)?,
+                    envelope,
+                    payload_sha256: row.get(2)?,
+                    received_at: row.get(3)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn mark_forwarded(&self, delivery_id: &str) -> anyhow::Result<()> {
+        let connection = self
+            .inbox
+            .lock()
+            .map_err(|_| anyhow::anyhow!("relay inbox lock poisoned"))?;
+        let updated = connection.execute(
+            "UPDATE webhook_deliveries
+             SET forwarded_at = ?2, last_error = NULL
+             WHERE delivery_id = ?1 AND forwarded_at IS NULL",
+            params![delivery_id, chrono::Utc::now().to_rfc3339()],
+        )?;
+        anyhow::ensure!(updated == 1, "pending relay delivery disappeared");
+        Ok(())
+    }
+
+    fn defer_delivery(&self, delivery_id: &str) -> anyhow::Result<()> {
+        let connection = self
+            .inbox
+            .lock()
+            .map_err(|_| anyhow::anyhow!("relay inbox lock poisoned"))?;
+        let attempts: u32 = connection
+            .query_row(
+                "SELECT attempt_count FROM webhook_deliveries
+                 WHERE delivery_id = ?1 AND forwarded_at IS NULL",
+                [delivery_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow::anyhow!("pending relay delivery disappeared"))?;
+        let exponent = attempts.min(8);
+        let backoff = (INITIAL_RETRY_MILLIS * (1_i64 << exponent)).min(MAX_RETRY_MILLIS);
+        let next_attempt = chrono::Utc::now() + chrono::Duration::milliseconds(backoff);
+        connection.execute(
+            "UPDATE webhook_deliveries
+             SET attempt_count = attempt_count + 1,
+                 next_attempt_at = ?2,
+                 last_error = 'engine unavailable'
+             WHERE delivery_id = ?1 AND forwarded_at IS NULL",
+            params![delivery_id, next_attempt.to_rfc3339()],
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SanitizedWebhookEnvelope {
+    pub schema_version: u32,
+    pub event: String,
+    pub action: String,
+    pub repository_id: Option<u64>,
+    pub repository_full_name: Option<String>,
+    pub entity_number: Option<u64>,
+    pub entity_id: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForwardedWebhook {
+    pub delivery_id: String,
+    pub envelope: SanitizedWebhookEnvelope,
+    pub payload_sha256: String,
+    pub received_at: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ForwardSummary {
+    pub attempted: usize,
+    pub forwarded: usize,
 }
 
 struct WebhookDelivery {
@@ -98,9 +321,41 @@ struct WebhookDelivery {
     payload_sha256: String,
 }
 
+#[derive(Debug, Eq, PartialEq)]
 enum RecordOutcome {
     Accepted,
     Duplicate,
+    Full,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RecordOutcome, RelayState, WebhookDelivery};
+
+    fn delivery(id: &str) -> WebhookDelivery {
+        WebhookDelivery {
+            delivery_id: id.to_owned(),
+            event: "pull_request".to_owned(),
+            action: "opened".to_owned(),
+            payload: br#"{"schemaVersion":1,"event":"pull_request","action":"opened","repositoryId":1,"repositoryFullName":"octocat/example","entityNumber":42,"entityId":null}"#.to_vec(),
+            payload_sha256: "a".repeat(64),
+        }
+    }
+
+    #[test]
+    fn durable_outbox_rejects_new_deliveries_at_its_bound_but_keeps_deduplication() {
+        let mut state = RelayState::new(b"secret".to_vec());
+        state.queue_capacity = 1;
+        assert_eq!(
+            state.record(&delivery("one")).unwrap(),
+            RecordOutcome::Accepted
+        );
+        assert_eq!(state.record(&delivery("two")).unwrap(), RecordOutcome::Full);
+        assert_eq!(
+            state.record(&delivery("one")).unwrap(),
+            RecordOutcome::Duplicate
+        );
+    }
 }
 
 pub fn router(state: RelayState) -> Router {
@@ -175,6 +430,7 @@ async fn github_webhook(
     match tokio::task::spawn_blocking(move || state.record(&delivery)).await {
         Ok(Ok(RecordOutcome::Accepted)) => (StatusCode::ACCEPTED, "accepted"),
         Ok(Ok(RecordOutcome::Duplicate)) => (StatusCode::OK, "duplicate"),
+        Ok(Ok(RecordOutcome::Full)) => (StatusCode::SERVICE_UNAVAILABLE, "webhook inbox full"),
         Ok(Err(error)) => {
             tracing::error!(error = %error, "failed to commit verified webhook delivery");
             (
@@ -197,7 +453,12 @@ fn sanitized_payload(event: &str, action: &str, body: &[u8]) -> anyhow::Result<V
     let repository = value.get("repository");
     let (entity_number, entity_id) = match event {
         "pull_request" => (value.pointer("/pull_request/number"), None),
-        "issue_comment" => (value.pointer("/issue/number"), value.pointer("/comment/id")),
+        "issue_comment" => (
+            value
+                .pointer("/issue/pull_request")
+                .and(value.pointer("/issue/number")),
+            value.pointer("/comment/id"),
+        ),
         "pull_request_review" => (
             value.pointer("/pull_request/number"),
             value.pointer("/review/id"),
@@ -212,16 +473,87 @@ fn sanitized_payload(event: &str, action: &str, body: &[u8]) -> anyhow::Result<V
         "ping" => (None, value.get("hook_id")),
         _ => (None, None),
     };
-    serde_json::to_vec(&serde_json::json!({
-        "schemaVersion": 1,
-        "event": event,
-        "action": action,
-        "repositoryId": repository.and_then(|item| item.get("id")),
-        "repositoryFullName": repository.and_then(|item| item.get("full_name")),
-        "entityNumber": entity_number,
-        "entityId": entity_id,
-    }))
+    serde_json::to_vec(&SanitizedWebhookEnvelope {
+        schema_version: 1,
+        event: event.to_owned(),
+        action: action.to_owned(),
+        repository_id: repository
+            .and_then(|item| item.get("id"))
+            .and_then(serde_json::Value::as_u64),
+        repository_full_name: repository
+            .and_then(|item| item.get("full_name"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        entity_number: entity_number.and_then(serde_json::Value::as_u64),
+        entity_id: entity_id.and_then(serde_json::Value::as_u64),
+    })
     .map_err(Into::into)
+}
+
+async fn forward_delivery(engine_socket: &Path, delivery: &ForwardedWebhook) -> anyhow::Result<()> {
+    verify_engine_socket(engine_socket)?;
+    let stream = tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(engine_socket))
+        .await
+        .map_err(|_| anyhow::anyhow!("engine connection timed out"))??;
+    let (peer_uid, _) = nix::unistd::getpeereid(&stream)?;
+    anyhow::ensure!(
+        peer_uid == nix::unistd::geteuid(),
+        "engine RPC peer is not owned by the current user"
+    );
+    let request = serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": delivery.delivery_id,
+        "method": "github.webhook.ingest",
+        "params": delivery,
+    }))?;
+    anyhow::ensure!(
+        request.len() < MAX_RPC_FRAME_BYTES,
+        "engine RPC frame is too large"
+    );
+    tokio::time::timeout(RPC_TIMEOUT, async move {
+        let (reader, mut writer) = stream.into_split();
+        writer.write_all(&request).await?;
+        writer.write_all(b"\n").await?;
+        writer.flush().await?;
+        let mut reader = BufReader::new(reader);
+        let mut response = Vec::with_capacity(4096);
+        let read = (&mut reader)
+            .take((MAX_RPC_FRAME_BYTES + 1) as u64)
+            .read_until(b'\n', &mut response)
+            .await?;
+        anyhow::ensure!(read > 0, "engine closed before acknowledging webhook");
+        anyhow::ensure!(
+            response.len() <= MAX_RPC_FRAME_BYTES && response.last() == Some(&b'\n'),
+            "engine RPC response frame is invalid"
+        );
+        let value: serde_json::Value = serde_json::from_slice(&response)?;
+        if let Some(error) = value.get("error") {
+            anyhow::bail!("engine rejected webhook: {error}");
+        }
+        anyhow::ensure!(
+            value.get("result").is_some(),
+            "engine acknowledgement is missing"
+        );
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("engine RPC timed out"))??;
+    Ok(())
+}
+
+fn verify_engine_socket(path: &Path) -> anyhow::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    anyhow::ensure!(
+        metadata.file_type().is_socket()
+            && !metadata.file_type().is_symlink()
+            && metadata.uid() == u32::from(nix::unistd::geteuid())
+            && is_owner_only(metadata.permissions().mode()),
+        "engine socket must be owner-only and owned by the current user"
+    );
+    if let Some(parent) = path.parent() {
+        verify_owner_only_directory(parent)?;
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -445,9 +777,49 @@ fn initialize_inbox(connection: &Connection) -> anyhow::Result<()> {
              action TEXT NOT NULL,
              payload BLOB NOT NULL,
              payload_sha256 TEXT NOT NULL,
-             received_at TEXT NOT NULL
+             received_at TEXT NOT NULL,
+             attempt_count INTEGER NOT NULL DEFAULT 0,
+             next_attempt_at TEXT,
+             last_error TEXT,
+             forwarded_at TEXT
          );",
     )?;
+    ensure_column(
+        connection,
+        "attempt_count",
+        "ALTER TABLE webhook_deliveries ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        connection,
+        "next_attempt_at",
+        "ALTER TABLE webhook_deliveries ADD COLUMN next_attempt_at TEXT",
+    )?;
+    ensure_column(
+        connection,
+        "last_error",
+        "ALTER TABLE webhook_deliveries ADD COLUMN last_error TEXT",
+    )?;
+    ensure_column(
+        connection,
+        "forwarded_at",
+        "ALTER TABLE webhook_deliveries ADD COLUMN forwarded_at TEXT",
+    )?;
+    connection.execute_batch(
+        "CREATE INDEX IF NOT EXISTS webhook_deliveries_pending
+             ON webhook_deliveries(forwarded_at, next_attempt_at, received_at);",
+    )?;
+    Ok(())
+}
+
+fn ensure_column(connection: &Connection, name: &str, sql: &str) -> anyhow::Result<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(webhook_deliveries)")?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for column in columns {
+        if column? == name {
+            return Ok(());
+        }
+    }
+    connection.execute_batch(sql)?;
     Ok(())
 }
 
