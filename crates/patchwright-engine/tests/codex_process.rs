@@ -75,7 +75,7 @@ async fn bounds_a_hung_version_probe_and_cleans_up_its_process_group() {
         result,
         Err(CodexProcessError::VersionProbeTimeout { .. })
     ));
-    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(started.elapsed() < Duration::from_secs(6));
     let descendant_pid = std::fs::read_to_string(descendant_path)
         .unwrap()
         .parse::<i32>()

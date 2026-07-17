@@ -1,8 +1,8 @@
 use chrono::Utc;
 use patchwright_core::{
-    Capability, CredentialHealth, GitHubPullRequestSourceInput, RepositoryBinding,
-    RepositoryBindingDraft, RepositoryPermissionSnapshot, RiskClass, Task, TaskContract,
-    TaskContractDraft, TaskSource, TaskState, VerificationCommand,
+    Capability, CredentialHealth, GitHubIssueSourceInput, GitHubPullRequestSourceInput,
+    RepositoryBinding, RepositoryBindingDraft, RepositoryPermissionSnapshot, RiskClass, Task,
+    TaskContract, TaskContractDraft, TaskSource, TaskState, VerificationCommand,
 };
 use patchwright_engine::{
     EventStore, GitHubRepository, GitHubRepositoryPermissions, GitHubRepositorySnapshot,
@@ -365,6 +365,126 @@ async fn rpc_rejects_a_forged_action_preview_before_delivery_lookup() {
 
     assert_eq!(response["error"]["code"], -32602);
     server.abort();
+}
+
+#[tokio::test]
+async fn delivery_preview_preserves_omitted_action_preconditions() {
+    let directory = owner_only_tempdir();
+    let socket = directory.path().join("engine.sock");
+    let database = directory.path().join("engine.sqlite3");
+    let task_id = seed_comment_delivery_task(&database);
+    let server_socket = socket.clone();
+    let server = tokio::spawn(async move { serve(&server_socket, &database).await });
+    wait_for_socket(&socket).await;
+    let mut stream = BufReader::new(UnixStream::connect(&socket).await.unwrap());
+    let action_preview = json!({
+        "remote":{
+            "repositoryId":42,
+            "installationId":84,
+            "repositoryFullName":"octocat/hello"
+        },
+        "action":{"kind":"comment","issueNumber":7,"body":"body"},
+        "expectedHeadSha":null,
+        "expectedBaseSha":null,
+        "snapshotGeneration":3
+    });
+
+    let response = call(
+        &mut stream,
+        json!({
+            "jsonrpc":"2.0",
+            "id":32,
+            "method":"delivery.preview",
+            "params":{
+                "taskId":task_id,
+                "actionPreview":action_preview.to_string()
+            }
+        }),
+    )
+    .await;
+
+    assert!(response.get("error").is_none(), "{response}");
+    assert!(response["result"]["action"].is_object(), "{response}");
+    assert_eq!(
+        response["result"]["action"]["precondition"]["expectedHeadSha"],
+        Value::Null
+    );
+    assert_eq!(
+        response["result"]["action"]["precondition"]["expectedBaseSha"],
+        Value::Null
+    );
+    server.abort();
+}
+
+fn seed_comment_delivery_task(database: &std::path::Path) -> String {
+    let store = EventStore::open(database).unwrap();
+    let binding = RepositoryBinding::try_from(RepositoryBindingDraft {
+        github_repository_id: 42,
+        full_name: "octocat/hello".into(),
+        installation_id: 84,
+        clone_url: "https://github.com/octocat/hello.git".into(),
+        html_url: "https://github.com/octocat/hello".into(),
+        default_branch: "main".into(),
+        user_checkout: Some("/tmp/hello".into()),
+        managed_clone: None,
+        state_root: "/tmp/patchwright/state".into(),
+        worktree_root: "/tmp/patchwright/worktrees".into(),
+        default_branch_sha: Some("a".repeat(40)),
+        default_branch_committed_at: Some(Utc::now()),
+        permissions: RepositoryPermissionSnapshot::read_only(),
+        credential_health: CredentialHealth::Healthy,
+    })
+    .unwrap();
+    store.save_repository_binding(&binding).unwrap();
+    let mut task = Task::new("Deliver exact comment", "/tmp/hello").unwrap();
+    task.repository_binding_id = Some(binding.id());
+    task.source = TaskSource::github_issue(GitHubIssueSourceInput {
+        repository_id: 42,
+        repository_full_name: "octocat/hello".into(),
+        number: 7,
+        html_url: "https://github.com/octocat/hello/issues/7".into(),
+        snapshot_at: Utc::now(),
+    })
+    .unwrap();
+    store.save_task(&task, "task created").unwrap();
+    store
+        .save_task_contract(
+            &TaskContract::try_from(TaskContractDraft {
+                task_id: task.id,
+                source: task.source.clone(),
+                repository_binding_id: binding.id(),
+                goal: "Deliver exact comment".into(),
+                acceptance_criteria: vec!["Comment is delivered".into()],
+                base_sha: Some("a".repeat(40)),
+                head_sha: None,
+                source_sha256: "b".repeat(64),
+                repository_sha256: "c".repeat(64),
+                instruction_digests: Vec::new(),
+                verification_commands: vec![VerificationCommand::new("cargo", ["test"]).unwrap()],
+                required_capabilities: vec![Capability::PostComment],
+                risk: RiskClass::Moderate,
+                sensitive_paths: Vec::new(),
+                dependencies: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    for state in [
+        TaskState::Assessing,
+        TaskState::Planned,
+        TaskState::AwaitingPreparationApproval,
+        TaskState::Preparing,
+        TaskState::Implementing,
+        TaskState::Verifying,
+        TaskState::Reviewing,
+        TaskState::AwaitingDeliveryApproval,
+    ] {
+        task.transition(state).unwrap();
+    }
+    store
+        .save_task(&task, "awaiting delivery approval")
+        .unwrap();
+    task.id.to_string()
 }
 
 #[tokio::test]
