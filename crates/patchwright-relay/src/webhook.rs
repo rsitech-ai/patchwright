@@ -26,17 +26,23 @@ use tokio::{
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_RPC_FRAME_BYTES: usize = 1024 * 1024;
 const DEFAULT_QUEUE_CAPACITY: usize = 10_000;
+const DEFAULT_FORWARDED_RETENTION_CAPACITY: usize = 10_000;
 const FORWARD_BATCH_SIZE: usize = 32;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const INITIAL_RETRY_MILLIS: i64 = 200;
 const MAX_RETRY_MILLIS: i64 = 60_000;
+// GitHub exposes webhook deliveries for manual redelivery for the past three days:
+// https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/redelivering-webhooks
+// Retain acknowledged GUIDs for that window, subject to the explicit storage cap.
+const FORWARDED_RETENTION_DAYS: i64 = 3;
 
 #[derive(Clone)]
 pub struct RelayState {
     secret: Arc<Vec<u8>>,
     inbox: Arc<Mutex<Connection>>,
     queue_capacity: usize,
+    forwarded_retention_capacity: usize,
 }
 
 impl RelayState {
@@ -48,6 +54,7 @@ impl RelayState {
             secret: Arc::new(secret),
             inbox: Arc::new(Mutex::new(connection)),
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            forwarded_retention_capacity: DEFAULT_FORWARDED_RETENTION_CAPACITY,
         }
     }
 
@@ -67,6 +74,7 @@ impl RelayState {
             secret: Arc::new(secret),
             inbox: Arc::new(Mutex::new(connection)),
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            forwarded_retention_capacity: DEFAULT_FORWARDED_RETENTION_CAPACITY,
         })
     }
 
@@ -102,13 +110,15 @@ impl RelayState {
             .lock()
             .map_err(|_| anyhow::anyhow!("relay inbox lock poisoned"))?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = chrono::Utc::now();
+        prune_forwarded_deliveries(&transaction, self.forwarded_retention_capacity, now)?;
         let existing: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM webhook_deliveries WHERE delivery_id = ?1)",
             [&delivery.delivery_id],
             |row| row.get(0),
         )?;
         if existing {
-            transaction.rollback()?;
+            transaction.commit()?;
             return Ok(RecordOutcome::Duplicate);
         }
         let pending: usize = transaction.query_row(
@@ -117,7 +127,7 @@ impl RelayState {
             |row| row.get(0),
         )?;
         if pending >= self.queue_capacity {
-            transaction.rollback()?;
+            transaction.commit()?;
             return Ok(RecordOutcome::Full);
         }
         transaction.execute(
@@ -130,7 +140,7 @@ impl RelayState {
                 delivery.action,
                 delivery.payload,
                 delivery.payload_sha256,
-                chrono::Utc::now().to_rfc3339(),
+                now.to_rfc3339(),
             ],
         )?;
         transaction.commit()?;
@@ -243,17 +253,21 @@ impl RelayState {
     }
 
     fn mark_forwarded(&self, delivery_id: &str) -> anyhow::Result<()> {
-        let connection = self
+        let mut connection = self
             .inbox
             .lock()
             .map_err(|_| anyhow::anyhow!("relay inbox lock poisoned"))?;
-        let updated = connection.execute(
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = chrono::Utc::now();
+        let updated = transaction.execute(
             "UPDATE webhook_deliveries
              SET forwarded_at = ?2, last_error = NULL
              WHERE delivery_id = ?1 AND forwarded_at IS NULL",
-            params![delivery_id, chrono::Utc::now().to_rfc3339()],
+            params![delivery_id, now.to_rfc3339()],
         )?;
         anyhow::ensure!(updated == 1, "pending relay delivery disappeared");
+        prune_forwarded_deliveries(&transaction, self.forwarded_retention_capacity, now)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -355,6 +369,71 @@ mod tests {
             state.record(&delivery("one")).unwrap(),
             RecordOutcome::Duplicate
         );
+    }
+
+    #[test]
+    fn forwarded_deliveries_expire_after_githubs_three_day_redelivery_window() {
+        let state = RelayState::new(b"secret".to_vec());
+        state.record(&delivery("expired")).unwrap();
+        state.mark_forwarded("expired").unwrap();
+        state.record(&delivery("recent")).unwrap();
+        state.mark_forwarded("recent").unwrap();
+
+        let expired_at = (chrono::Utc::now() - chrono::Duration::days(4)).to_rfc3339();
+        let recent_at = (chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+        {
+            let connection = state.inbox.lock().unwrap();
+            connection
+                .execute(
+                    "UPDATE webhook_deliveries SET received_at = ?2 WHERE delivery_id = ?1",
+                    rusqlite::params!["expired", expired_at],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE webhook_deliveries SET received_at = ?2 WHERE delivery_id = ?1",
+                    rusqlite::params!["recent", recent_at],
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            state.record(&delivery("recent")).unwrap(),
+            RecordOutcome::Duplicate,
+            "deliveries inside GitHub's redelivery window remain deduplicated"
+        );
+        assert_eq!(
+            state.record(&delivery("expired")).unwrap(),
+            RecordOutcome::Accepted,
+            "acknowledged deliveries outside GitHub's redelivery window are pruned"
+        );
+    }
+
+    #[test]
+    fn forwarded_delivery_retention_has_a_hard_capacity_without_pruning_pending_work() {
+        let mut state = RelayState::new(b"secret".to_vec());
+        state.queue_capacity = 2;
+        state.forwarded_retention_capacity = 2;
+
+        for id in ["forwarded-one", "forwarded-two", "forwarded-three"] {
+            state.record(&delivery(id)).unwrap();
+            state.mark_forwarded(id).unwrap();
+        }
+        state.record(&delivery("pending")).unwrap();
+
+        assert_eq!(state.delivery_count(), 3);
+        assert_eq!(state.pending_delivery_count().unwrap(), 1);
+        assert_eq!(
+            state.record(&delivery("forwarded-one")).unwrap(),
+            RecordOutcome::Accepted,
+            "the oldest forwarded delivery is evicted at the retention cap"
+        );
+        assert_eq!(
+            state.record(&delivery("forwarded-three")).unwrap(),
+            RecordOutcome::Duplicate,
+            "the newest forwarded delivery remains deduplicated"
+        );
+        assert_eq!(state.pending_delivery_count().unwrap(), 2);
     }
 }
 
@@ -806,9 +885,52 @@ fn initialize_inbox(connection: &Connection) -> anyhow::Result<()> {
     )?;
     connection.execute_batch(
         "CREATE INDEX IF NOT EXISTS webhook_deliveries_pending
-             ON webhook_deliveries(forwarded_at, next_attempt_at, received_at);",
+             ON webhook_deliveries(forwarded_at, next_attempt_at, received_at);
+         CREATE INDEX IF NOT EXISTS webhook_deliveries_forwarded_retention
+             ON webhook_deliveries(received_at)
+             WHERE forwarded_at IS NOT NULL;",
+    )?;
+    prune_forwarded_deliveries(
+        connection,
+        DEFAULT_FORWARDED_RETENTION_CAPACITY,
+        chrono::Utc::now(),
     )?;
     Ok(())
+}
+
+fn prune_forwarded_deliveries(
+    connection: &Connection,
+    capacity: usize,
+    now: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<usize> {
+    let cutoff = now - chrono::Duration::days(FORWARDED_RETENTION_DAYS);
+    let mut deleted = connection.execute(
+        "DELETE FROM webhook_deliveries
+         WHERE forwarded_at IS NOT NULL AND received_at < ?1",
+        [cutoff.to_rfc3339()],
+    )?;
+    let forwarded: usize = connection.query_row(
+        "SELECT COUNT(*) FROM webhook_deliveries WHERE forwarded_at IS NOT NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    let excess = forwarded.saturating_sub(capacity);
+    if excess > 0 {
+        let excess =
+            i64::try_from(excess).map_err(|_| anyhow::anyhow!("retention excess is too large"))?;
+        deleted += connection.execute(
+            "DELETE FROM webhook_deliveries
+             WHERE rowid IN (
+                 SELECT rowid
+                 FROM webhook_deliveries
+                 WHERE forwarded_at IS NOT NULL
+                 ORDER BY received_at, rowid
+                 LIMIT ?1
+             )",
+            [excess],
+        )?;
+    }
+    Ok(deleted)
 }
 
 fn ensure_column(connection: &Connection, name: &str, sql: &str) -> anyhow::Result<()> {
