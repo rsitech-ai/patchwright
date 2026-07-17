@@ -744,22 +744,25 @@ impl EventStore {
         task_event: Option<&(Task, String)>,
     ) -> Result<bool> {
         let transaction = self.connection.unchecked_transaction()?;
+        let task_id = task_event.map(|(task, _)| task.id.to_string());
         let reset = transaction.execute(
             "UPDATE deliveries
-             SET claimed_at = datetime('now'), result = NULL, completed_at = NULL
+             SET claimed_at = datetime('now'), result = NULL, completed_at = NULL,
+                 task_id = COALESCE(?2, task_id)
              WHERE key = ?1
                AND CASE
                    WHEN json_valid(result) THEN json_extract(result, '$.state') = 'failed'
                    ELSE 0
                END",
-            [key],
+            params![key, task_id],
         )?;
         let claimed = if reset == 1 {
             true
         } else {
             transaction.execute(
-                "INSERT OR IGNORE INTO deliveries(key, claimed_at) VALUES (?1, datetime('now'))",
-                [key],
+                "INSERT OR IGNORE INTO deliveries(key, claimed_at, task_id)
+                 VALUES (?1, datetime('now'), ?2)",
+                params![key, task_id],
             )? == 1
         };
         if claimed {
@@ -795,6 +798,30 @@ impl EventStore {
         )?;
         anyhow::ensure!(updated == 1, "delivery key was not claimed");
         Ok(())
+    }
+
+    pub fn mark_delivery_ambiguous(&self, key: &str, result: &str) -> Result<()> {
+        let updated = self.connection.execute(
+            "UPDATE deliveries SET result = ?2, completed_at = NULL WHERE key = ?1",
+            params![key, result],
+        )?;
+        anyhow::ensure!(updated == 1, "delivery key was not claimed");
+        Ok(())
+    }
+
+    pub fn ambiguous_delivery_for_task(&self, task_id: TaskId) -> Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT key FROM deliveries
+                 WHERE task_id = ?1 AND completed_at IS NULL
+                   AND json_valid(result)
+                   AND json_extract(result, '$.state') = 'ambiguous'
+                 ORDER BY claimed_at DESC LIMIT 1",
+                [task_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("load ambiguous delivery")
     }
 
     pub fn complete_delivery_with_task_events(
@@ -1757,5 +1784,11 @@ const MIGRATIONS: &[(u32, &str)] = &[
          );
          CREATE INDEX IF NOT EXISTS github_webhook_repository
              ON github_webhook_deliveries(repository_full_name, entity_number, ingested_at);",
+    ),
+    (
+        11,
+        "ALTER TABLE deliveries ADD COLUMN task_id TEXT;
+         CREATE INDEX IF NOT EXISTS deliveries_task_id
+             ON deliveries(task_id, claimed_at);",
     ),
 ];

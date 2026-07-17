@@ -134,16 +134,30 @@ impl CodexService {
             .drain()
             .map(|(_, active)| active)
             .collect::<Vec<_>>();
-        let mut first_process_error = None;
+        let execution_job_ids = active
+            .iter()
+            .map(|active| active.execution_job_id)
+            .collect::<Vec<_>>();
+        let mut terminations = tokio::task::JoinSet::new();
         for mut active in active {
-            if let Err(error) = active.process.terminate().await {
-                tracing::warn!(error = %error, "terminate Codex app-server during shutdown");
-                if first_process_error.is_none() {
-                    first_process_error = Some(error);
+            terminations.spawn(async move { active.process.terminate().await });
+        }
+        let mut first_process_error = None;
+        while let Some(termination) = terminations.join_next().await {
+            match termination {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(error = %error, "terminate Codex app-server during shutdown");
+                    if first_process_error.is_none() {
+                        first_process_error = Some(error);
+                    }
                 }
+                Err(error) => tracing::error!(error = %error, "join Codex shutdown task"),
             }
+        }
+        for execution_job_id in execution_job_ids {
             let store = lock_store(store)?;
-            if let Some(job) = store.job(active.execution_job_id)? {
+            if let Some(job) = store.job(execution_job_id)? {
                 if matches!(job.state(), JobState::Running | JobState::Cancelling) {
                     let _ = store.transition_job(
                         job.id(),

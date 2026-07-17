@@ -45,6 +45,7 @@ final class EngineProcessController: ObservableObject {
         }
         if process.isRunning {
             _ = Darwin.kill(process.processIdentifier, SIGKILL)
+            process.waitUntilExit()
         }
     }
 

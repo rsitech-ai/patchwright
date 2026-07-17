@@ -30,6 +30,7 @@ public struct GitHubActionPayload: Codable, Equatable, Sendable {
     public let title: String?
     public let head: String?
     public let base: String?
+    public let expectedBaseSha: String?
 
     public init(
         kind: String,
@@ -49,7 +50,8 @@ public struct GitHubActionPayload: Codable, Equatable, Sendable {
         conclusion: String? = nil,
         title: String? = nil,
         head: String? = nil,
-        base: String? = nil
+        base: String? = nil,
+        expectedBaseSha: String? = nil
     ) {
         self.kind = kind
         self.issueNumber = issueNumber
@@ -69,6 +71,7 @@ public struct GitHubActionPayload: Codable, Equatable, Sendable {
         self.title = title
         self.head = head
         self.base = base
+        self.expectedBaseSha = expectedBaseSha
     }
     public init(commentNumber: UInt64, body: String) {
         self.init(kind: "comment", issueNumber: commentNumber, body: body)
