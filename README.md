@@ -74,6 +74,7 @@ cargo run -p patchwright-engine -- serve \
   --database "$HOME/.patchwright/patchwright.sqlite3"
 
 PATCHWRIGHT_GITHUB_WEBHOOK_SECRET_FILE="$HOME/.patchwright/webhook-secret" \
+PATCHWRIGHT_RELAY_DATABASE="$HOME/.patchwright/relay.sqlite" \
 cargo run -p patchwright-relay -- serve --address 127.0.0.1:8787
 ```
 
