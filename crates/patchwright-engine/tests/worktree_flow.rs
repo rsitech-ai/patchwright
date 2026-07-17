@@ -119,6 +119,83 @@ fn ephemeral_transport_pushes_only_the_exact_checked_out_head() {
 }
 
 #[test]
+fn credential_bearing_push_disables_repository_hooks() {
+    let fixture = tempfile::tempdir().unwrap();
+    let remote = fixture.path().join("remote.git");
+    let repository = fixture.path().join("repository");
+    fs::create_dir_all(&repository).unwrap();
+    git(
+        fixture.path(),
+        &["init", "--bare", remote.to_str().unwrap()],
+    );
+    git(
+        fixture.path(),
+        &["init", "-b", "main", repository.to_str().unwrap()],
+    );
+    fs::write(repository.join("README.md"), "transport\n").unwrap();
+    git(&repository, &["add", "README.md"]);
+    git(
+        &repository,
+        &[
+            "-c",
+            "user.name=Patchwright Test",
+            "-c",
+            "user.email=test@patchwright.local",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+    );
+    git(
+        &repository,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    let capture = fixture.path().join("captured-token");
+    let hook = repository.join(".git/hooks/pre-push");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\n/usr/bin/printenv PATCHWRIGHT_GIT_TOKEN > '{}'\n",
+            capture.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let head = RepositoryService::inspect(&repository).unwrap().head_sha;
+
+    GitTransport::push_branch(
+        &repository,
+        "patchwright/no-hook",
+        &head,
+        remote.to_str().unwrap(),
+        fixture.path().join("state").as_path(),
+        "fixture-secret-token",
+    )
+    .unwrap();
+
+    assert!(
+        !capture.exists(),
+        "repository pre-push hook observed the installation token"
+    );
+    assert_eq!(
+        git_output(
+            fixture.path(),
+            &[
+                "--git-dir",
+                remote.to_str().unwrap(),
+                "rev-parse",
+                "refs/heads/patchwright/no-hook",
+            ],
+        ),
+        head
+    );
+}
+
+#[test]
 fn managed_clone_rejects_a_clone_url_outside_the_bound_github_repository() {
     let fixture = tempfile::tempdir().unwrap();
     let destination = fixture.path().join("repository");
