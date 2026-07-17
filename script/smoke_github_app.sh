@@ -128,7 +128,8 @@ deliver() {
     --arg expectedBaseSha "$expected_base_sha" \
     --arg expectedHeadSha "$expected_head_sha" \
     --argjson snapshotGeneration "$generation" \
-    '{remote:$remote,action:$action,expectedBaseSha:$expectedBaseSha,snapshotGeneration:$snapshotGeneration}
+    '{remote:$remote,action:$action,snapshotGeneration:$snapshotGeneration}
+      + if $expectedBaseSha == "" then {} else {expectedBaseSha:$expectedBaseSha} end
       + if $expectedHeadSha == "" then {} else {expectedHeadSha:$expectedHeadSha} end')"
   preview="$(rpc_result delivery.preview "$(jq -cn --arg taskId "$task_id" \
     --argjson actionPreview "$action_preview" '{taskId:$taskId,actionPreview:$actionPreview}')")" \
@@ -287,18 +288,18 @@ BRANCH_RESULT="$(deliver "$ISSUE_TASK_ID" "$(jq -cn --arg branch "$BRANCH" --arg
   '{kind:"createBranch",branch:$branch,fromSha:$fromSha}')" "$BASE_SHA" "" 1)" \
   || die "approval-gated branch delivery failed"
 PUSH_RESULT="$(deliver "$ISSUE_TASK_ID" "$(jq -cn --arg branch "$BRANCH" --arg headSha "$SEED_SHA" \
-  '{kind:"pushIntent",branch:$branch,headSha:$headSha}')" "$BASE_SHA" "" 1)" \
+  '{kind:"pushIntent",branch:$branch,headSha:$headSha}')" "" "" 1)" \
   || die "approval-gated branch push failed"
 CHECK_RESULT="$(deliver "$ISSUE_TASK_ID" "$(jq -cn --arg headSha "$SEED_SHA" \
   '{kind:"checkRun",name:"Patchwright Qualification",headSha:$headSha,status:"completed",conclusion:"success"}')" \
-  "$BASE_SHA" "" 1)" || die "approval-gated check delivery failed"
+  "" "" 1)" || die "approval-gated check delivery failed"
 COMMENT_RESULT="$(deliver "$ISSUE_TASK_ID" "$(jq -cn --argjson issueNumber "$ISSUE_NUMBER" --arg body "$MARKER" \
-  '{kind:"comment",issueNumber:$issueNumber,body:$body}')" "$BASE_SHA" "" 1)" \
+  '{kind:"comment",issueNumber:$issueNumber,body:$body}')" "" "" 1)" \
   || die "approval-gated comment delivery failed"
 PR_RESULT="$(deliver "$ISSUE_TASK_ID" "$(jq -cn \
   --arg title "[Patchwright E2E] Approval-gated draft" \
-  --arg head "$BRANCH" --arg base "$BASE_BRANCH" --arg expectedBaseSha "$BASE_SHA" --arg body "$MARKER" \
-  '{kind:"draftPullRequest",title:$title,head:$head,base:$base,expectedBaseSha:$expectedBaseSha,body:$body}')" "$BASE_SHA" "" 1)" \
+  --arg head "$BRANCH" --arg base "$BASE_BRANCH" --arg body "$MARKER" \
+  '{kind:"draftPullRequest",title:$title,head:$head,base:$base,body:$body}')" "" "" 1)" \
   || die "approval-gated draft pull request delivery failed"
 PR_NUMBER="$(jq -er '.result.number' <<<"$PR_RESULT")" || die "draft pull request number is missing"
 PR_URL="$(jq -er '.result.htmlUrl' <<<"$PR_RESULT")" || die "draft pull request URL is missing"
@@ -340,7 +341,7 @@ submit_task_for_delivery "$PR_TASK_ID" >/dev/null \
 
 REVIEW_RESULT="$(deliver "$PR_TASK_ID" "$(jq -cn --argjson pullRequestNumber "$PR_NUMBER" --arg expectedHeadSha "$PR_HEAD_SHA" --arg body "$MARKER" \
   '{kind:"review",pullRequestNumber:$pullRequestNumber,expectedHeadSha:$expectedHeadSha,event:"comment",body:$body,inlineComments:[]}')" \
-  "$PR_BASE_SHA" "$PR_HEAD_SHA" 2)" || die "approval-gated review delivery failed"
+  "" "$PR_HEAD_SHA" 2)" || die "approval-gated review delivery failed"
 if [[ "$MANUAL_UI_FIXTURE" == true ]]; then
   printf 'Approve this disposable pull request in GitHub: %s\n' "$PR_URL" >&2
   printf 'Type approved after GitHub confirms the review: ' >&2
@@ -361,7 +362,7 @@ jq -e '.outcome.state == "succeeded"' >/dev/null <<<"$MONITOR_RESULT" \
   || die "trusted pull request evidence did not satisfy monitoring"
 MERGE_RESULT="$(deliver "$PR_TASK_ID" "$(jq -cn --argjson pullRequestNumber "$PR_NUMBER" --arg expectedHeadSha "$PR_HEAD_SHA" \
   '{kind:"mergePullRequest",pullRequestNumber:$pullRequestNumber,expectedHeadSha:$expectedHeadSha,method:"squash"}')" \
-  "$PR_BASE_SHA" "$PR_HEAD_SHA" 2)" || die "approval-gated merge delivery failed"
+  "" "$PR_HEAD_SHA" 2)" || die "approval-gated merge delivery failed"
 jq -e '.result.merged == true' >/dev/null <<<"$MERGE_RESULT" \
   || die "qualification pull request was not merged"
 

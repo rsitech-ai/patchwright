@@ -112,13 +112,27 @@ fn validate_bound_preconditions(
     contract: &patchwright_core::TaskContract,
 ) -> Result<(), DeliveryError> {
     let precondition = action.precondition();
-    if action.action().expected_head_sha().is_some()
-        && action.action().expected_head_sha() != precondition.expected_head_sha()
-        || action.action().expected_base_sha().is_some()
-            && action.action().expected_base_sha() != precondition.expected_base_sha()
-        || contract.head_sha().is_some() && precondition.expected_head_sha() != contract.head_sha()
-        || contract.base_sha().is_some() && precondition.expected_base_sha() != contract.base_sha()
-    {
+    let expected_head = action.action().expected_head_sha();
+    let expected_base = action.action().expected_base_sha();
+    let head_matches = match expected_head {
+        Some(expected) => {
+            precondition.expected_head_sha() == Some(expected)
+                && contract
+                    .head_sha()
+                    .is_none_or(|contract_head| contract_head == expected)
+        }
+        None => precondition.expected_head_sha().is_none(),
+    };
+    let base_matches = match expected_base {
+        Some(expected) => {
+            precondition.expected_base_sha() == Some(expected)
+                && contract
+                    .base_sha()
+                    .is_none_or(|contract_base| contract_base == expected)
+        }
+        None => precondition.expected_base_sha().is_none(),
+    };
+    if !(head_matches && base_matches) {
         return Err(DeliveryError::PreconditionMismatch);
     }
     Ok(())
@@ -390,7 +404,7 @@ pub fn reconcile_completed_task_from_snapshot(
     };
     if !completed {
         if let Some(key) = ambiguous_key.as_deref() {
-            if item.kind != WorkItemKind::PullRequest || item.state != "open" {
+            if item.kind != WorkItemKind::PullRequest {
                 return Err(DeliveryError::RemoteNotCompleted);
             }
             let mut retry = task;

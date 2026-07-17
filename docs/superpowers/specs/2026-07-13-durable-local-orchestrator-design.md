@@ -161,7 +161,7 @@ Every Patchwright approval records:
 
 - capability and typed action preview
 - repository and task
-- relevant branch, PR, head SHA, and base SHA
+- relevant branch and PR identity, plus head/base SHAs only when the GitHub mutation atomically consumes them
 - approver and timestamp
 - short expiration
 - policy and instruction hashes
