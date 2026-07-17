@@ -94,7 +94,7 @@ async fn webhook_rejects_tampering_and_deduplicates_delivery() {
     let secret = b"test-secret";
     let state = RelayState::new(secret.to_vec());
     let app = router(state.clone());
-    let body = br#"{"action":"opened","pull_request":{"number":42},"repository":{"id":1,"full_name":"octocat/example"}}"#;
+    let body = br#"{"action":"opened","pull_request":{"number":42,"title":"private issue contents"},"repository":{"id":1,"full_name":"octocat/example"}}"#;
 
     let accepted = app
         .clone()
@@ -125,7 +125,7 @@ async fn accepted_delivery_remains_a_duplicate_after_reopening_the_database() {
     let temporary = TempDir::new().unwrap();
     fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let database = temporary.path().join("relay.sqlite");
-    let body = br#"{"action":"opened","pull_request":{"number":42},"repository":{"id":1,"full_name":"octocat/example"}}"#;
+    let body = br#"{"action":"opened","pull_request":{"number":42,"title":"private issue contents"},"repository":{"id":1,"full_name":"octocat/example"}}"#;
 
     {
         let state = RelayState::open(secret.to_vec(), &database).unwrap();
@@ -170,7 +170,18 @@ async fn accepted_delivery_remains_a_duplicate_after_reopening_the_database() {
         .unwrap();
     assert_eq!(stored.0, "pull_request");
     assert_eq!(stored.1, "opened");
-    assert_eq!(stored.2, body);
+    assert_ne!(stored.2, body);
+    let sanitized: serde_json::Value = serde_json::from_slice(&stored.2).unwrap();
+    assert_eq!(sanitized["event"], "pull_request");
+    assert_eq!(sanitized["action"], "opened");
+    assert_eq!(sanitized["repositoryId"], 1);
+    assert_eq!(sanitized["repositoryFullName"], "octocat/example");
+    assert_eq!(sanitized["entityNumber"], 42);
+    assert!(
+        !String::from_utf8(stored.2)
+            .unwrap()
+            .contains("private issue contents")
+    );
 }
 
 #[tokio::test]
