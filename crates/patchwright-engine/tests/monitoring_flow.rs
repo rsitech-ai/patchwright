@@ -187,7 +187,7 @@ fn monitor_and_approval_invalidation_survive_restart() {
     let action = GitHubActionPreview::new(
         RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
         GitHubAction::comment(7, "approved body").unwrap(),
-        RemotePrecondition::new(Some(&"b".repeat(40)), Some(&"a".repeat(40)), 1).unwrap(),
+        RemotePrecondition::new(None, None, 1).unwrap(),
     )
     .unwrap();
     let preview = preview_delivery(&store, task.id, action).unwrap();
