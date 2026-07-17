@@ -3,7 +3,7 @@ use patchwright_engine::{
     GitHubWorkItem, WorkItemKind, serve,
 };
 use serde_json::{Value, json};
-use std::process::Command;
+use std::{os::unix::fs::PermissionsExt, process::Command};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
@@ -110,6 +110,7 @@ fn git(repository: &std::path::Path, arguments: &[&str]) -> String {
 #[tokio::test]
 async fn rpc_binds_repository_then_previews_and_creates_idempotently() {
     let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let socket = directory.path().join("engine.sock");
     let database = directory.path().join("engine.sqlite3");
     {
@@ -172,6 +173,7 @@ async fn rpc_binds_repository_then_previews_and_creates_idempotently() {
 #[tokio::test]
 async fn rpc_plans_and_prepares_an_isolated_worktree_before_codex() {
     let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let repository = directory.path().join("managed-repository");
     std::fs::create_dir_all(&repository).unwrap();
     git(&repository, &["init", "-b", "main"]);

@@ -126,6 +126,42 @@ impl CodexService {
         }
     }
 
+    /// Terminates every owned app-server process and records non-terminal jobs
+    /// as interrupted before the engine releases its database lease.
+    pub async fn shutdown(&mut self, store: &Mutex<EventStore>) -> Result<(), CodexServiceError> {
+        let active = self
+            .active
+            .drain()
+            .map(|(_, active)| active)
+            .collect::<Vec<_>>();
+        let mut first_process_error = None;
+        for mut active in active {
+            if let Err(error) = active.process.terminate().await {
+                tracing::warn!(error = %error, "terminate Codex app-server during shutdown");
+                if first_process_error.is_none() {
+                    first_process_error = Some(error);
+                }
+            }
+            let store = lock_store(store)?;
+            if let Some(job) = store.job(active.execution_job_id)? {
+                if matches!(job.state(), JobState::Running | JobState::Cancelling) {
+                    let _ = store.transition_job(
+                        job.id(),
+                        job.state(),
+                        JobState::Interrupted,
+                        job.cancellation(),
+                        "Engine shutdown interrupted Codex execution",
+                        job.checkpoint(),
+                    )?;
+                }
+            }
+        }
+        if let Some(error) = first_process_error {
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
     pub fn status(
         &self,
         task_id: TaskId,

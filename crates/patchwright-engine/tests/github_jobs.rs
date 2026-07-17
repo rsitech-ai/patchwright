@@ -39,6 +39,7 @@ async fn sync_start_status_cancel_is_durable_and_single_flight() {
     tokio::spawn(async move { axum::serve(listener, api).await.unwrap() });
 
     let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let gh = directory.path().join("gh-fixture");
     std::fs::write(&gh, "#!/bin/sh\nprintf '%s\\n' 'fixture-token'\n").unwrap();
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();

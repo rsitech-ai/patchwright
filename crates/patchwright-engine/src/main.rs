@@ -28,6 +28,21 @@ async fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
     match Arguments::parse().command {
-        Command::Serve { socket, database } => patchwright_engine::serve(&socket, &database).await,
+        Command::Serve { socket, database } => {
+            patchwright_engine::serve_until(&socket, &database, shutdown_signal()).await
+        }
+    }
+}
+
+async fn shutdown_signal() {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("install SIGTERM handler");
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            if let Err(error) = result {
+                tracing::error!(error = %error, "wait for Ctrl-C");
+            }
+        }
+        _ = terminate.recv() => {}
     }
 }

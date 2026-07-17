@@ -7,6 +7,7 @@ use crate::{
         process::{CodexExecutable, CodexProcessConfig, CodexProcessFactory},
         service::{CodexRuntimeStatus, CodexService, CodexServiceError, CodexServiceState},
     },
+    lease::DatabaseLease,
     preview_delivery,
 };
 use anyhow::{Context, Result, bail};
@@ -22,18 +23,25 @@ use patchwright_relay::{
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 #[cfg(unix)]
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::{
     collections::HashMap,
-    path::Path,
+    future::Future,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
-    sync::{Mutex as AsyncMutex, watch},
+    sync::{Mutex as AsyncMutex, Semaphore, watch},
+    task::JoinSet,
 };
+
+const MAX_RPC_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_RPC_CONNECTIONS: usize = 32;
+const CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Deserialize)]
 struct Request {
@@ -46,8 +54,24 @@ struct Request {
 }
 
 pub async fn serve(socket_path: &Path, database_path: &Path) -> Result<()> {
-    let listener = prepare_listener(socket_path).await?;
-    let codex = match CodexExecutable::discover(None).await {
+    serve_until(socket_path, database_path, std::future::pending()).await
+}
+
+pub async fn serve_until<F>(socket_path: &Path, database_path: &Path, shutdown: F) -> Result<()>
+where
+    F: Future<Output = ()> + Send,
+{
+    tracing::debug!(database = %database_path.display(), "acquire engine database lease");
+    let lease = DatabaseLease::acquire(database_path)?;
+    tracing::debug!(socket = %socket_path.display(), "prepare engine socket");
+    let (listener, socket_guard) = prepare_listener(socket_path).await?;
+    tracing::debug!(socket = %socket_path.display(), "engine socket is ready");
+    tokio::pin!(shutdown);
+    let discovered = tokio::select! {
+        () = &mut shutdown => return Ok(()),
+        result = CodexExecutable::discover(None) => result,
+    };
+    let codex = match discovered {
         Ok(executable) => {
             let version = executable.version().to_owned();
             Some(CodexService::new(
@@ -60,7 +84,15 @@ pub async fn serve(socket_path: &Path, database_path: &Path) -> Result<()> {
             None
         }
     };
-    serve_with_state(listener, database_path, codex).await
+    serve_with_state(
+        listener,
+        socket_guard,
+        lease,
+        database_path,
+        codex,
+        &mut shutdown,
+    )
+    .await
 }
 
 pub async fn serve_with_codex(
@@ -69,37 +101,80 @@ pub async fn serve_with_codex(
     factory: CodexProcessFactory,
     executable_version: String,
 ) -> Result<()> {
-    let listener = prepare_listener(socket_path).await?;
+    let lease = DatabaseLease::acquire(database_path)?;
+    let (listener, socket_guard) = prepare_listener(socket_path).await?;
     serve_with_state(
         listener,
+        socket_guard,
+        lease,
         database_path,
         Some(CodexService::new(factory, executable_version)),
+        std::future::pending(),
     )
     .await
 }
 
-async fn serve_with_state(
+async fn serve_with_state<F>(
     listener: UnixListener,
+    _socket_guard: SocketGuard,
+    _lease: DatabaseLease,
     database_path: &Path,
     codex: Option<CodexService>,
-) -> Result<()> {
+    shutdown: F,
+) -> Result<()>
+where
+    F: Future<Output = ()> + Send,
+{
     let state = ServerState {
         store: Arc::new(Mutex::new(EventStore::open(database_path)?)),
         codex: Arc::new(AsyncMutex::new(codex)),
         github_syncs: Arc::new(AsyncMutex::new(HashMap::new())),
     };
+    let permits = Arc::new(Semaphore::new(MAX_RPC_CONNECTIONS));
+    let mut connections = JoinSet::new();
+    tokio::pin!(shutdown);
     loop {
-        let (stream, _) = listener.accept().await.context("accept engine client")?;
-        let state = state.clone();
-        tokio::spawn(async move {
-            if let Err(error) = handle_connection(stream, state).await {
-                tracing::warn!(error = %error, "engine client disconnected with error");
+        tokio::select! {
+            () = &mut shutdown => break,
+            permit = Arc::clone(&permits).acquire_owned() => {
+                let permit = permit.context("RPC connection semaphore closed")?;
+                let (stream, _) = listener.accept().await.context("accept engine client")?;
+                if let Err(error) = verify_peer(&stream) {
+                    tracing::warn!(error = %error, "reject unauthorized RPC peer");
+                    continue;
+                }
+                let state = state.clone();
+                connections.spawn(async move {
+                    let _permit = permit;
+                    if let Err(error) = handle_connection(stream, state).await {
+                        tracing::warn!(error = %error, "engine client disconnected with error");
+                    }
+                });
             }
-        });
+        }
     }
+
+    for sender in state.github_syncs.lock().await.values() {
+        let _ = sender.send(true);
+    }
+    state.github_syncs.lock().await.clear();
+    let codex_shutdown = if let Some(service) = state.codex.lock().await.as_mut() {
+        service
+            .shutdown(state.store.as_ref())
+            .await
+            .map_err(Into::into)
+    } else {
+        Ok(())
+    };
+    connections.abort_all();
+    let _ = tokio::time::timeout(CONNECTION_DRAIN_TIMEOUT, async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await;
+    codex_shutdown
 }
 
-async fn prepare_listener(socket_path: &Path) -> Result<UnixListener> {
+async fn prepare_listener(socket_path: &Path) -> Result<(UnixListener, SocketGuard)> {
     if socket_path.exists() {
         if !std::fs::symlink_metadata(socket_path)?
             .file_type()
@@ -113,9 +188,71 @@ async fn prepare_listener(socket_path: &Path) -> Result<UnixListener> {
         std::fs::remove_file(socket_path).context("remove stale engine socket")?;
     }
     if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent).context("create socket directory")?;
+        if parent.exists() {
+            validate_socket_parent(parent)?;
+        } else {
+            std::fs::create_dir_all(parent).context("create socket directory")?;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .context("restrict socket directory permissions")?;
+        }
     }
-    UnixListener::bind(socket_path).context("bind engine socket")
+    let listener = UnixListener::bind(socket_path).context("bind engine socket")?;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
+        .context("restrict engine socket permissions")?;
+    let guard = SocketGuard::new(socket_path)?;
+    Ok((listener, guard))
+}
+
+fn validate_socket_parent(parent: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(parent).context("inspect socket directory")?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        bail!("socket parent must be a real directory")
+    }
+    if metadata.uid() != nix::unistd::geteuid().as_raw() || metadata.mode() & 0o077 != 0 {
+        bail!("socket parent must be owned by the current user and owner-only")
+    }
+    Ok(())
+}
+
+fn verify_peer(stream: &UnixStream) -> Result<()> {
+    let (peer_uid, _) = nix::unistd::getpeereid(stream).context("inspect RPC peer credentials")?;
+    if peer_uid != nix::unistd::geteuid() {
+        bail!("RPC peer is not owned by the current user")
+    }
+    Ok(())
+}
+
+struct SocketGuard {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl SocketGuard {
+    fn new(path: &Path) -> Result<Self> {
+        let metadata = std::fs::symlink_metadata(path).context("inspect owned engine socket")?;
+        Ok(Self {
+            path: path.to_owned(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+}
+
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        let Ok(metadata) = std::fs::symlink_metadata(&self.path) else {
+            return;
+        };
+        if metadata.file_type().is_socket()
+            && metadata.dev() == self.device
+            && metadata.ino() == self.inode
+        {
+            if let Err(error) = std::fs::remove_file(&self.path) {
+                tracing::warn!(error = %error, path = %self.path.display(), "remove engine socket");
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -127,9 +264,24 @@ struct ServerState {
 
 async fn handle_connection(stream: UnixStream, state: ServerState) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader).lines();
-    while let Some(line) = lines.next_line().await? {
-        let response = match serde_json::from_str::<Request>(&line) {
+    let mut reader = BufReader::new(reader);
+    loop {
+        let mut frame = Vec::with_capacity(4096);
+        let read = (&mut reader)
+            .take((MAX_RPC_FRAME_BYTES + 1) as u64)
+            .read_until(b'\n', &mut frame)
+            .await?;
+        if read == 0 {
+            break;
+        }
+        if frame.len() > MAX_RPC_FRAME_BYTES || frame.last() != Some(&b'\n') {
+            let response = rpc_error(Value::Null, -32600, "request frame is too large", None);
+            writer.write_all(&serde_json::to_vec(&response)?).await?;
+            writer.write_all(b"\n").await?;
+            break;
+        }
+        frame.pop();
+        let response = match serde_json::from_slice::<Request>(&frame) {
             Ok(request) => dispatch(request, &state).await,
             Err(error) => rpc_error(Value::Null, -32700, "parse error", Some(error.to_string())),
         };

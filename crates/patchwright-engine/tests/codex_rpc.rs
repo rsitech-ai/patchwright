@@ -9,7 +9,7 @@ use patchwright_engine::codex::process::{
 use patchwright_engine::codex::service::{CodexService, CodexServiceError, CodexServiceState};
 use patchwright_engine::{EventStore, serve_with_codex};
 use serde_json::{Value, json};
-use std::sync::Mutex;
+use std::{os::unix::fs::PermissionsExt, sync::Mutex};
 use tempfile::tempdir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -62,6 +62,7 @@ while IFS= read -r line; do :; done"#
 #[tokio::test]
 async fn starts_turns_persists_streamed_events_and_steers_the_active_turn() {
     let root = tempdir().unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let fake =
         FakeCodexAppServer::create(root.path(), "codex-cli 0.144.2", streaming_server_body());
     let executable = CodexExecutable::discover(Some(fake.path())).await.unwrap();
@@ -204,6 +205,7 @@ async fn rejects_invalid_task_input_duplicate_message_and_event_page_boundaries(
 #[tokio::test]
 async fn unix_rpc_exposes_status_start_turn_steer_and_cursor_events() {
     let root = tempdir().unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let fake =
         FakeCodexAppServer::create(root.path(), "codex-cli 0.144.2", streaming_server_body());
     let executable = CodexExecutable::discover(Some(fake.path())).await.unwrap();
