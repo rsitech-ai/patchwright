@@ -6,6 +6,7 @@ mod conversion;
 mod delivery;
 mod github;
 mod jobs;
+mod lease;
 mod monitoring;
 mod repository;
 mod rpc;
@@ -33,6 +34,6 @@ pub use monitoring::{
     RemoteObservation, ReviewState,
 };
 pub use repository::{RepositoryInspection, RepositoryService};
-pub use rpc::{serve, serve_with_codex};
+pub use rpc::{serve, serve_until, serve_with_codex};
 pub use store::EventStore;
 pub use worktree::{GitTransport, WorktreeService};
