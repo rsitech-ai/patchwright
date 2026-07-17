@@ -7,6 +7,7 @@ use patchwright_engine::codex::process::{
     VersionCompatibility,
 };
 use serde_json::Value;
+use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -50,6 +51,37 @@ async fn rejects_missing_or_non_executable_codex_paths() {
         CodexExecutable::discover(Some(&regular_file)).await,
         Err(CodexProcessError::NotExecutable(_))
     ));
+}
+
+#[tokio::test]
+async fn bounds_a_hung_version_probe_and_cleans_up_its_process_group() {
+    let root = tempdir().unwrap();
+    let executable = root.path().join("hung-codex");
+    let descendant_path = root.path().join("descendant.pid");
+    std::fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\n(sleep 60) &\nprintf '%s' \"$!\" > '{}'\nwait\n",
+            descendant_path.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let started = std::time::Instant::now();
+    let result = CodexExecutable::discover(Some(&executable)).await;
+
+    assert!(matches!(
+        result,
+        Err(CodexProcessError::VersionProbeTimeout { .. })
+    ));
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let descendant_pid = std::fs::read_to_string(descendant_path)
+        .unwrap()
+        .parse::<i32>()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(!pid_exists(descendant_pid));
 }
 
 #[tokio::test]
