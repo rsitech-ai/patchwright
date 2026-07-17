@@ -5,7 +5,7 @@ struct SidebarView: View {
     @ObservedObject var store: WorkspaceStore
 
     var body: some View {
-        List(selection: $store.primarySelection) {
+        List(selection: sectionSelection) {
             Section("Workspace") {
                 ForEach(WorkspaceSection.allCases) { section in
                     HStack(spacing: 8) {
@@ -41,6 +41,15 @@ struct SidebarView: View {
             }
         }
         .navigationTitle("Patchwright")
+    }
+
+    private var sectionSelection: Binding<WorkspaceSection> {
+        Binding(
+            get: { store.primarySelection },
+            set: { section in
+                Task { @MainActor in store.selectSection(section) }
+            }
+        )
     }
 
     private func count(for section: WorkspaceSection) -> Int? {
