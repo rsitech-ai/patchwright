@@ -412,7 +412,8 @@ struct TaskDetailView: View {
                         preview(
                             GitHubActionPayload(
                                 kind: "closePullRequest",
-                                pullRequestNumber: source.number
+                                pullRequestNumber: source.number,
+                                expectedHeadSha: source.headSHA
                             )
                         )
                     }

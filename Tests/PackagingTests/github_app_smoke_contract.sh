@@ -53,5 +53,15 @@ grep -Fq 'kind:"review",pullRequestNumber:$pullRequestNumber,expectedHeadSha:$ex
   echo "live review smoke must include expectedHeadSha inside the review action" >&2
   exit 1
 }
+grep -Fq -- '--arg expectedBaseSha "$BASE_SHA"' "$SMOKE" || {
+  echo "live draft PR smoke must bind the action to the captured base SHA" >&2
+  exit 1
+}
+grep -Fq 'kind:"draftPullRequest",title:$title,head:$head,base:$base,expectedBaseSha:$expectedBaseSha' "$SMOKE" || {
+  echo "live draft PR smoke must include expectedBaseSha inside the action" >&2
+  exit 1
+}
+cargo test --manifest-path "$ROOT_DIR/Cargo.toml" -p patchwright-core \
+  --test github_action_contract github_app_smoke_draft_action_deserializes --quiet
 
 printf 'GitHub App smoke safety contract passed\n'
