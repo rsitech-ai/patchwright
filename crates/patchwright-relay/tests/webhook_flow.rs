@@ -233,6 +233,36 @@ async fn unsupported_or_incomplete_events_are_rejected_without_a_durable_write()
     assert_eq!(state.delivery_count(), 0);
 }
 
+#[tokio::test]
+async fn plain_issue_comments_do_not_forge_a_pull_request_monitor_identity() {
+    let secret = b"test-secret";
+    let temporary = TempDir::new().unwrap();
+    fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let database = temporary.path().join("relay.sqlite");
+    let state = RelayState::open(secret.to_vec(), &database).unwrap();
+    let body = br#"{"action":"created","issue":{"number":42},"comment":{"id":10},"repository":{"id":1,"full_name":"octocat/example"}}"#;
+    let response = router(state)
+        .oneshot(request_for_event(
+            secret,
+            "plain-issue-comment",
+            "issue_comment",
+            body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let payload: Vec<u8> = Connection::open(database)
+        .unwrap()
+        .query_row(
+            "SELECT payload FROM webhook_deliveries WHERE delivery_id = 'plain-issue-comment'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    assert!(envelope["entityNumber"].is_null());
+}
+
 #[test]
 fn relay_database_is_created_in_an_owner_only_directory_with_owner_only_permissions() {
     let temporary = TempDir::new().unwrap();

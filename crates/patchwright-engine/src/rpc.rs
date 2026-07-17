@@ -17,8 +17,9 @@ use patchwright_core::{
     RepositoryPermissionSnapshot, Task, TaskId, TaskState, WorkflowPreset, assess_queue,
 };
 use patchwright_relay::{
-    AppAuthenticator, ConfiguredKeyProvider, GitHubAppConfiguration, GitHubMutationClient,
-    InstallationBroker, InstallationPermissions, InstallationToken, KeyReference, MutationError,
+    AppAuthenticator, ConfiguredKeyProvider, ForwardedWebhook, GitHubAppConfiguration,
+    GitHubMutationClient, InstallationBroker, InstallationPermissions, InstallationToken,
+    KeyReference, MutationError,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -136,9 +137,8 @@ where
     loop {
         tokio::select! {
             () = &mut shutdown => break,
-            permit = Arc::clone(&permits).acquire_owned() => {
-                let permit = permit.context("RPC connection semaphore closed")?;
-                let (stream, _) = listener.accept().await.context("accept engine client")?;
+            accepted = accept_with_permit(&listener, Arc::clone(&permits)) => {
+                let (stream, permit) = accepted?;
                 if let Err(error) = verify_peer(&stream) {
                     tracing::warn!(error = %error, "reject unauthorized RPC peer");
                     continue;
@@ -172,6 +172,18 @@ where
     })
     .await;
     codex_shutdown
+}
+
+async fn accept_with_permit(
+    listener: &UnixListener,
+    permits: Arc<Semaphore>,
+) -> Result<(UnixStream, tokio::sync::OwnedSemaphorePermit)> {
+    let permit = permits
+        .acquire_owned()
+        .await
+        .context("RPC connection semaphore closed")?;
+    let (stream, _) = listener.accept().await.context("accept engine client")?;
+    Ok((stream, permit))
 }
 
 async fn prepare_listener(socket_path: &Path) -> Result<(UnixListener, SocketGuard)> {
@@ -326,6 +338,7 @@ async fn dispatch(request: Request, state: &ServerState) -> Value {
         "github.sync.start" => github_sync_start(request.id, &request.params, state).await,
         "github.sync.status" => github_sync_status(request.id, &request.params, store),
         "github.sync.cancel" => github_sync_cancel(request.id, &request.params, state).await,
+        "github.webhook.ingest" => github_webhook_ingest(request.id, &request.params, store),
         "delivery.preview" => delivery_preview(request.id, &request.params, store),
         "delivery.approve" => delivery_approve(request.id, &request.params, store),
         "delivery.execute" => delivery_execute(request.id, &request.params, store).await,
@@ -347,6 +360,28 @@ async fn dispatch(request: Request, state: &ServerState) -> Value {
         "codex.pause" => codex_interrupt(request.id, &request.params, state, false).await,
         "codex.cancel" => codex_interrupt(request.id, &request.params, state, true).await,
         _ => rpc_error(request.id, -32601, "method not found", None),
+    }
+}
+
+fn github_webhook_ingest(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let delivery: ForwardedWebhook = match serde_json::from_value(params.clone()) {
+        Ok(delivery) => delivery,
+        Err(error) => {
+            return rpc_error(id, -32602, "invalid parameters", Some(error.to_string()));
+        }
+    };
+    match store
+        .lock()
+        .expect("event store lock poisoned")
+        .ingest_github_webhook(&delivery)
+    {
+        Ok(outcome) => rpc_result(id, json!(outcome)),
+        Err(error) => rpc_error(
+            id,
+            -32072,
+            "webhook ingestion failed",
+            Some(error.to_string()),
+        ),
     }
 }
 

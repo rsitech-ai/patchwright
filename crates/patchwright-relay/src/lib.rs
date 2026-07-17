@@ -16,4 +16,7 @@ pub use installation::{
     InstallationBroker, InstallationBrokerError, InstallationPermissions, InstallationToken,
 };
 pub use mutations::{GitHubMutationClient, MutationError, MutationResult};
-pub use webhook::{RelayState, router, verify_signature};
+pub use webhook::{
+    ForwardSummary, ForwardedWebhook, RelayState, SanitizedWebhookEnvelope, router,
+    verify_signature,
+};
