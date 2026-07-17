@@ -9,6 +9,9 @@ KIND="${4:?kind app or dmg required}"
 [[ ! -L "$TARGET" && ( -d "$TARGET" || -f "$TARGET" ) ]] || { echo "notary target must be a real app or regular DMG" >&2; exit 65; }
 [[ ! -e "$PUBLIC_RESULT" && ! -L "$PUBLIC_RESULT" ]] || { echo "public notary evidence path must be new" >&2; exit 65; }
 PROFILE="${PATCHWRIGHT_NOTARY_PROFILE:-}"
+WARNING_POLICY="${PATCHWRIGHT_NOTARY_WARNING_POLICY:-reject}"
+[[ "$WARNING_POLICY" == reject || "$WARNING_POLICY" == allow ]] \
+  || { echo "PATCHWRIGHT_NOTARY_WARNING_POLICY must be reject or allow" >&2; exit 64; }
 [[ -n "$PROFILE" ]] || { echo "blocked:external — PATCHWRIGHT_NOTARY_PROFILE must name a Keychain notarytool profile" >&2; exit 78; }
 mkdir -p "$PRIVATE_DIR" "$(dirname "$PUBLIC_RESULT")"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/patchwright-notary.XXXXXX")"
@@ -29,14 +32,18 @@ xcrun notarytool submit "$SUBMIT_TARGET" --keychain-profile "$PROFILE" --wait --
 STATUS="$(jq -r '.status // empty' "$RAW_RESULT")"
 ID="$(jq -r '.id // empty' "$RAW_RESULT")"
 [[ "$STATUS" == Accepted && -n "$ID" ]] || { echo "notarization failed: status=${STATUS:-unknown}; private evidence retained" >&2; exit 65; }
-xcrun notarytool log "$ID" --keychain-profile "$PROFILE" "$PRIVATE_DIR/notary-$ID.log.json" >/dev/null
+NOTARY_LOG="$PRIVATE_DIR/notary-$ID.log.json"
+xcrun notarytool log "$ID" --keychain-profile "$PROFILE" "$NOTARY_LOG" >/dev/null
+LOG_SUMMARY="$("$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/parse_notary_log.py" \
+  --log "$NOTARY_LOG" --warning-policy "$WARNING_POLICY")"
 xcrun stapler staple "$TARGET"
 xcrun stapler validate "$TARGET"
 FINAL_SHA256=""; [[ -f "$TARGET" ]] && FINAL_SHA256="$(shasum -a 256 "$TARGET" | awk '{print $1}')"
 PUBLIC_TEMP="$(mktemp "$(dirname "$PUBLIC_RESULT")/.notary-public.XXXXXX")"
 jq -n --arg kind "$KIND" --arg submission_sha256 "$SUBMISSION_SHA256" --arg final_sha256 "$FINAL_SHA256" \
   --arg status "$STATUS" --arg request_id "$ID" --arg completed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  '{schema_version:1,kind:$kind,submission_sha256:$submission_sha256,final_sha256:$final_sha256,status:$status,request_id:$request_id,stapled:true,stapler_validated:true,completed_at:$completed_at}' >"$PUBLIC_TEMP"
+  --argjson log_summary "$LOG_SUMMARY" \
+  '{schema_version:1,kind:$kind,submission_sha256:$submission_sha256,final_sha256:$final_sha256,status:$status,request_id:$request_id,stapled:true,stapler_validated:true,completed_at:$completed_at,log_summary:$log_summary}' >"$PUBLIC_TEMP"
 mv "$PUBLIC_TEMP" "$PUBLIC_RESULT"
 PUBLIC_TEMP=""
 echo "notarized and stapled: $TARGET"

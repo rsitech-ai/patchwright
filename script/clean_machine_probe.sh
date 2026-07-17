@@ -9,7 +9,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   exit 78
 }
 mkdir -p "$EVIDENCE_DIR"
-"$ROOT_DIR/script/verify_distribution.sh" "$DMG_PATH" | tee "$EVIDENCE_DIR/distribution.txt"
+CHECKSUM_PATH="${3:?existing checksum sidecar required}"
+"$ROOT_DIR/script/verify_distribution.sh" "$DMG_PATH" "$CHECKSUM_PATH" | tee "$EVIDENCE_DIR/distribution.txt"
 {
   sw_vers
   uname -a
