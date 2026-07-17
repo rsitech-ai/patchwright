@@ -156,7 +156,7 @@ grep -Fq 'PATCHWRIGHT_GITHUB_WEBHOOK_SECRET_FILE' "$ROOT_DIR/README.md" \
   || fail "README must use a webhook secret file, not a raw secret environment value"
 grep -Fq 'does not automatically redeliver' "$ROOT_DIR/docs/production-plan.md" \
   || fail "operations docs must state GitHub automatic redelivery truth"
-grep -Fq 'owner-only mode `0600`' "$ROOT_DIR/docs/security.md" \
+grep -Fq 'mode `0400` or `0600`' "$ROOT_DIR/docs/security.md" \
   || fail "security docs must require an owner-only relay secret file"
 grep -Fq 'Tests/PackagingTests/release_security_contract.sh' "$ROOT_DIR/script/verify.sh" \
   || fail "the repository verification entrypoint must run the release security contract"
