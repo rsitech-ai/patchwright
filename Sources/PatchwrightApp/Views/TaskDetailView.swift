@@ -15,15 +15,17 @@ struct TaskDetailView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            Picker("Task workbench", selection: $tabRaw) {
-                ForEach(TaskWorkbenchTab.allCases) { tab in
-                    Text(tab.title).tag(tab.rawValue)
+            if task.state != .completed {
+                Picker("Task workbench", selection: $tabRaw) {
+                    ForEach(TaskWorkbenchTab.allCases) { tab in
+                        Text(tab.title).tag(tab.rawValue)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(12)
+                Divider()
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(12)
-            Divider()
             tabContent
         }
         .sheet(item: $deliveryApprovalRequest) { request in
@@ -64,6 +66,12 @@ struct TaskDetailView: View {
 
     @ViewBuilder private var tabContent: some View {
         switch TaskSurfaceState.resolve(state: task.state, reason: task.interruption?.reason) {
+        case .completed:
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) { overview }
+                    .padding(20)
+                    .frame(maxWidth: 860, alignment: .leading)
+            }
         case .cancelled:
             ContentUnavailableView(
                 "Task Cancelled",
@@ -102,7 +110,9 @@ struct TaskDetailView: View {
                 LabeledContent("Updated") { TimestampText(date: task.updatedAt) }
                 LabeledContent(
                     "Contract",
-                    value: store.taskContracts[task.id].map { "Version \($0.version)" } ?? "Pending"
+                    value: store.taskContracts[task.id].map {
+                        $0.isLegacyReadOnly ? "Version \($0.version) · Read only" : "Version \($0.version)"
+                    } ?? "Pending"
                 )
                 lifecycleControls
                 if let error = store.taskLifecycleError {
@@ -146,8 +156,18 @@ struct TaskDetailView: View {
         }
     }
 
-    private func contractBoundary(_ contract: TaskContract) -> some View {
+    private func contractBoundary(_ contract: TaskContractSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 12) {
+            if contract.isLegacyReadOnly {
+                Label(
+                    "Historical contract · Read only",
+                    systemImage: "clock.badge.exclamationmark"
+                )
+                .font(.callout.weight(.semibold))
+                Text("This contract predates evidence-bound execution. Patchwright preserves it for audit but will not use it to prepare, deliver, or merge changes.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             LabeledContent("Goal", value: contract.goal)
             LabeledContent("Risk", value: contract.risk.displayName)
             Divider()
@@ -157,10 +177,15 @@ struct TaskDetailView: View {
                     .font(.callout)
             }
             Text("Exact verification commands").font(.subheadline.weight(.semibold))
-            ForEach(Array(contract.verificationCommands.enumerated()), id: \.offset) { _, command in
-                Text(command.argvDisplay)
-                    .font(.callout.monospaced())
-                    .textSelection(.enabled)
+            if contract.verificationCommands.isEmpty {
+                Text("Not recorded by this historical contract")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(contract.verificationCommands.enumerated()), id: \.offset) { _, command in
+                    Text(command.argvDisplay)
+                        .font(.callout.monospaced())
+                        .textSelection(.enabled)
+                }
             }
             Text("Sensitive paths").font(.subheadline.weight(.semibold))
             if contract.sensitivePaths.isEmpty {

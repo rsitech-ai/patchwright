@@ -7,7 +7,8 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use patchwright_core::{
-    Approval, QueueDecision, RepositoryBinding, RepositoryBindingId, Task, TaskContract, TaskId,
+    Approval, QueueDecision, RepositoryBinding, RepositoryBindingId, Task, TaskContract,
+    TaskContractSnapshot, TaskId,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
@@ -515,6 +516,14 @@ impl EventStore {
             "SELECT payload FROM task_contracts WHERE task_id = ?1",
             &task_id.to_string(),
             "task contract",
+        )
+    }
+
+    pub fn task_contract_snapshot(&self, task_id: TaskId) -> Result<Option<TaskContractSnapshot>> {
+        self.load_json_optional(
+            "SELECT payload FROM task_contracts WHERE task_id = ?1",
+            &task_id.to_string(),
+            "task contract snapshot",
         )
     }
 
