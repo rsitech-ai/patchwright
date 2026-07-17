@@ -10,6 +10,8 @@ use std::{
 use thiserror::Error;
 use uuid::Uuid;
 
+const CURRENT_TASK_CONTRACT_VERSION: u32 = 2;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RepositoryBindingId(Uuid);
@@ -648,12 +650,13 @@ impl<'de> Deserialize<'de> for TaskContract {
         D: serde::Deserializer<'de>,
     {
         let wire = TaskContractWire::deserialize(deserializer)?;
-        if wire.version != 1 {
+        if !matches!(wire.version, 1 | CURRENT_TASK_CONTRACT_VERSION) {
             return Err(serde::de::Error::custom(
                 "unsupported task contract version",
             ));
         }
-        Self::try_from(TaskContractDraft {
+        let version = wire.version;
+        let mut contract = Self::try_from(TaskContractDraft {
             task_id: wire.task_id,
             source: wire.source,
             repository_binding_id: wire.repository_binding_id,
@@ -670,7 +673,9 @@ impl<'de> Deserialize<'de> for TaskContract {
             sensitive_paths: wire.sensitive_paths,
             dependencies: wire.dependencies,
         })
-        .map_err(serde::de::Error::custom)
+        .map_err(serde::de::Error::custom)?;
+        contract.version = version;
+        Ok(contract)
     }
 }
 
@@ -729,7 +734,7 @@ impl TryFrom<TaskContractDraft> for TaskContract {
             return Err(ContractError::InvalidField("dependencies"));
         }
         Ok(Self {
-            version: 1,
+            version: CURRENT_TASK_CONTRACT_VERSION,
             task_id: draft.task_id,
             source: draft.source,
             repository_binding_id: draft.repository_binding_id,
@@ -746,6 +751,181 @@ impl TryFrom<TaskContractDraft> for TaskContract {
             sensitive_paths: draft.sensitive_paths,
             dependencies: draft.dependencies,
         })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyTaskContract {
+    version: u32,
+    task_id: TaskId,
+    source: TaskSource,
+    repository_binding_id: RepositoryBindingId,
+    goal: String,
+    acceptance_criteria: Vec<String>,
+    base_sha: Option<String>,
+    head_sha: Option<String>,
+    instruction_digests: Vec<InstructionDigest>,
+    verification_commands: Vec<VerificationCommand>,
+    required_capabilities: Vec<Capability>,
+    risk: RiskClass,
+    sensitive_paths: Vec<SensitivePath>,
+    dependencies: Vec<TaskId>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyTaskContractWire {
+    version: u32,
+    task_id: TaskId,
+    source: TaskSource,
+    repository_binding_id: RepositoryBindingId,
+    goal: String,
+    acceptance_criteria: Vec<String>,
+    base_sha: Option<String>,
+    head_sha: Option<String>,
+    instruction_digests: Vec<InstructionDigest>,
+    verification_commands: Vec<VerificationCommand>,
+    required_capabilities: Vec<Capability>,
+    risk: RiskClass,
+    sensitive_paths: Vec<SensitivePath>,
+    dependencies: Vec<TaskId>,
+}
+
+impl<'de> Deserialize<'de> for LegacyTaskContract {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut wire = LegacyTaskContractWire::deserialize(deserializer)?;
+        if wire.version != 1 {
+            return Err(serde::de::Error::custom(
+                "unsupported legacy task contract version",
+            ));
+        }
+        let source = revalidate_task_source(wire.source).map_err(serde::de::Error::custom)?;
+        let goal = wire.goal.trim().to_owned();
+        nonempty(&goal, "goal").map_err(serde::de::Error::custom)?;
+        for criterion in &mut wire.acceptance_criteria {
+            *criterion = criterion.trim().to_owned();
+        }
+        if wire.acceptance_criteria.is_empty()
+            || wire.acceptance_criteria.iter().any(String::is_empty)
+        {
+            return Err(serde::de::Error::custom(ContractError::InvalidField(
+                "acceptanceCriteria",
+            )));
+        }
+        if let Some(sha) = wire.base_sha.as_deref() {
+            validate_git_sha(sha, "baseSha").map_err(serde::de::Error::custom)?;
+        }
+        if let Some(sha) = wire.head_sha.as_deref() {
+            validate_git_sha(sha, "headSha").map_err(serde::de::Error::custom)?;
+        }
+        if let TaskSource::GitHubPullRequest(pull_request) = &source {
+            if wire.base_sha.as_deref() != Some(pull_request.base_sha.as_str())
+                || wire.head_sha.as_deref() != Some(pull_request.head_sha.as_str())
+            {
+                return Err(serde::de::Error::custom(ContractError::InvalidField(
+                    "pullRequestShaBinding",
+                )));
+            }
+        }
+        let unique_dependencies = wire.dependencies.iter().copied().collect::<HashSet<_>>();
+        if unique_dependencies.len() != wire.dependencies.len()
+            || unique_dependencies.contains(&wire.task_id)
+        {
+            return Err(serde::de::Error::custom(ContractError::InvalidField(
+                "dependencies",
+            )));
+        }
+        wire.instruction_digests = wire
+            .instruction_digests
+            .into_iter()
+            .map(|digest| InstructionDigest::new(digest.source, digest.sha256, digest.precedence))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(serde::de::Error::custom)?;
+        wire.verification_commands = wire
+            .verification_commands
+            .into_iter()
+            .map(|command| VerificationCommand::new(command.program, command.args))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(serde::de::Error::custom)?;
+        wire.sensitive_paths = wire
+            .sensitive_paths
+            .into_iter()
+            .map(|path| SensitivePath::new(path.path, path.reason))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            version: wire.version,
+            task_id: wire.task_id,
+            source,
+            repository_binding_id: wire.repository_binding_id,
+            goal,
+            acceptance_criteria: wire.acceptance_criteria,
+            base_sha: wire.base_sha,
+            head_sha: wire.head_sha,
+            instruction_digests: wire.instruction_digests,
+            verification_commands: wire.verification_commands,
+            required_capabilities: wire.required_capabilities,
+            risk: wire.risk,
+            sensitive_paths: wire.sensitive_paths,
+            dependencies: wire.dependencies,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum TaskContractSnapshot {
+    Executable(TaskContract),
+    LegacyReadOnly(LegacyTaskContract),
+}
+
+impl<'de> Deserialize<'de> for TaskContractSnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if let Ok(contract) = serde_json::from_value::<TaskContract>(value.clone()) {
+            return Ok(Self::Executable(contract));
+        }
+        serde_json::from_value::<LegacyTaskContract>(value)
+            .map(Self::LegacyReadOnly)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl TaskContractSnapshot {
+    #[must_use]
+    pub const fn is_legacy_read_only(&self) -> bool {
+        matches!(self, Self::LegacyReadOnly(_))
+    }
+
+    #[must_use]
+    pub const fn version(&self) -> u32 {
+        match self {
+            Self::Executable(contract) => contract.version,
+            Self::LegacyReadOnly(contract) => contract.version,
+        }
+    }
+
+    #[must_use]
+    pub const fn task_id(&self) -> TaskId {
+        match self {
+            Self::Executable(contract) => contract.task_id,
+            Self::LegacyReadOnly(contract) => contract.task_id,
+        }
+    }
+
+    #[must_use]
+    pub fn goal(&self) -> &str {
+        match self {
+            Self::Executable(contract) => &contract.goal,
+            Self::LegacyReadOnly(contract) => &contract.goal,
+        }
     }
 }
 

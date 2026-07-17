@@ -2,6 +2,17 @@ import Foundation
 import XCTest
 
 final class PreparationPresentationTests: XCTestCase {
+    func testTaskPreviewCopySeparatesLocalReviewFromGitHubMutationAccess() throws {
+        let source = try String(
+            contentsOf: packageRoot.appending(path: "Sources/PatchwrightApp/Views/GitHubRepositoryView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("Preview the local task contract"))
+        XCTAssertTrue(source.contains("GitHub App access is required only for remote mutations"))
+        XCTAssertFalse(source.contains("Verify GitHub App access and preview the task contract"))
+    }
+
     func testTaskDetailPresentsExactPreparationReviewBeforeApproval() throws {
         let taskDetailSource = try String(
             contentsOf: packageRoot.appending(path: "Sources/PatchwrightApp/Views/TaskDetailView.swift"),

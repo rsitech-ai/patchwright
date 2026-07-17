@@ -2,7 +2,8 @@ use chrono::{TimeZone, Utc};
 use patchwright_core::{
     CredentialHealth, GitHubIssueSourceInput, GitHubPullRequestSourceInput, InstructionDigest,
     RepositoryBinding, RepositoryBindingDraft, RepositoryPermissionSnapshot, RiskClass,
-    SensitivePath, Task, TaskContract, TaskContractDraft, TaskId, TaskSource, VerificationCommand,
+    SensitivePath, Task, TaskContract, TaskContractDraft, TaskContractSnapshot, TaskId, TaskSource,
+    VerificationCommand,
 };
 use uuid::Uuid;
 
@@ -178,7 +179,7 @@ fn task_contract_rejects_empty_acceptance_and_duplicate_dependencies() {
         dependencies: vec![dependency],
     };
     let contract = TaskContract::try_from(draft.clone()).unwrap();
-    assert_eq!(contract.version(), 1);
+    assert_eq!(contract.version(), 2);
     assert_eq!(contract.repository_binding_id(), binding.id());
 
     assert!(
@@ -203,6 +204,37 @@ fn task_contract_rejects_empty_acceptance_and_duplicate_dependencies() {
         })
         .is_err()
     );
+}
+
+#[test]
+fn legacy_contract_snapshot_is_displayable_but_not_executable() {
+    let task_id = TaskId::new();
+    let binding_id = patchwright_core::RepositoryBindingId::new();
+    let payload = serde_json::json!({
+        "version": 1,
+        "taskId": task_id,
+        "source": { "kind": "localRequest" },
+        "repositoryBindingId": binding_id,
+        "goal": "Historical task outcome",
+        "acceptanceCriteria": ["Preserve the original audit record"],
+        "baseSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "headSha": null,
+        "instructionDigests": [],
+        "verificationCommands": [],
+        "requiredCapabilities": [],
+        "risk": "moderate",
+        "sensitivePaths": [],
+        "dependencies": []
+    });
+
+    assert!(serde_json::from_value::<TaskContract>(payload.clone()).is_err());
+    let snapshot = serde_json::from_value::<TaskContractSnapshot>(payload.clone()).unwrap();
+
+    assert!(snapshot.is_legacy_read_only());
+    assert_eq!(snapshot.version(), 1);
+    assert_eq!(snapshot.task_id(), task_id);
+    assert_eq!(snapshot.goal(), "Historical task outcome");
+    assert_eq!(serde_json::to_value(snapshot).unwrap(), payload);
 }
 
 #[test]
