@@ -324,6 +324,68 @@ async fn wait_for_socket(socket: &std::path::Path) {
     panic!("engine socket was not created");
 }
 
+#[tokio::test]
+async fn rpc_rejects_a_forged_action_preview_before_delivery_lookup() {
+    let directory = owner_only_tempdir();
+    let socket = directory.path().join("engine.sock");
+    let database = directory.path().join("engine.sqlite3");
+    let server_socket = socket.clone();
+    let server = tokio::spawn(async move { serve(&server_socket, &database).await });
+    wait_for_socket(&socket).await;
+
+    let task_id = "2bbf3d95-7774-4883-b915-c10c061e03cd";
+    let sha = "a".repeat(40);
+    let mut stream = BufReader::new(UnixStream::connect(&socket).await.unwrap());
+    let response = call(
+        &mut stream,
+        json!({
+            "jsonrpc":"2.0",
+            "id":31,
+            "method":"delivery.approve",
+            "params":{
+                "approvedBy":"owner",
+                "preview":{
+                    "taskId":task_id,
+                    "action":{
+                        "remote":{
+                            "repositoryId":42,
+                            "installationId":84,
+                            "repositoryFullName":"octocat/hello"
+                        },
+                        "action":{"kind":"comment","issueNumber":7,"body":"body"},
+                        "precondition":{
+                            "expectedHeadSha":null,
+                            "expectedBaseSha":sha,
+                            "snapshotGeneration":3
+                        },
+                        "payloadSha256":"0".repeat(64),
+                        "idempotencySha256":"1".repeat(64),
+                        "requiredPermissions":["administration:write"]
+                    },
+                    "fingerprint":{
+                        "taskId":task_id,
+                        "githubRepositoryId":42,
+                        "repositoryFullName":"octocat/hello",
+                        "actionKind":"postComment",
+                        "pullRequestNumber":7,
+                        "branch":null,
+                        "headSha":null,
+                        "baseSha":sha,
+                        "payloadSha256":"0".repeat(64),
+                        "policySha256":"2".repeat(64),
+                        "instructionSha256":"3".repeat(64),
+                        "invalidationGeneration":3
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(response["error"]["code"], -32602);
+    server.abort();
+}
+
 fn owner_only_tempdir() -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
