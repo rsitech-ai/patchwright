@@ -17,7 +17,7 @@ Patchwright is available under your choice of the
 
 This repository contains the Stage 1–3 MVP:
 
-- `Patchwright`: native SwiftUI review and task client with Apple Foundation Models availability handling.
+- `Patchwright`: native SwiftUI task, GitHub inspection, approval, and Codex-session client.
 - `patchwright-engine`: Rust task state, policy, instruction resolution, worktrees, argv-safe commands, SQLite recovery, and Unix-socket JSON-RPC.
 - `patchwright-relay`: signature-verifying GitHub webhook ingress plus draft-PR and check-run API adapters.
 
