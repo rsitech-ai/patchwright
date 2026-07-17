@@ -20,13 +20,18 @@ final class ConversionStoreTests: XCTestCase {
         XCTAssertEqual(store.tasks.first?.state, .awaitingPreparationApproval)
         XCTAssertNil(store.conversionError)
 
-        await store.prepareTask(taskID: try XCTUnwrap(store.selectedTaskID))
+        let taskID = try XCTUnwrap(store.selectedTaskID)
+        await store.previewPreparation(taskID: taskID)
+        let preparation = try XCTUnwrap(store.preparationPreviews[taskID])
+        XCTAssertEqual(preparation.sourceSha, String(repeating: "a", count: 40))
+        await store.approveAndPrepare(preparation)
         XCTAssertEqual(store.tasks.first?.state, .preparing)
         XCTAssertEqual(store.tasks.first?.repositoryPath, "/tmp/worktrees/task")
         let methods = await engine.calledMethods()
         XCTAssertEqual(methods, [
             "task.previewFromGitHub", "task.createFromGitHub", "task.plan", "task.timeline",
-            "task.prepare", "task.timeline", "task.worktree",
+            "task.preparation.preview", "task.preparation.approve", "task.prepare",
+            "task.timeline", "task.worktree",
         ])
     }
 
@@ -122,7 +127,15 @@ private actor ConversionEngine: EngineServing {
             json = #"{"preview":{"repositoryFullName":"acme/widget","repositoryId":42,"repositoryBindingId":"11111111-1111-1111-1111-111111111111","itemNumber":7,"sourceKind":"issue","title":"Fix login","goal":"Resolve issue","acceptanceCriteria":["Verified"],"repositoryPath":"/tmp/acme-widget","baseSha":null,"headSha":null,"sourceUpdatedAt":"2026-07-13T12:00:00Z","snapshotAt":"2026-07-13T12:01:00Z","requiresConfirmation":true},"task":{"id":"22222222-2222-2222-2222-222222222222","title":"Fix login","repositoryPath":"/tmp/acme-widget","state":"discovered","createdAt":"2026-07-13T12:02:00Z","updatedAt":"2026-07-13T12:02:00Z"},"created":true}"#
         case "task.plan":
             json = #"{"id":"22222222-2222-2222-2222-222222222222","title":"Fix login","repositoryPath":"/tmp/acme-widget","state":"awaitingPreparationApproval","createdAt":"2026-07-13T12:02:00Z","updatedAt":"2026-07-13T12:03:00Z"}"#
+        case "task.preparation.preview":
+            json = #"{"taskId":"22222222-2222-2222-2222-222222222222","repositoryBindingId":"11111111-1111-1111-1111-111111111111","repositoryFullName":"acme/widget","repositoryPath":"/tmp/acme-widget","sourceSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","worktreePath":"/tmp/worktrees/task","branch":"patchwright/22222222-2222-2222-2222-222222222222","invalidationGeneration":7,"policySha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","instructionSha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","fingerprint":{"taskId":"22222222-2222-2222-2222-222222222222","githubRepositoryId":42,"repositoryFullName":"acme/widget","actionKind":"prepareWorktree","pullRequestNumber":null,"branch":"patchwright/22222222-2222-2222-2222-222222222222","headSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseSha":null,"payloadSha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","policySha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","instructionSha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","invalidationGeneration":7}}"#
+        case "task.preparation.approve":
+            json = #"{"id":"33333333-3333-3333-3333-333333333333","class":"preparation","capability":"prepareWorktree","fingerprint":{"taskId":"22222222-2222-2222-2222-222222222222","githubRepositoryId":42,"repositoryFullName":"acme/widget","actionKind":"prepareWorktree","pullRequestNumber":null,"branch":"patchwright/22222222-2222-2222-2222-222222222222","headSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseSha":null,"payloadSha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","policySha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","instructionSha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","invalidationGeneration":7},"approvedBy":"Patchwright operator","approvedAt":"2026-07-13T12:03:00Z","expiresAt":"2026-07-13T12:13:00Z"}"#
         case "task.prepare":
+            guard params["approvalId"] == "33333333-3333-3333-3333-333333333333",
+                  params["preview"] != nil else {
+                throw EngineError.remote(code: -32602, message: "exact preparation approval required")
+            }
             prepared = true
             json = #"{"id":"22222222-2222-2222-2222-222222222222","title":"Fix login","repositoryPath":"/tmp/worktrees/task","state":"preparing","createdAt":"2026-07-13T12:02:00Z","updatedAt":"2026-07-13T12:04:00Z"}"#
         case "task.timeline":

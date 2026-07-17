@@ -35,6 +35,8 @@ public final class WorkspaceStore: ObservableObject {
     @Published public private(set) var taskLifecycleBusyTaskIDs: Set<UUID> = []
     @Published public private(set) var taskLifecycleError: String?
     @Published public private(set) var worktreeByTask: [UUID: WorktreeInspection] = [:]
+    @Published public private(set) var preparationPreviews: [UUID: PreparationPreview] = [:]
+    @Published public private(set) var preparationApprovals: [UUID: PreparationApproval] = [:]
     @Published public private(set) var repositorySnapshotByTask: [UUID: GitHubRepositorySnapshot] = [:]
     @Published public private(set) var deliveryPreviews: [UUID: DeliveryPreview] = [:]
     @Published public private(set) var deliveryApprovals: [UUID: DeliveryApproval] = [:]
@@ -191,12 +193,34 @@ public final class WorkspaceStore: ObservableObject {
         }
     }
 
-    public func prepareTask(taskID: UUID) async {
+    public func previewPreparation(taskID: UUID) async {
         guard !taskLifecycleBusyTaskIDs.contains(taskID) else { return }
         taskLifecycleBusyTaskIDs.insert(taskID)
         defer { taskLifecycleBusyTaskIDs.remove(taskID) }
         do {
-            replaceTask(try await engine.prepareTask(taskID: taskID))
+            preparationPreviews[taskID] = try await engine.previewPreparation(taskID: taskID)
+            taskLifecycleError = nil
+        } catch {
+            preparationPreviews.removeValue(forKey: taskID)
+            taskLifecycleError = error.localizedDescription
+        }
+    }
+
+    public func approveAndPrepare(_ preview: PreparationPreview) async {
+        let taskID = preview.taskId
+        guard !taskLifecycleBusyTaskIDs.contains(taskID), preparationPreviews[taskID] == preview else {
+            return
+        }
+        taskLifecycleBusyTaskIDs.insert(taskID)
+        defer { taskLifecycleBusyTaskIDs.remove(taskID) }
+        do {
+            let approval = try await engine.approvePreparation(
+                preview,
+                approvedBy: ProcessInfo.processInfo.userName
+            )
+            preparationApprovals[taskID] = approval
+            replaceTask(try await engine.prepareTask(preview: preview, approvalID: approval.id))
+            preparationPreviews.removeValue(forKey: taskID)
             taskLifecycleError = nil
             await refreshTaskTimeline(taskID: taskID)
             await refreshTaskWorktree(taskID: taskID)

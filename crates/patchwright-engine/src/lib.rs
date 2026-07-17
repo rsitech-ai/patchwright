@@ -8,6 +8,7 @@ mod github;
 mod jobs;
 mod lease;
 mod monitoring;
+mod preparation;
 mod repository;
 mod rpc;
 mod store;
@@ -34,8 +35,12 @@ pub use monitoring::{
     CIState, Mergeability, MonitorOutcome, MonitorRecord, MonitorState, MonitoringError,
     RemoteObservation, ReviewState,
 };
+pub use preparation::{
+    PreparationError, PreparationPreview, approve_preparation, authorize_preparation,
+    preview_preparation,
+};
 pub use repository::{RepositoryInspection, RepositoryService};
 pub use rpc::{serve, serve_until, serve_with_codex};
-pub use store::EventStore;
+pub use store::{EventStore, PreparationClaimOutcome};
 pub use verification::{VerificationError, VerificationEvidence, verify_task_for_delivery};
 pub use worktree::{GitTransport, WorktreeService};
