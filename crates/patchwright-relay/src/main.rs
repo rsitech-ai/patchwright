@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use std::fs::OpenOptions;
+use std::future::Future;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -137,6 +138,26 @@ async fn serve_relay(
     database: PathBuf,
     engine_socket: PathBuf,
 ) -> anyhow::Result<()> {
+    serve_relay_until(
+        address,
+        webhook_secret_file,
+        database,
+        engine_socket,
+        shutdown_signal(),
+    )
+    .await
+}
+
+async fn serve_relay_until<F>(
+    address: SocketAddr,
+    webhook_secret_file: PathBuf,
+    database: PathBuf,
+    engine_socket: PathBuf,
+    shutdown: F,
+) -> anyhow::Result<()>
+where
+    F: Future<Output = ()> + Send,
+{
     let secret = read_webhook_secret(&webhook_secret_file)?;
     let state = patchwright_relay::RelayState::open(secret, expand_home(database)?)?;
     let engine_socket = expand_home(engine_socket)?;
@@ -158,8 +179,9 @@ async fn serve_relay(
             .run_forwarder_until(&engine_socket, wait_for_shutdown(forwarder_shutdown))
             .await
     });
+    tokio::pin!(shutdown);
     let primary = tokio::select! {
-        signal = tokio::signal::ctrl_c() => signal.map_err(anyhow::Error::from),
+        () = &mut shutdown => Ok(()),
         result = services.join_next() => joined_service(result),
     };
     let _ = shutdown_tx.send(true);
@@ -177,6 +199,19 @@ async fn serve_relay(
     primary?;
     drained.expect("checked timeout")?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("install SIGTERM handler");
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            if let Err(error) = result {
+                tracing::error!(error = %error, "wait for Ctrl-C");
+            }
+        }
+        _ = terminate.recv() => {}
+    }
 }
 
 async fn wait_for_shutdown(mut receiver: tokio::sync::watch::Receiver<bool>) {
@@ -256,7 +291,7 @@ const fn is_owner_only(mode: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arguments, expand_home, is_owner_only, read_webhook_secret};
+    use super::{Arguments, expand_home, is_owner_only, read_webhook_secret, serve_relay_until};
     use clap::Parser;
     use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
     use tempfile::TempDir;
@@ -376,5 +411,28 @@ mod tests {
         fs::write(&oversized, vec![b'x'; 4097]).unwrap();
         fs::set_permissions(&oversized, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(read_webhook_secret(&oversized).is_err());
+    }
+
+    #[tokio::test]
+    async fn relay_services_stop_with_the_shared_shutdown_boundary() {
+        let temporary = TempDir::new().unwrap();
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let secret = temporary.path().join("secret");
+        fs::write(&secret, b"secret-value").unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            serve_relay_until(
+                "127.0.0.1:0".parse().unwrap(),
+                secret,
+                temporary.path().join("relay.sqlite"),
+                temporary.path().join("engine.sock"),
+                std::future::ready(()),
+            ),
+        )
+        .await
+        .expect("relay shutdown timed out")
+        .unwrap();
     }
 }
