@@ -150,6 +150,14 @@ public extension EngineServing {
         )
     }
 
+    func taskContract(taskID: UUID) async throws -> TaskContract {
+        try await call(
+            method: "task.contract",
+            params: ["taskId": taskID.uuidString],
+            as: TaskContract.self
+        )
+    }
+
     func previewPreparation(taskID: UUID) async throws -> PreparationPreview {
         try await call(
             method: "task.preparation.preview",

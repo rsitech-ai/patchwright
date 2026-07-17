@@ -9,6 +9,43 @@ struct PreparationApprovalSheet: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section("Implementation contract") {
+                    LabeledContent("Goal", value: preview.contract.goal)
+                    LabeledContent("Risk", value: preview.contract.risk.displayName)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Acceptance criteria").font(.headline)
+                        ForEach(
+                            Array(preview.contract.acceptanceCriteria.enumerated()),
+                            id: \.offset
+                        ) { _, criterion in
+                            Label(criterion, systemImage: "checkmark.circle")
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Exact verification commands").font(.headline)
+                        ForEach(
+                            Array(preview.contract.verificationCommands.enumerated()),
+                            id: \.offset
+                        ) { _, command in
+                            Text(command.argvDisplay)
+                                .font(.body.monospaced())
+                                .textSelection(.enabled)
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Sensitive paths").font(.headline)
+                        if preview.contract.sensitivePaths.isEmpty {
+                            Text("None declared").foregroundStyle(.secondary)
+                        } else {
+                            ForEach(
+                                Array(preview.contract.sensitivePaths.enumerated()),
+                                id: \.offset
+                            ) { _, path in
+                                LabeledContent(path.path, value: path.reason)
+                            }
+                        }
+                    }
+                }
                 Section("Exact local preparation") {
                     LabeledContent("Repository", value: preview.repositoryFullName)
                     LabeledContent("Repository path", value: preview.repositoryPath)
@@ -51,7 +88,7 @@ struct PreparationApprovalSheet: View {
                 }
             }
         }
-        .frame(minWidth: 660, minHeight: 480)
+        .frame(minWidth: 700, minHeight: 620)
     }
 
     private func short(_ value: String) -> String {

@@ -34,6 +34,8 @@ pub enum VerificationError {
     TaskMissing,
     #[error("task contract was not found")]
     ContractMissing,
+    #[error("task contract has no verification commands")]
+    EmptyVerificationPlan,
     #[error("task state {0} cannot be verified")]
     InvalidState(TaskState),
     #[error("task worktree is dirty")]
@@ -71,6 +73,9 @@ pub async fn verify_task_for_delivery(
         let contract = store
             .task_contract(task_id)?
             .ok_or(VerificationError::ContractMissing)?;
+        if contract.verification_commands().is_empty() {
+            return Err(VerificationError::EmptyVerificationPlan);
+        }
         (task, contract)
     };
 

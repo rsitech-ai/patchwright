@@ -1,8 +1,8 @@
 use crate::{
     CancellationState, ConversionError, ConversionRequest, EventStore, GhCliCredentialBroker,
     GitHubAccount, GitHubRepository, GitHubSource, GitHubSyncSummary, GitHubToken, Job, JobId,
-    JobKind, JobState, MonitorRecord, RemoteObservation, TaskConversionService, approve_delivery,
-    approve_preparation, authorize_execution, authorize_preparation,
+    JobKind, JobState, MonitorRecord, RemoteObservation, RepositoryPlanner, TaskConversionService,
+    approve_delivery, approve_preparation, authorize_execution, authorize_preparation,
     codex::{
         process::{CodexExecutable, CodexProcessConfig, CodexProcessFactory},
         service::{CodexRuntimeStatus, CodexService, CodexServiceError, CodexServiceState},
@@ -315,6 +315,7 @@ async fn dispatch(request: Request, state: &ServerState) -> Value {
         "task.timeline" => task_timeline(request.id, &request.params, store),
         "task.worktree" => task_worktree(request.id, &request.params, store),
         "task.plan" => task_plan(request.id, &request.params, store),
+        "task.contract" => task_contract(request.id, &request.params, store),
         "task.preparation.preview" => task_preparation_preview(request.id, &request.params, store),
         "task.preparation.approve" => task_preparation_approve(request.id, &request.params, store),
         "task.prepare" => task_prepare(request.id, &request.params, store).await,
@@ -1323,7 +1324,11 @@ fn task_plan(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
         Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
     };
     if task.state == TaskState::AwaitingPreparationApproval {
-        return rpc_result(id, json!(task));
+        return match store.task_contract(task_id) {
+            Ok(Some(_)) => rpc_result(id, json!(task)),
+            Ok(None) => rpc_error(id, -32045, "task contract is missing", None),
+            Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+        };
     }
     if task.state != TaskState::Discovered {
         return rpc_error(
@@ -1332,6 +1337,36 @@ fn task_plan(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
             "task cannot be planned from its current state",
             Some(task.state.to_string()),
         );
+    }
+    let Some(binding_id) = task.repository_binding_id else {
+        return rpc_error(
+            id,
+            -32041,
+            "task planning failed",
+            Some("task repository binding is missing".into()),
+        );
+    };
+    let binding = match store.repository_binding(binding_id) {
+        Ok(Some(binding)) => binding,
+        Ok(None) => {
+            return rpc_error(
+                id,
+                -32041,
+                "task planning failed",
+                Some("task repository binding is missing".into()),
+            );
+        }
+        Err(error) => return rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    };
+    let contract = match RepositoryPlanner::assess(&task, &binding) {
+        Ok(contract) => contract,
+        Err(error) => {
+            return rpc_error(id, -32041, "task planning failed", Some(error.to_string()));
+        }
+    };
+    task.contract_version = contract.version();
+    if let Err(error) = store.save_task_contract(&contract) {
+        return rpc_error(id, -32000, "persistence failure", Some(error.to_string()));
     }
     for (next, summary) in [
         (TaskState::Assessing, "Task source and repository assessed"),
@@ -1349,6 +1384,22 @@ fn task_plan(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
         }
     }
     rpc_result(id, json!(task))
+}
+
+fn task_contract(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {
+    let task_id = match required_task_id(params) {
+        Ok(task_id) => task_id,
+        Err(detail) => return rpc_error(id, -32602, "invalid parameters", Some(detail)),
+    };
+    match store
+        .lock()
+        .expect("event store lock poisoned")
+        .task_contract(task_id)
+    {
+        Ok(Some(contract)) => rpc_result(id, json!(contract)),
+        Ok(None) => rpc_error(id, -32045, "task contract is missing", None),
+        Err(error) => rpc_error(id, -32000, "persistence failure", Some(error.to_string())),
+    }
 }
 
 fn task_preparation_preview(id: Value, params: &Value, store: &Mutex<EventStore>) -> Value {

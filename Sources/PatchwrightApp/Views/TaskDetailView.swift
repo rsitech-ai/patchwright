@@ -35,6 +35,9 @@ struct TaskDetailView: View {
         .task(id: task.id) {
             while !Task.isCancelled {
                 await store.refreshTaskTimeline(taskID: task.id)
+                if task.state != .discovered, store.taskContracts[task.id] == nil {
+                    await store.refreshTaskContract(taskID: task.id)
+                }
                 await store.refreshTaskWorktree(taskID: task.id)
                 await store.refreshTaskRepository(task: task)
                 try? await Task.sleep(for: .seconds(2))
@@ -97,7 +100,10 @@ struct TaskDetailView: View {
             detailCard("Current stage") {
                 LabeledContent("State", value: task.state.displayName)
                 LabeledContent("Updated") { TimestampText(date: task.updatedAt) }
-                LabeledContent("Contract", value: task.contractVersion.map { "Version \($0)" } ?? "Pending")
+                LabeledContent(
+                    "Contract",
+                    value: store.taskContracts[task.id].map { "Version \($0.version)" } ?? "Pending"
+                )
                 lifecycleControls
                 if let error = store.taskLifecycleError {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
@@ -127,11 +133,42 @@ struct TaskDetailView: View {
                 }
             }
             detailCard("Implementation contract") {
-                ContentUnavailableView(
-                    "Assessment pending",
-                    systemImage: "list.bullet.clipboard",
-                    description: Text("Expected behavior, commands, risks, sensitive paths, and rollback are fixed before preparation approval.")
-                )
+                if let contract = store.taskContracts[task.id] {
+                    contractBoundary(contract)
+                } else {
+                    ContentUnavailableView(
+                        "Assessment pending",
+                        systemImage: "list.bullet.clipboard",
+                        description: Text("Expected behavior, commands, risks, and sensitive paths are fixed before preparation approval.")
+                    )
+                }
+            }
+        }
+    }
+
+    private func contractBoundary(_ contract: TaskContract) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            LabeledContent("Goal", value: contract.goal)
+            LabeledContent("Risk", value: contract.risk.displayName)
+            Divider()
+            Text("Acceptance criteria").font(.subheadline.weight(.semibold))
+            ForEach(Array(contract.acceptanceCriteria.enumerated()), id: \.offset) { _, criterion in
+                Label(criterion, systemImage: "checkmark.circle")
+                    .font(.callout)
+            }
+            Text("Exact verification commands").font(.subheadline.weight(.semibold))
+            ForEach(Array(contract.verificationCommands.enumerated()), id: \.offset) { _, command in
+                Text(command.argvDisplay)
+                    .font(.callout.monospaced())
+                    .textSelection(.enabled)
+            }
+            Text("Sensitive paths").font(.subheadline.weight(.semibold))
+            if contract.sensitivePaths.isEmpty {
+                Text("None declared").foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(contract.sensitivePaths.enumerated()), id: \.offset) { _, path in
+                    LabeledContent(path.path, value: path.reason)
+                }
             }
         }
     }
