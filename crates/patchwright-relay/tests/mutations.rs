@@ -2,6 +2,7 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::{HeaderMap, Method, StatusCode},
+    response::{IntoResponse, Response},
     routing::any,
 };
 use patchwright_core::{GitHubAction, InlineReviewComment, MergeMethod, ReviewEvent};
@@ -30,6 +31,8 @@ async fn capture_request(
         .push((method.clone(), format!("/{path}"), body.clone()));
     let response = if method == Method::GET && path.ends_with("/pulls/4") {
         json!({"id":91,"node_id":"PR_node","number":4,"html_url":"https://example.invalid/pull/4","draft":true,"head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}})
+    } else if path.ends_with("/git/refs") {
+        json!({"ref":body["ref"],"object":{"sha":body["sha"]}})
     } else if path == "graphql"
         && body["query"]
             .as_str()
@@ -46,6 +49,12 @@ async fn capture_request(
         json!({"data":{"markPullRequestReadyForReview":{"pullRequest":{"databaseId":91,"number":4,"url":"https://example.invalid/pull/4","isDraft":false}}}})
     } else if path.ends_with("/merge") {
         json!({"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","merged":true,"message":"merged"})
+    } else if path.ends_with("/update-branch") {
+        json!({"message":"Updating pull request branch.","url":"https://example.invalid/update/4"})
+    } else if method == Method::PATCH && path.ends_with("/pulls/4") {
+        json!({"id":91,"number":4,"html_url":"https://example.invalid/pull/4","state":"closed"})
+    } else if method == Method::PATCH && path.ends_with("/issues/5") {
+        json!({"id":92,"number":5,"html_url":"https://example.invalid/issues/5","state":"closed","state_reason":"completed"})
     } else if path.ends_with("/pulls") {
         json!({"number":17,"html_url":"https://example.invalid/pull/17"})
     } else {
@@ -193,4 +202,89 @@ async fn transport_only_actions_and_ambiguous_failures_are_explicit_and_redacted
 
     let result = MutationResult::default();
     assert_eq!(result.merged, None);
+}
+
+async fn invalid_json() -> (StatusCode, &'static str) {
+    (StatusCode::CREATED, "{not-json")
+}
+
+async fn ready_response(Path(path): Path<String>, method: Method) -> Response {
+    if method == Method::GET && path.ends_with("/pulls/4") {
+        return Json(json!({
+            "id":91,
+            "node_id":"PR_node",
+            "number":4,
+            "html_url":"https://example.invalid/pull/4",
+            "draft":true,
+            "head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+        }))
+        .into_response();
+    }
+    Json(json!({
+        "data":{
+            "markPullRequestReadyForReview":{
+                "pullRequest":{
+                    "databaseId":91,
+                    "number":4,
+                    "url":"https://example.invalid/pull/4",
+                    "isDraft":true
+                }
+            }
+        }
+    }))
+    .into_response()
+}
+
+async fn test_client(app: Router) -> GitHubMutationClient {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    GitHubMutationClient::new_for_test(format!("http://{address}"), "ghs_fixture").unwrap()
+}
+
+#[tokio::test]
+async fn successful_non_idempotent_mutation_with_unparseable_body_is_ambiguous() {
+    let client = test_client(Router::new().route("/{*path}", any(invalid_json))).await;
+    let error = client
+        .execute(
+            "octo",
+            "fixture",
+            &GitHubAction::comment(4, "bounded comment").unwrap(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, MutationError::AmbiguousTransport));
+}
+
+#[tokio::test]
+async fn preflight_read_with_unparseable_body_is_a_definite_invalid_response() {
+    let client = test_client(Router::new().route("/{*path}", any(invalid_json))).await;
+    let error = client
+        .execute(
+            "octo",
+            "fixture",
+            &GitHubAction::ready_pull_request(4, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, MutationError::InvalidResponse));
+}
+
+#[tokio::test]
+async fn successful_mutation_with_untrusted_semantics_is_ambiguous() {
+    let client = test_client(Router::new().route("/{*path}", any(ready_response))).await;
+    let error = client
+        .execute(
+            "octo",
+            "fixture",
+            &GitHubAction::ready_pull_request(4, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, MutationError::AmbiguousTransport));
 }
