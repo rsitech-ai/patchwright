@@ -191,7 +191,16 @@ def verify_ed25519(public_key: str, signature: str, path: Path, signed_length: i
     command = [swift, str(helper), public_key, signature, str(path)]
     if signed_length is not None:
         command.append(str(signed_length))
-    result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30, check=False)
+    environment = os.environ.copy()
+    environment.pop("SDKROOT", None)
+    result = subprocess.run(
+        command,
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        check=False,
+    )
     if result.returncode != 0:
         raise VerificationError(f"{label} Ed25519 signature is invalid")
 
