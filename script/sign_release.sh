@@ -29,7 +29,7 @@ resolve_identity() {
     requested="$PATCHWRIGHT_DEVELOPER_ID"
     [[ -n "$requested" ]] || return 1
   fi
-  identities="$(security find-identity -p codesigning -v "${identity_keychain_args[@]}" 2>/dev/null | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p')"
+  identities="$(security find-identity -p codesigning -v "${identity_keychain_args[@]+"${identity_keychain_args[@]}"}" 2>/dev/null | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p')"
   if [[ "${PATCHWRIGHT_DEVELOPER_ID+x}" == x ]]; then
     [[ "$requested" == Developer\ ID\ Application:* ]] || return 1
     [[ "$(printf '%s\n' "$identities" | grep -Fxc "$requested")" == 1 ]] || return 1
@@ -48,24 +48,24 @@ fi
 "$ROOT_DIR/script/validate_bundle.sh" "$APP_PATH"
 /usr/bin/xattr -cr "$APP_PATH"
 SPARKLE="$APP_PATH/Contents/Frameworks/Sparkle.framework"
-/usr/bin/codesign --force --sign "$IDENTITY" "${CODESIGN_KEYCHAIN_ARGS[@]}" --options runtime --timestamp \
+/usr/bin/codesign --force --sign "$IDENTITY" "${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"}" --options runtime --timestamp \
   "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
-/usr/bin/codesign --force --sign "$IDENTITY" "${CODESIGN_KEYCHAIN_ARGS[@]}" --options runtime --timestamp \
+/usr/bin/codesign --force --sign "$IDENTITY" "${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"}" --options runtime --timestamp \
   --preserve-metadata=entitlements \
   "$SPARKLE/Versions/B/XPCServices/Downloader.xpc"
-/usr/bin/codesign --force --sign "$IDENTITY" "${CODESIGN_KEYCHAIN_ARGS[@]}" --options runtime --timestamp \
+/usr/bin/codesign --force --sign "$IDENTITY" "${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"}" --options runtime --timestamp \
   "$SPARKLE/Versions/B/Autoupdate"
-/usr/bin/codesign --force --sign "$IDENTITY" "${CODESIGN_KEYCHAIN_ARGS[@]}" --options runtime --timestamp \
+/usr/bin/codesign --force --sign "$IDENTITY" "${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"}" --options runtime --timestamp \
   "$SPARKLE/Versions/B/Updater.app"
-/usr/bin/codesign --force --sign "$IDENTITY" "${CODESIGN_KEYCHAIN_ARGS[@]}" --options runtime --timestamp \
+/usr/bin/codesign --force --sign "$IDENTITY" "${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"}" --options runtime --timestamp \
   "$SPARKLE"
-/usr/bin/codesign --force --sign "$IDENTITY" "${CODESIGN_KEYCHAIN_ARGS[@]}" --options runtime --timestamp \
+/usr/bin/codesign --force --sign "$IDENTITY" "${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"}" --options runtime --timestamp \
   --entitlements "$ROOT_DIR/Packaging/patchwright-engine.entitlements" \
   "$APP_PATH/Contents/Helpers/patchwright-engine"
-/usr/bin/codesign --force --sign "$IDENTITY" "${CODESIGN_KEYCHAIN_ARGS[@]}" --options runtime --timestamp \
+/usr/bin/codesign --force --sign "$IDENTITY" "${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"}" --options runtime --timestamp \
   --entitlements "$ROOT_DIR/Packaging/patchwright-relay.entitlements" \
   "$APP_PATH/Contents/Helpers/patchwright-relay"
-/usr/bin/codesign --force --sign "$IDENTITY" "${CODESIGN_KEYCHAIN_ARGS[@]}" --options runtime --timestamp \
+/usr/bin/codesign --force --sign "$IDENTITY" "${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"}" --options runtime --timestamp \
   --entitlements "$ROOT_DIR/Packaging/Patchwright.entitlements" \
   "$APP_PATH"
 "$ROOT_DIR/script/verify_signing.sh" "$APP_PATH"
