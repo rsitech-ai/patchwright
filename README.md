@@ -10,7 +10,7 @@ verification.
 
 Project policies: [Contributing](CONTRIBUTING.md) ·
 [Security](SECURITY.md) · [Privacy](PRIVACY.md) · [Support](SUPPORT.md) ·
-[Code of Conduct](CODE_OF_CONDUCT.md)
+[Code of Conduct](CODE_OF_CONDUCT.md) · [Changelog](CHANGELOG.md)
 
 Patchwright is available under your choice of the
 [MIT License](LICENSE-MIT) or [Apache License 2.0](LICENSE-APACHE).
