@@ -135,7 +135,7 @@ ln -s "$EVIDENCE_DIR" "$TMP_ROOT/evidence-link"
 assert_rejected "evidence directory must not be a symlink" bash -c \
   'printf '\''{}\n'\'' | "$1" --directory "$2" --name new.json' \
   _ "$EVIDENCE_WRITER" "$TMP_ROOT/evidence-link"
-mkdir "$TMP_ROOT/loose-evidence"
+mkdir -m 755 "$TMP_ROOT/loose-evidence"
 assert_rejected "evidence directory must have mode 700" bash -c \
   'printf '\''{}\n'\'' | "$1" --directory "$2" --name new.json' \
   _ "$EVIDENCE_WRITER" "$TMP_ROOT/loose-evidence"
