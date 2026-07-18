@@ -394,9 +394,9 @@ if grep -Fq 'Git, and the Codex CLI' "$ROOT_DIR/README.md"; then
 fi
 require_text script/sign_release.sh '--preserve-metadata=entitlements'
 require_text script/sign_release.sh 'PATCHWRIGHT_SIGNING_KEYCHAIN'
-require_text script/sign_release.sh 'security find-identity -p codesigning -v "${identity_keychain_args[@]}"'
+require_text script/sign_release.sh 'security find-identity -p codesigning -v "${identity_keychain_args[@]+"${identity_keychain_args[@]}"}"'
 require_text script/sign_release.sh 'CODESIGN_KEYCHAIN_ARGS=(--keychain "$SIGNING_KEYCHAIN")'
-require_text script/sign_release.sh '"${CODESIGN_KEYCHAIN_ARGS[@]}"'
+require_text script/sign_release.sh '"${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"}"'
 require_text script/verify_signing.sh 'grep -Eq '\''flags=.*runtime'\'' <<<"$MAIN_DETAILS"'
 require_text script/verify_signing.sh 'grep -Eq '\''flags=.*runtime'\'' <<<"$DETAILS"'
 if grep -Eq 'printf .*\| grep -[EF]*q' "$ROOT_DIR/script/verify_signing.sh"; then
@@ -413,7 +413,7 @@ import sys
 from pathlib import Path
 
 source = Path(sys.argv[1]).read_text(encoding="utf-8")
-if source.count('/usr/bin/codesign --force') != source.count('"${CODESIGN_KEYCHAIN_ARGS[@]}"'):
+if source.count('/usr/bin/codesign --force') != source.count('"${CODESIGN_KEYCHAIN_ARGS[@]+"${CODESIGN_KEYCHAIN_ARGS[@]}"}"'):
     raise SystemExit("release contract failed: every release codesign call must select the configured keychain")
 positions = [
     source.index('Installer.xpc'),
@@ -454,6 +454,25 @@ if "$ROOT_DIR/script/validate_bundle.sh" "$APP" >/dev/null 2>&1; then
   fail "escaping symlink was accepted"
 fi
 rm "$APP/Contents/escape"
+
+SIGNING_FIXTURE_BIN="$TMP_ROOT/signing-fixture-bin"
+mkdir "$SIGNING_FIXTURE_BIN"
+cat >"$SIGNING_FIXTURE_BIN/security" <<'EOF'
+#!/usr/bin/env bash
+printf '  1) FIXTURE "Developer ID Application: Fixture (ABCDE12345)"\n'
+EOF
+chmod +x "$SIGNING_FIXTURE_BIN/security"
+if PATH="$SIGNING_FIXTURE_BIN:$PATH" \
+    PATCHWRIGHT_DEVELOPER_ID='Developer ID Application: Fixture (ABCDE12345)' \
+    PATCHWRIGHT_SIGNING_KEYCHAIN= \
+    "$ROOT_DIR/script/sign_release.sh" "$TMP_ROOT/missing.app" >"$TMP_ROOT/sign-default-keychain.out" 2>&1; then
+  fail "signing unexpectedly accepted a missing app fixture"
+fi
+if grep -Eq 'unbound variable|blocked:external.*Developer ID Application' "$TMP_ROOT/sign-default-keychain.out"; then
+  fail "signing could not resolve a Developer ID identity from the default Keychain search list"
+fi
+grep -Fq 'bundle validation failed: expected an .app bundle path' "$TMP_ROOT/sign-default-keychain.out" \
+  || fail "signing did not reach bundle validation with the default Keychain search list"
 
 if PATCHWRIGHT_DEVELOPER_ID= "$ROOT_DIR/script/sign_release.sh" "$APP" >"$TMP_ROOT/sign.out" 2>&1; then
   fail "signing succeeded without a Developer ID Application identity"
