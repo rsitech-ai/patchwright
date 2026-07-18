@@ -28,7 +28,8 @@ for required in \
   SECURITY.md \
   CODE_OF_CONDUCT.md \
   PRIVACY.md \
-  SUPPORT.md; do
+  SUPPORT.md \
+  CHANGELOG.md; do
   require_file "$required"
 done
 
@@ -49,11 +50,28 @@ require_text .github/workflows/ci.yml './script/verify.sh'
 require_text .github/workflows/ci.yml './script/smoke.sh'
 require_text rust-toolchain.toml 'channel = "1.91.0"'
 require_text README.md 'docs/direct-download.md'
+require_text README.md 'CHANGELOG.md'
+require_text CHANGELOG.md '## [0.1.1] - 2026-07-18'
 require_text docs/direct-download.md 'Developer ID Application'
 require_text docs/direct-download.md 'Apple notarization'
 require_text docs/direct-download.md 'GitHub Releases'
 require_text docs/release-checklist.md 'notarized-candidate'
 require_text docs/release-checklist.md 'promoted-release'
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT_DIR/Packaging/Info.plist")" == 0.1.1 ]] \
+  || fail "default app version must be 0.1.1"
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT_DIR/Packaging/Info.plist")" == 2 ]] \
+  || fail "default app build must be 2"
+for manifest in \
+  crates/patchwright-core/Cargo.toml \
+  crates/patchwright-engine/Cargo.toml \
+  crates/patchwright-relay/Cargo.toml; do
+  grep -Eq '^version = "0\.1\.1"$' "$ROOT_DIR/$manifest" \
+    || fail "$manifest must use release version 0.1.1"
+done
+require_text script/package_release.sh 'VERSION="${PATCHWRIGHT_VERSION:-0.1.1}"'
+require_text script/package_release.sh 'BUILD="${PATCHWRIGHT_BUILD:-2}"'
+require_text script/build_release_components.sh 'VERSION="${PATCHWRIGHT_VERSION:-0.1.1}"'
+require_text script/build_release_components.sh 'BUILD="${PATCHWRIGHT_BUILD:-2}"'
 if grep -En 'App Store|App Store Connect|Mac App Store' README.md docs/release-checklist.md docs/release-readiness.md docs/production-plan.md; then
   fail "direct-distribution documentation must not claim an App Store release lane"
 fi
