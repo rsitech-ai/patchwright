@@ -6,6 +6,7 @@ use patchwright_engine::codex::process::{
     CodexExecutable, CodexProcessConfig, CodexProcessError, CodexProcessFactory, CodexProcessState,
     VersionCompatibility,
 };
+use patchwright_engine::codex::protocol::MAX_LINE_BYTES;
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
@@ -209,24 +210,27 @@ async fn termination_cleans_up_the_owned_process_group() {
 async fn rejects_an_oversized_unterminated_line_before_the_request_timeout() {
     let _test_guard = PROCESS_TEST_LOCK.lock().await;
     let root = tempdir().unwrap();
+    let oversized_payload = root.path().join("oversized-protocol-line");
+    std::fs::write(&oversized_payload, vec![b'x'; MAX_LINE_BYTES + 1]).unwrap();
     let fake = FakeCodexAppServer::create(
         root.path(),
         "codex-cli 0.144.2",
-        "dd if=/dev/zero bs=1048576 count=5 2>/dev/null | tr '\\000' x; sleep 60",
+        &format!("cat '{}'; sleep 60", oversized_payload.display()),
     );
     let executable = CodexExecutable::discover(Some(fake.path())).await.unwrap();
     let config = CodexProcessConfig {
-        request_timeout: Duration::from_millis(500),
+        request_timeout: Duration::from_secs(5),
         shutdown_grace: Duration::from_millis(50),
         ..CodexProcessConfig::default()
     };
     let factory = CodexProcessFactory::new(executable, config);
     let mut process = factory.launch("oversized-line", root.path()).unwrap();
 
-    assert!(matches!(
-        process.read_line().await,
-        Err(CodexProcessError::ProtocolLineTooLarge(_))
-    ));
+    let result = process.read_line().await;
+    assert!(
+        matches!(&result, Err(CodexProcessError::ProtocolLineTooLarge(_))),
+        "unexpected oversized-line result: {result:?}"
+    );
     process.terminate().await.unwrap();
 }
 
