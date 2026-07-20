@@ -28,6 +28,7 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 BUILD = re.compile(r"^[1-9][0-9]*$")
+TEAM_ID = re.compile(r"^[A-Z0-9]{10}$")
 IDENTITY_KEYS = (
     "artifact_filename", "artifact_sha256", "git_commit", "tag", "version", "build",
     "source_archive_path", "source_archive_sha256",
@@ -328,7 +329,14 @@ def verify_candidate(candidate_path: Path, repo: Path, now: datetime) -> tuple[d
     signing = candidate.get("signing")
     notarization = candidate.get("notarization")
     gatekeeper = candidate.get("gatekeeper")
-    if not isinstance(signing, dict) or signing.get("identity_class") != "Developer ID Application" or signing.get("hardened_runtime") is not True or signing.get("secure_timestamp") is not True:
+    if (
+        not isinstance(signing, dict)
+        or signing.get("identity_class") != "Developer ID Application"
+        or not isinstance(signing.get("team_id"), str)
+        or not TEAM_ID.fullmatch(signing["team_id"])
+        or signing.get("hardened_runtime") is not True
+        or signing.get("secure_timestamp") is not True
+    ):
         raise VerificationError("candidate signing evidence is invalid")
     if not isinstance(notarization, dict) or any(not isinstance(notarization.get(kind), dict) or notarization[kind].get("status") != "Accepted" or notarization[kind].get("stapled") is not True for kind in ("app", "dmg")):
         raise VerificationError("candidate notarization evidence is invalid")

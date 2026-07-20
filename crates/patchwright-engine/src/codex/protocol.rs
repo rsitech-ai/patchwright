@@ -186,6 +186,10 @@ impl ProtocolDecoder {
         Ok(())
     }
 
+    pub fn cancel_request(&mut self, id: &RequestId) -> bool {
+        self.pending_requests.remove(id)
+    }
+
     pub fn decode_line(&mut self, line: &[u8]) -> Result<IncomingMessage, ProtocolError> {
         if line.len() > MAX_LINE_BYTES {
             return Err(ProtocolError::LineTooLarge {

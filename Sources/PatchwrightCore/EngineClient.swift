@@ -252,7 +252,7 @@ public extension EngineServing {
             params: [
                 "fullName": repository.fullName,
                 "repositoryId": String(repository.id),
-                "resourceLimit": "1000",
+                "resourceLimit": "100",
             ],
             as: GitHubRepositorySnapshot.self
         )

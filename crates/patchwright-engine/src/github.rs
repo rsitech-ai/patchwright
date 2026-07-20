@@ -11,6 +11,13 @@ use std::{
 };
 
 const API_VERSION: &str = "2026-03-10";
+const MAX_SNAPSHOT_RESOURCES: usize = 100;
+
+fn bounded_snapshot_limits(requested: usize, pull_count: usize) -> (usize, usize) {
+    let global = requested.clamp(1, MAX_SNAPSHOT_RESOURCES);
+    let per_pull = global.div_ceil(pull_count.max(1)).max(1);
+    (global, per_pull)
+}
 
 #[derive(Clone)]
 pub struct GitHubToken(String);
@@ -354,6 +361,7 @@ impl GitHubSource {
         repository: &GitHubRepository,
         resource_limit: usize,
     ) -> Result<GitHubRepositorySnapshot> {
+        let (resource_limit, _) = bounded_snapshot_limits(resource_limit, 0);
         let (owner, name) = repository
             .full_name
             .split_once('/')
@@ -382,8 +390,11 @@ impl GitHubSource {
             .iter()
             .map(|pull| pull.pull.clone())
             .collect::<Vec<_>>();
-        let discussions = self.discussions(&base, &pull_rows, resource_limit).await?;
-        let checks = self.checks(&base, &pull_rows, resource_limit).await?;
+        let (_, per_pull_limit) = bounded_snapshot_limits(resource_limit, pull_rows.len());
+        let discussions = self
+            .discussions(&base, &pull_rows, resource_limit, per_pull_limit)
+            .await?;
+        let checks = self.checks(&base, &pull_rows, per_pull_limit).await?;
         let mut work_items = issue_rows
             .into_iter()
             .filter(|item| item.pull_request.is_none())
@@ -479,6 +490,7 @@ impl GitHubSource {
         base: &str,
         pull_rows: &[WirePull],
         resource_limit: usize,
+        per_pull_limit: usize,
     ) -> Result<Vec<GitHubDiscussion>> {
         let issue_comments: Vec<WireComment> = self
             .paginated(
@@ -511,7 +523,7 @@ impl GitHubSource {
             let number = pull.item.number;
             jobs.spawn(async move {
                 let _permit = concurrency.acquire_owned().await?;
-                let reviews: Vec<WireReview> = source.paginated(&path, resource_limit).await?;
+                let reviews: Vec<WireReview> = source.paginated(&path, per_pull_limit).await?;
                 Ok::<_, anyhow::Error>((number, reviews))
             });
         }
@@ -524,7 +536,7 @@ impl GitHubSource {
             );
         }
 
-        discussions.extend(self.review_threads(base, pull_rows, resource_limit).await?);
+        discussions.extend(self.review_threads(base, pull_rows, per_pull_limit).await?);
 
         Ok(discussions)
     }
@@ -1271,4 +1283,17 @@ struct WireCheckRun {
     status: String,
     conclusion: Option<String>,
     html_url: Option<String>,
+}
+
+#[cfg(test)]
+mod snapshot_budget_tests {
+    use super::bounded_snapshot_limits;
+
+    #[test]
+    fn snapshot_budget_is_global_and_divided_across_pull_requests() {
+        assert_eq!(bounded_snapshot_limits(1_000, 100), (100, 1));
+        assert_eq!(bounded_snapshot_limits(100, 4), (100, 25));
+        assert_eq!(bounded_snapshot_limits(10, 3), (10, 4));
+        assert_eq!(bounded_snapshot_limits(0, 0), (1, 1));
+    }
 }

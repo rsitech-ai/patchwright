@@ -49,6 +49,7 @@ IFS= read -r turn
 printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"turn":{"id":"turn-rpc","items":[],"itemsView":"full","status":"inProgress","error":null,"startedAt":1783987200,"completedAt":null,"durationMs":null}}}'
 printf '%s\n' '{"jsonrpc":"2.0","method":"item/started","params":{"threadId":"thread-rpc","turnId":"turn-rpc","startedAtMs":1783987200000,"item":{"type":"agentMessage","id":"item-text","text":"","phase":null,"memoryCitation":null}}}'
 printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"thread-rpc","turnId":"turn-rpc","itemId":"item-text","delta":"Hello from Codex"}}'
+printf '%s%s%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"thread-rpc","turnId":"turn-rpc","itemId":"item-secret","delta":"Bearer ' 'runtime-secret-value' '"}}'
 printf '%s\n' '{"jsonrpc":"2.0","method":"item/reasoning/summaryTextDelta","params":{"threadId":"thread-rpc","turnId":"turn-rpc","itemId":"item-reasoning","delta":"Checked the contract","summaryIndex":0}}'
 printf '%s\n' '{"jsonrpc":"2.0","method":"item/commandExecution/outputDelta","params":{"threadId":"thread-rpc","turnId":"turn-rpc","itemId":"item-command","delta":"tests passed"}}'
 printf '%s\n' '{"jsonrpc":"2.0","method":"item/fileChange/outputDelta","params":{"threadId":"thread-rpc","turnId":"turn-rpc","itemId":"item-file","delta":"M Sources/App.swift"}}'
@@ -56,6 +57,20 @@ printf '%s\n' '{"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"
 printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thread-rpc","turn":{"id":"turn-rpc","items":[],"itemsView":"full","status":"completed","error":null,"startedAt":1783987200,"completedAt":1783987201,"durationMs":1000}}}'
 IFS= read -r steer
 printf '%s\n' '{"jsonrpc":"2.0","id":5,"result":{"turnId":"turn-rpc"}}'
+while IFS= read -r line; do :; done"#
+}
+
+fn mismatched_completion_server_body() -> &'static str {
+    r#"IFS= read -r initialize
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"codex_cli_rs/0.144.2","codexHome":"/tmp/codex-home","platformFamily":"unix","platformOs":"macos"}}'
+IFS= read -r initialized
+IFS= read -r account
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"account":null,"requiresOpenaiAuth":true}}'
+IFS= read -r thread
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"thread":{"id":"thread-owned"}}}'
+IFS= read -r turn
+printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"turn":{"id":"turn-owned","status":"inProgress"}}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thread-other","turn":{"id":"turn-other","status":"completed"}}}'
 while IFS= read -r line; do :; done"#
 }
 
@@ -126,6 +141,19 @@ async fn starts_turns_persists_streamed_events_and_steers_the_active_turn() {
             .windows(2)
             .all(|pair| pair[0].sequence < pair[1].sequence)
     );
+    let secret = ["Bearer ", "runtime-secret-value"].concat();
+    assert!(events.iter().all(|event| {
+        event
+            .content
+            .as_deref()
+            .is_none_or(|content| !content.contains(&secret))
+    }));
+    assert!(events.iter().any(|event| {
+        event
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("[REDACTED]"))
+    }));
     let cursor = events.last().unwrap().sequence;
     assert!(
         service
@@ -146,6 +174,49 @@ async fn starts_turns_persists_streamed_events_and_steers_the_active_turn() {
     );
 
     service.stop(task.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn ignores_a_turn_completion_for_a_different_thread_and_turn() {
+    let root = tempdir().unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let fake = FakeCodexAppServer::create(
+        root.path(),
+        "codex-cli 0.144.2",
+        mismatched_completion_server_body(),
+    );
+    let executable = CodexExecutable::discover(Some(fake.path())).await.unwrap();
+    let version = executable.version().to_owned();
+    let factory = CodexProcessFactory::new(executable, CodexProcessConfig::default());
+    let worktree = root.path().join("worktree");
+    std::fs::create_dir(&worktree).unwrap();
+    let mut task = Task::new("Keep turn identity", worktree.to_str().unwrap()).unwrap();
+    advance_to_preparing(&mut task);
+    let store = Mutex::new(EventStore::open(&root.path().join("events.sqlite")).unwrap());
+    store.lock().unwrap().save_task(&task, "prepared").unwrap();
+    let mut service = CodexService::new(factory, version);
+    service.start(task.id, &store).await.unwrap();
+    service
+        .start_turn(task.id, "message-identity", "Implement safely.", &store)
+        .await
+        .unwrap();
+
+    let events = service.events(task.id, 0, 100, &store).await.unwrap();
+    assert!(!events.iter().any(|event| event.kind == "turnCompleted"));
+    assert_eq!(
+        store
+            .lock()
+            .unwrap()
+            .load_task(task.id)
+            .unwrap()
+            .unwrap()
+            .state,
+        TaskState::Implementing
+    );
+    assert_eq!(
+        service.status(task.id, &store).unwrap().turn_id.as_deref(),
+        Some("turn-owned")
+    );
 }
 
 #[tokio::test]

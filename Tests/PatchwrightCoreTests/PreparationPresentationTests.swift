@@ -39,6 +39,23 @@ final class PreparationPresentationTests: XCTestCase {
         XCTAssertTrue(preparationSource.contains("Sensitive paths"))
     }
 
+    func testVerificationRequiresAnExplicitUnsandboxedExecutionConfirmation() throws {
+        let source = try String(
+            contentsOf: packageRoot.appending(path: "Sources/PatchwrightApp/Views/TaskDetailView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("Run repository-controlled verification?"))
+        XCTAssertTrue(source.contains("current macOS user"))
+        XCTAssertTrue(source.contains("verificationCommandSummary"))
+        XCTAssertTrue(source.contains("Run Verification Commands"))
+        XCTAssertFalse(source.contains(#"""
+                    Button("Complete Verification & Review", systemImage: "checkmark.shield.fill") {
+                        Task { await store.readyTaskForDelivery(taskID: task.id) }
+                    }
+"""#))
+    }
+
     private var packageRoot: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

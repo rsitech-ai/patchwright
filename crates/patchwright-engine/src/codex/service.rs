@@ -8,6 +8,7 @@ use patchwright_core::{TaskId, TaskState};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
+use tokio::time::{Instant, timeout_at};
 use uuid::Uuid;
 
 use crate::{CancellationState, EventStore, Job, JobId, JobKind, JobState, TaskCheckpoint};
@@ -25,6 +26,9 @@ use super::session::{
 const MAX_INPUT_BYTES: usize = 64 * 1024;
 const MAX_CLIENT_MESSAGE_ID_BYTES: usize = 128;
 const MAX_EVENT_PAGE: usize = 500;
+const MAX_REQUEST_EVENTS: usize = 4_096;
+const MAX_REQUEST_EVENT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_REQUEST_DURATION: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -351,7 +355,7 @@ impl CodexService {
                 thread_id: Some(thread_id.clone()),
                 turn_id: Some(turn_id.clone()),
                 item_id: Some(client_message_id.to_owned()),
-                content: Some(input.to_owned()),
+                content: Some(bounded_content(input.to_owned())),
             },
         )?;
         Ok(CodexTurnReceipt {
@@ -417,7 +421,7 @@ impl CodexService {
                 thread_id: Some(thread_id.clone()),
                 turn_id: Some(turn_id.clone()),
                 item_id: Some(client_message_id.to_owned()),
-                content: Some(input.to_owned()),
+                content: Some(bounded_content(input.to_owned())),
             },
         )?;
         Ok(CodexTurnReceipt {
@@ -735,6 +739,10 @@ pub enum CodexServiceError {
     TurnMismatch,
     #[error("Codex rejected the request")]
     RequestRejected,
+    #[error("Codex returned a response for a different request")]
+    ResponseMismatch,
+    #[error("Codex request exceeded its aggregate event or duration budget")]
+    RequestBudgetExceeded,
     #[error("Codex runtime approval was not found")]
     ApprovalNotFound,
     #[error("Codex runtime approval is expired or no longer bound to the active turn")]
@@ -752,25 +760,46 @@ async fn request(
     let id = RequestId::Number(active.next_request_id);
     active.next_request_id += 1;
     active.decoder.register_request(id.clone())?;
-    let request = ClientRequest::new(id, method, params)?;
-    active
-        .process
-        .write_line(&serde_json::to_string(&request).expect("client request serialization"))
-        .await?;
-    loop {
-        let line = active.process.read_line().await?;
-        let raw: Value = serde_json::from_str(&line)?;
-        match active.decoder.decode_line(line.as_bytes())? {
-            IncomingMessage::Response(response) => {
-                return if response.is_error {
-                    Err(CodexServiceError::RequestRejected)
-                } else {
-                    Ok(response)
-                };
+    let expected_id = id.clone();
+    let result = async {
+        let request = ClientRequest::new(id, method, params)?;
+        active
+            .process
+            .write_line(&serde_json::to_string(&request).expect("client request serialization"))
+            .await?;
+        let deadline = Instant::now() + MAX_REQUEST_DURATION;
+        let mut event_count = 0usize;
+        let mut event_bytes = 0usize;
+        loop {
+            let line = timeout_at(deadline, active.process.read_line())
+                .await
+                .map_err(|_| CodexServiceError::RequestBudgetExceeded)??;
+            event_count = event_count.saturating_add(1);
+            event_bytes = event_bytes.saturating_add(line.len());
+            if event_count > MAX_REQUEST_EVENTS || event_bytes > MAX_REQUEST_EVENT_BYTES {
+                return Err(CodexServiceError::RequestBudgetExceeded);
             }
-            message => persist_incoming(active, store, &raw, &message)?,
+            let raw: Value = serde_json::from_str(&line)?;
+            match active.decoder.decode_line(line.as_bytes())? {
+                IncomingMessage::Response(response) => {
+                    if response.id != expected_id {
+                        return Err(CodexServiceError::ResponseMismatch);
+                    }
+                    return if response.is_error {
+                        Err(CodexServiceError::RequestRejected)
+                    } else {
+                        Ok(response)
+                    };
+                }
+                message => persist_incoming(active, store, &raw, &message)?,
+            }
         }
     }
+    .await;
+    if result.is_err() {
+        active.decoder.cancel_request(&expected_id);
+    }
+    result
 }
 
 async fn pump_available(
@@ -801,6 +830,12 @@ fn persist_incoming(
     }
     if let Some(draft) = normalize_event(raw) {
         let completed = draft.kind == "turnCompleted";
+        if completed
+            && (draft.thread_id.as_deref() != active.session.thread_id.as_deref()
+                || draft.turn_id.as_deref() != active.active_turn_id.as_deref())
+        {
+            return Ok(());
+        }
         append_event(store, &mut active.session, draft)?;
         if completed {
             active.active_turn_id = None;
@@ -969,6 +1004,9 @@ fn string_field(value: &Value, field: &str) -> Option<String> {
 }
 
 fn bounded_content(value: String) -> String {
+    if contains_sensitive_content(&value) {
+        return "[REDACTED]".to_owned();
+    }
     if value.len() <= MAX_INPUT_BYTES {
         return value;
     }
@@ -977,6 +1015,29 @@ fn bounded_content(value: String) -> String {
         boundary -= 1;
     }
     value[..boundary].to_owned()
+}
+
+fn contains_sensitive_content(value: &str) -> bool {
+    let lowercase = value.to_ascii_lowercase();
+    [
+        "authorization: bearer ",
+        "bearer ",
+        "gho_",
+        "ghp_",
+        "ghs_",
+        "github_pat_",
+        "sk-",
+        "xoxb-",
+        "xoxp-",
+        "token=",
+        "secret=",
+        "password=",
+        "-----begin private key-----",
+        "-----begin rsa private key-----",
+        "-----begin openssh private key-----",
+    ]
+    .iter()
+    .any(|marker| lowercase.contains(marker))
 }
 
 fn append_event(

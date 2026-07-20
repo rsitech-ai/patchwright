@@ -18,6 +18,7 @@ public struct GitHubActionPayload: Codable, Equatable, Sendable {
     public let pullRequestNumber: UInt64?
     public let threadId: String?
     public let expectedHeadSha: String?
+    public let expectedBaseSha: String?
     public let method: String?
     public let branch: String?
     public let fromSha: String?
@@ -38,6 +39,7 @@ public struct GitHubActionPayload: Codable, Equatable, Sendable {
         pullRequestNumber: UInt64? = nil,
         threadId: String? = nil,
         expectedHeadSha: String? = nil,
+        expectedBaseSha: String? = nil,
         method: String? = nil,
         branch: String? = nil,
         fromSha: String? = nil,
@@ -57,6 +59,7 @@ public struct GitHubActionPayload: Codable, Equatable, Sendable {
         self.pullRequestNumber = pullRequestNumber
         self.threadId = threadId
         self.expectedHeadSha = expectedHeadSha
+        self.expectedBaseSha = expectedBaseSha
         self.method = method
         self.branch = branch
         self.fromSha = fromSha

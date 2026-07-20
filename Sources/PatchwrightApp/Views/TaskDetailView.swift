@@ -8,6 +8,7 @@ struct TaskDetailView: View {
     @State private var deliveryBody = ""
     @State private var deliveryApprovalRequest: DeliveryApprovalRequest?
     @State private var preparationApprovalRequest: PreparationPreview?
+    @State private var verificationConfirmationPresented = false
     @State private var mergeMethod = GitHubMergeMethod.squash
     @State private var reviewEvent = GitHubReviewEvent.comment
 
@@ -33,6 +34,18 @@ struct TaskDetailView: View {
         }
         .sheet(item: $preparationApprovalRequest) { preview in
             PreparationApprovalSheet(store: store, preview: preview)
+        }
+        .confirmationDialog(
+            "Run repository-controlled verification?",
+            isPresented: $verificationConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button("Run Verification Commands") {
+                Task { await store.readyTaskForDelivery(taskID: task.id) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("These commands are defined by repository-controlled files and run without an OS sandbox as the current macOS user, including that user's file and network access. Review the commands and code first.\n\n\(verificationCommandSummary)")
         }
         .task(id: task.id) {
             while !Task.isCancelled {
@@ -356,7 +369,8 @@ struct TaskDetailView: View {
                                         GitHubActionPayload(
                                             kind: "resolveReviewThread",
                                             pullRequestNumber: source.number,
-                                            threadId: threadID
+                                            threadId: threadID,
+                                            expectedHeadSha: source.headSHA
                                         )
                                     )
                                 }
@@ -388,12 +402,15 @@ struct TaskDetailView: View {
                 HStack {
                     Spacer()
                     if let worktree = store.worktreeByTask[task.id],
-                       let repository = store.repositories.first(where: { $0.id == source.repositoryID }) {
+                       let repository = store.repositories.first(where: { $0.id == source.repositoryID }),
+                       let expectedBaseSHA = repository.defaultBranchSHA {
                         Button("Preview Draft PR", systemImage: "arrow.triangle.pull") {
                             preview(
                                 GitHubActionPayload(
                                     kind: "draftPullRequest",
                                     body: deliveryTextIsEmpty ? "Resolves #\(source.number)" : deliveryBody,
+                                    expectedHeadSha: worktree.headSHA,
+                                    expectedBaseSha: expectedBaseSHA,
                                     title: task.title,
                                     head: worktree.branch,
                                     base: repository.defaultBranch
@@ -425,7 +442,8 @@ struct TaskDetailView: View {
                         preview(
                             GitHubActionPayload(
                                 kind: "readyPullRequest",
-                                pullRequestNumber: source.number
+                                pullRequestNumber: source.number,
+                                expectedHeadSha: source.headSHA
                             )
                         )
                     }
@@ -433,7 +451,8 @@ struct TaskDetailView: View {
                         preview(
                             GitHubActionPayload(
                                 kind: "closePullRequest",
-                                pullRequestNumber: source.number
+                                pullRequestNumber: source.number,
+                                expectedHeadSha: source.headSHA
                             )
                         )
                     }
@@ -462,6 +481,12 @@ struct TaskDetailView: View {
             Text("Patchwright requires a clean committed worktree before exposing approval-bound GitHub delivery.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Label(
+                "Verification commands are not sandboxed and can execute repository-controlled build scripts, plugins, and tests with your macOS user access.",
+                systemImage: "exclamationmark.shield"
+            )
+            .font(.caption)
+            .foregroundStyle(.orange)
             if let worktree = store.worktreeByTask[task.id] {
                 LabeledContent("Branch", value: worktree.branch)
                 LabeledContent("Commit", value: String(worktree.headSHA.prefix(12)))
@@ -469,7 +494,7 @@ struct TaskDetailView: View {
                 HStack {
                     Spacer()
                     Button("Complete Verification & Review", systemImage: "checkmark.shield.fill") {
-                        Task { await store.readyTaskForDelivery(taskID: task.id) }
+                        verificationConfirmationPresented = true
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(
@@ -487,6 +512,13 @@ struct TaskDetailView: View {
                     .foregroundStyle(.green)
             }
         }
+    }
+
+    private var verificationCommandSummary: String {
+        let commands = store.taskContracts[task.id]?.verificationCommands ?? []
+        return commands.isEmpty
+            ? "No verification commands are recorded."
+            : commands.map(\.argvDisplay).joined(separator: "\n")
     }
 
     private var deliveryTextIsEmpty: Bool {

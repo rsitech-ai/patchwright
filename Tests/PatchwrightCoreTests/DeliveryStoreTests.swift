@@ -3,40 +3,50 @@ import XCTest
 @testable import PatchwrightCore
 
 final class DeliveryStoreTests: XCTestCase {
-    func testClosePullRequestPayloadIsBoundToPRIdentityWithoutAFalseSHAClaim() throws {
+    func testStateChangingPullRequestPayloadsCarryExactCommitIdentity() throws {
+        let headSHA = String(repeating: "a", count: 40)
+        let baseSHA = String(repeating: "b", count: 40)
         let payload = GitHubActionPayload(
             kind: "closePullRequest",
-            pullRequestNumber: 7
+            pullRequestNumber: 7,
+            expectedHeadSha: headSHA,
+            expectedBaseSha: baseSHA
         )
         let object = try XCTUnwrap(
             JSONSerialization.jsonObject(with: JSONEncoder().encode(payload)) as? [String: Any]
         )
         XCTAssertEqual(object["kind"] as? String, "closePullRequest")
         XCTAssertEqual(object["pullRequestNumber"] as? UInt64, 7)
-        XCTAssertNil(object["expectedHeadSha"])
+        XCTAssertEqual(object["expectedHeadSha"] as? String, headSHA)
+        XCTAssertEqual(object["expectedBaseSha"] as? String, baseSHA)
     }
 
-    func testNonAtomicGitHubActionsDoNotClaimSHAConditions() throws {
+    func testStateChangingPullRequestActionsRequireSHAConditions() throws {
+        let headSHA = String(repeating: "a", count: 40)
+        let baseSHA = String(repeating: "b", count: 40)
         let actions = [
-            GitHubActionPayload(kind: "draftPullRequest", body: "body", title: "title", head: "feat/test", base: "main"),
-            GitHubActionPayload(kind: "readyPullRequest", pullRequestNumber: 7),
-            GitHubActionPayload(kind: "closePullRequest", pullRequestNumber: 7),
-            GitHubActionPayload(kind: "resolveReviewThread", pullRequestNumber: 7, threadId: "PRRT_example"),
+            GitHubActionPayload(kind: "draftPullRequest", body: "body", expectedHeadSha: headSHA, expectedBaseSha: baseSHA, title: "title", head: "feat/test", base: "main"),
+            GitHubActionPayload(kind: "readyPullRequest", pullRequestNumber: 7, expectedHeadSha: headSHA),
+            GitHubActionPayload(kind: "closePullRequest", pullRequestNumber: 7, expectedHeadSha: headSHA),
+            GitHubActionPayload(kind: "resolveReviewThread", pullRequestNumber: 7, threadId: "PRRT_example", expectedHeadSha: headSHA),
         ]
         for action in actions {
             let object = try XCTUnwrap(
                 JSONSerialization.jsonObject(with: JSONEncoder().encode(action)) as? [String: Any]
             )
-            XCTAssertNil(object["expectedHeadSha"], "\(action.kind) must not claim atomic head binding")
-            XCTAssertNil(object["expectedBaseSha"], "\(action.kind) must not claim atomic base binding")
+            XCTAssertEqual(object["expectedHeadSha"] as? String, headSHA)
         }
+        let draft = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(actions[0])) as? [String: Any]
+        )
+        XCTAssertEqual(draft["expectedBaseSha"] as? String, baseSHA)
 
         let approvalSheet = try String(
             contentsOf: repositoryRoot.appending(path: "Sources/PatchwrightApp/Views/DeliveryApprovalSheet.swift"),
             encoding: .utf8
         )
-        XCTAssertTrue(approvalSheet.contains("GitHub does not provide an atomic head-SHA condition"))
-        XCTAssertFalse(approvalSheet.contains("ready for review only if its remote head"))
+        XCTAssertFalse(approvalSheet.contains("GitHub does not provide an atomic head-SHA condition"))
+        XCTAssertTrue(approvalSheet.contains("remote head still matches the approved commit"))
     }
 
     func testDeliverySheetIsBoundToTheExactPreviewRequest() throws {

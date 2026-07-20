@@ -2262,7 +2262,7 @@ impl GitHubSyncParameters {
     fn from_json(params: &Value) -> Self {
         Self {
             repository_limit: bounded_limit(params, "repositoryLimit", 100, 100),
-            resource_limit: bounded_limit(params, "resourceLimit", 1000, 1000),
+            resource_limit: bounded_limit(params, "resourceLimit", 100, 100),
         }
     }
 }
@@ -2737,7 +2737,7 @@ async fn sync_github_repository(id: Value, params: &Value, store: &Mutex<EventSt
         }
     };
     repository.installation_id = Some(installation_id);
-    let resource_limit = bounded_limit(params, "resourceLimit", 1000, 1000);
+    let resource_limit = bounded_limit(params, "resourceLimit", 100, 100);
     let snapshot = match source
         .repository_snapshot(&repository, resource_limit)
         .await
@@ -2824,7 +2824,7 @@ async fn task_reconcile_github(id: Value, params: &Value, store: &Mutex<EventSto
         }
     };
     repository.installation_id = Some(installation_id);
-    let snapshot = match source.repository_snapshot(&repository, 1_000).await {
+    let snapshot = match source.repository_snapshot(&repository, 100).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
             return rpc_error(

@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a reproducible Patchwright defect without including private data.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, private source code, personal data, or security vulnerabilities. Use the private process in SECURITY.md for suspected vulnerabilities.
+  - type: input
+    id: version
+    attributes:
+      label: Patchwright version or commit
+      placeholder: v0.1.0 or a full commit SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: macOS version, architecture, Xcode version, and installation method.
+      placeholder: macOS 26.x, Apple silicon, Xcode 26.x, source build
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest sequence that reproduces the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized diagnostics
+      description: Paste only the minimal relevant output after removing secrets and private repository content.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: I removed credentials, private source, and personal data.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

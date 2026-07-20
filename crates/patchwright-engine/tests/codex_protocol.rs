@@ -203,3 +203,20 @@ fn rejects_missing_required_identity_and_unknown_completion_status() {
         Err(ProtocolError::UnknownTurnStatus(_))
     ));
 }
+
+#[test]
+fn cancelled_requests_reject_delayed_responses_instead_of_satisfying_the_next_request() {
+    let mut decoder = ProtocolDecoder::default();
+    decoder.register_request(RequestId::Number(41)).unwrap();
+    assert!(decoder.cancel_request(&RequestId::Number(41)));
+    decoder.register_request(RequestId::Number(42)).unwrap();
+
+    assert!(matches!(
+        decoder.decode_line(br#"{"jsonrpc":"2.0","id":41,"result":{"stale":true}}"#),
+        Err(ProtocolError::UnexpectedResponseId(RequestId::Number(41)))
+    ));
+    let response = decoder
+        .decode_line(br#"{"jsonrpc":"2.0","id":42,"result":{"fresh":true}}"#)
+        .unwrap();
+    assert!(matches!(response, IncomingMessage::Response(_)));
+}

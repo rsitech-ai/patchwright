@@ -250,7 +250,7 @@ public final class WorkspaceStore: ObservableObject {
         }
     }
 
-    public func syncGitHub(repositoryLimit: Int = 100, resourceLimit: Int = 1_000) async {
+    public func syncGitHub(repositoryLimit: Int = 100, resourceLimit: Int = 100) async {
         guard !isSyncingGitHub else { return }
         let selectedRepositoryName = selectedRepository?.repository.fullName
         isSyncingGitHub = true
