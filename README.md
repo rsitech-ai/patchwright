@@ -16,8 +16,12 @@ Project policies: [Contributing](CONTRIBUTING.md) ·
 [Security](SECURITY.md) · [Privacy](PRIVACY.md) · [Support](SUPPORT.md) ·
 [Code of Conduct](CODE_OF_CONDUCT.md) · [Changelog](CHANGELOG.md)
 
-Patchwright is available under your choice of the
-[MIT License](LICENSE-MIT) or [Apache License 2.0](LICENSE-APACHE).
+Patchwright is maintained by [RSI Tech](https://rsitech.ai). Public and
+confidential project correspondence can be sent to
+[info@rsitech.ai](mailto:info@rsitech.ai).
+
+Copyright © 2026 Rafal Sikora. Patchwright is available under the
+[Apache License 2.0](LICENSE); see the accompanying [NOTICE](NOTICE).
 
 This repository contains the Stage 1–3 MVP:
 
@@ -106,9 +110,10 @@ explicit promotion step. See the [direct-download guide](docs/direct-download.md
 [clean-machine test plan](docs/clean-machine-test-plan.md).
 
 When Developer ID and notarization credentials are unavailable,
-`script/package_community_release.sh` can package an already verified ad-hoc
-app from an exact clean tag. Its ZIP, checksum, and manifest are community
-prerelease artifacts only; they do not satisfy the official release gates.
+`script/package_community_release.sh` builds an ad-hoc-signed app from the
+exact clean tagged checkout and packages it with source, SBOM, and notice
+bindings. These community prerelease artifacts do not satisfy the official
+release gates.
 
 ## Safety
 

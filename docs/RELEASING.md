@@ -45,11 +45,10 @@ It never replaces or relaxes the Developer ID path above.
 2. Create a versioned community tag on that exact commit.
 3. Run `./script/verify.sh`, `./script/smoke.sh`, and
    `./script/build_and_run.sh --verify` from the clean tagged checkout.
-4. Package the staged app with:
+4. Build and package the app from that exact checkout with:
 
    ```sh
    ./script/package_community_release.sh \
-     --app "$HOME/.patchwright/staged/Patchwright.app" \
      --output "$PWD/dist/community" \
      --version 0.2.0 \
      --build 3 \
@@ -57,8 +56,8 @@ It never replaces or relaxes the Developer ID path above.
    ```
 
 5. Verify the ZIP checksum and expanded app signature from a separate temporary
-   directory, then publish it only as a GitHub prerelease with the manifest and
-   an explicit not-notarized warning.
+   directory, then publish it only as a GitHub prerelease with the manifest,
+   SBOM, third-party notices, and an explicit not-notarized warning.
 
 Community artifacts must not include `appcast.xml`, use the GitHub `latest`
 release designation, or claim Gatekeeper, Developer ID, notarization,

@@ -8,8 +8,8 @@ developer tooling and review action previews before approving them.
 
 Do not open a public issue for a suspected vulnerability. Use GitHub's
 [private vulnerability reporting form](https://github.com/rsitech-ai/patchwright/security/advisories/new).
-If that form is unavailable, contact a maintainer privately through the contact
-method on their GitHub profile.
+If that form is unavailable, email the RSI Tech maintainers privately at
+[info@rsitech.ai](mailto:info@rsitech.ai).
 
 Include the affected version or commit, impact, reproduction steps, and any
 suggested mitigation. Remove tokens, private source, personal data, and other

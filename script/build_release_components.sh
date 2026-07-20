@@ -2,6 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MODE="official"
+if [[ "${1:-}" == --community ]]; then
+  MODE="community"
+  shift
+fi
+[[ $# == 0 ]] || { echo "usage: build_release_components.sh [--community]" >&2; exit 64; }
 VERSION="${PATCHWRIGHT_VERSION:-0.2.0}"
 BUILD="${PATCHWRIGHT_BUILD:-3}"
 OUTPUT_PARENT="${PATCHWRIGHT_RELEASE_WORK_ROOT:-$HOME/.patchwright/release-work}"
@@ -71,6 +77,39 @@ generate_compliance
 "$ROOT_DIR/script/validate_bundle.sh" "$APP_PATH"
 SBOM_SHA256="$(shasum -a 256 "$WORK_ROOT/evidence/sbom.spdx.json" | awk '{print $1}')"
 NOTICES_SHA256="$(shasum -a 256 "$WORK_ROOT/evidence/third-party-notices.md" | awk '{print $1}')"
+
+if [[ "$MODE" == community ]]; then
+  SPARKLE="$APP_PATH/Contents/Frameworks/Sparkle.framework"
+  /usr/bin/codesign --force --sign - "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
+  /usr/bin/codesign --force --sign - --preserve-metadata=entitlements \
+    "$SPARKLE/Versions/B/XPCServices/Downloader.xpc"
+  /usr/bin/codesign --force --sign - "$SPARKLE/Versions/B/Autoupdate"
+  /usr/bin/codesign --force --sign - "$SPARKLE/Versions/B/Updater.app"
+  /usr/bin/codesign --force --sign - "$SPARKLE"
+  /usr/bin/codesign --force --sign - "$APP_PATH/Contents/Helpers/patchwright-engine"
+  /usr/bin/codesign --force --sign - "$APP_PATH/Contents/Helpers/patchwright-relay"
+  /usr/bin/codesign --force --sign - "$APP_PATH"
+  /usr/bin/codesign --verify --deep --strict "$APP_PATH"
+
+  COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+  SOURCE_SHA256="$(shasum -a 256 "$WORK_ROOT/reproducibility/source.tar.gz" | awk '{print $1}')"
+  jq -n \
+    --arg app_path "$APP_PATH" --arg version "$VERSION" --arg build "$BUILD" \
+    --arg git_commit "$COMMIT" --arg source_archive_sha256 "$SOURCE_SHA256" \
+    --arg sbom_sha256 "$SBOM_SHA256" --arg notices_sha256 "$NOTICES_SHA256" \
+    '{schema_version:1,kind:"patchwright.community-assembly",app_path:$app_path,
+      version:$version,build:$build,git_commit:$git_commit,dirty:false,
+      signing:"ad-hoc",notarized:false,source_archive_sha256:$source_archive_sha256,
+      compliance:{sbom_sha256:$sbom_sha256,third_party_notices_sha256:$notices_sha256}}' \
+    >"$WORK_ROOT/evidence/community-assembly.json"
+  "$ROOT_DIR/script/generate_symlink_manifest.py" \
+    --root "$WORK_ROOT" --output "$WORK_ROOT/evidence/SYMLINKS.json"
+  "$ROOT_DIR/script/generate_release_metadata.sh" \
+    --phase checksums --output-root "$WORK_ROOT"
+  printf 'PATCHWRIGHT_RELEASE_ROOT=%s\nPATCHWRIGHT_APP_PATH=%s\n' "$WORK_ROOT" "$APP_PATH"
+  printf 'PATCHWRIGHT_COMMUNITY_ASSEMBLY=%s\n' "$WORK_ROOT/evidence/community-assembly.json"
+  exit 0
+fi
 
 jq -n \
   --arg app "$APP_PATH" \

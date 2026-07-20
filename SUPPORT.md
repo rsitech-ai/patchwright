@@ -6,6 +6,11 @@ agreement. Community support is offered on a best-effort basis through
 promise of response time, resolution, compatibility, continued maintenance, or
 individual support.
 
+General project correspondence can be sent to the RSI Tech maintainers at
+[info@rsitech.ai](mailto:info@rsitech.ai). Please do not send vulnerability
+details through public issues; use the confidential process in
+[SECURITY.md](SECURITY.md).
+
 Before opening an issue:
 
 1. Search existing issues and test the latest release or default branch.

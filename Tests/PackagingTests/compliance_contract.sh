@@ -37,7 +37,7 @@ jq -n \
   '{
     packages: [
       {id:"zeta@2.0.0",name:"zeta",version:"2.0.0",license:"Apache-2.0",source:"registry+https://example.invalid/index",manifest_path:$zeta_manifest},
-      {id:"patchwright-core@0.1.0",name:"patchwright-core",version:"0.1.0",license:"MIT OR Apache-2.0",source:null,manifest_path:"/fixture/patchwright-core/Cargo.toml"},
+      {id:"patchwright-core@0.1.0",name:"patchwright-core",version:"0.1.0",license:"Apache-2.0",source:null,manifest_path:"/fixture/patchwright-core/Cargo.toml"},
       {id:"alpha@1.0.0",name:"alpha",version:"1.0.0",license:"MIT",source:"registry+https://example.invalid/index",manifest_path:$alpha_manifest}
     ],
     resolve: {nodes:[{id:"zeta@2.0.0"},{id:"patchwright-core@0.1.0"},{id:"alpha@1.0.0"}]}
@@ -83,6 +83,9 @@ jq -e '
   ([.packages[].name] == ([.packages[].name] | sort)) and
   ([.packages[] | select(.name == "alpha" and .versionInfo == "1.0.0" and .licenseDeclared == "MIT")] | length == 1) and
   ([.packages[] | select(.name == "Sparkle" and .versionInfo == "2.9.2" and .licenseDeclared == "MIT")] | length == 1) and
+  ([.packages[] | select(.name == "Patchwright" and .licenseDeclared == "Apache-2.0")] | length == 1) and
+  ([.packages[] | select(.name == "patchwright-core" and .licenseDeclared == "Apache-2.0")] | length == 1) and
+  ([.files[] | select(.licenseConcluded == "Apache-2.0")] | length == 3) and
   ([.files[].fileName] == ["Patchwright.app", "patchwright-engine", "patchwright-relay"])
 ' "$TMP_ROOT/out-a/sbom.spdx.json" >/dev/null || fail "SPDX identity, ordering, package, or component contract failed"
 

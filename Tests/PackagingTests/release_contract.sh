@@ -22,8 +22,8 @@ require_text() {
 }
 
 for required in \
-  LICENSE-MIT \
-  LICENSE-APACHE \
+  LICENSE \
+  NOTICE \
   CONTRIBUTING.md \
   SECURITY.md \
   CODE_OF_CONDUCT.md \
@@ -74,15 +74,23 @@ require_text script/package_release.sh 'VERSION="${PATCHWRIGHT_VERSION:-0.2.0}"'
 require_text script/package_release.sh 'BUILD="${PATCHWRIGHT_BUILD:-3}"'
 require_text script/build_release_components.sh 'VERSION="${PATCHWRIGHT_VERSION:-0.2.0}"'
 require_text script/build_release_components.sh 'BUILD="${PATCHWRIGHT_BUILD:-3}"'
+require_text script/build_release_components.sh 'MODE="community"'
+require_text script/build_release_components.sh 'Contents/Resources/PrivacyInfo.xcprivacy'
+require_text script/package_community_release.sh 'community assembly checksums failed'
+if grep -Fq -- '--app' "$ROOT_DIR/script/package_community_release.sh" "$ROOT_DIR/docs/RELEASING.md"; then
+  fail "community packager must build from the exact checkout instead of accepting --app"
+fi
 if grep -En 'App Store|App Store Connect|Mac App Store' README.md docs/release-checklist.md docs/release-readiness.md docs/production-plan.md; then
   fail "direct-distribution documentation must not claim an App Store release lane"
 fi
 [[ -x "$ROOT_DIR/script/generate_app_icon.sh" ]] || fail "script/generate_app_icon.sh must be executable"
 require_text Assets/PatchwrightIcon-source.svg 'viewBox="0 0 1024 1024"'
 
-require_text LICENSE-MIT "Permission is hereby granted, free of charge"
-require_text LICENSE-APACHE "Apache License"
-require_text LICENSE-APACHE "Version 2.0, January 2004"
+require_text LICENSE "Apache License"
+require_text LICENSE "Version 2.0, January 2004"
+require_text NOTICE "Copyright 2026 Rafal Sikora"
+require_text NOTICE "RSI Tech"
+require_text NOTICE "info@rsitech.ai"
 require_text CONTRIBUTING.md "Developer Certificate of Origin"
 require_text CONTRIBUTING.md "Signed-off-by:"
 require_text SECURITY.md "security/advisories/new"
@@ -135,12 +143,14 @@ EOF
 [[ "$(find "$ICONSET" -type f -name '*.png' | wc -l | tr -d ' ')" == 10 ]] \
   || fail "iconset must contain exactly ten PNG representations"
 
-grep -Eq '^license = "MIT OR Apache-2\.0"$' "$ROOT_DIR/Cargo.toml" \
-  || fail 'Cargo.toml must declare license = "MIT OR Apache-2.0"'
+grep -Eq '^license = "Apache-2\.0"$' "$ROOT_DIR/Cargo.toml" \
+  || fail 'Cargo.toml must declare license = "Apache-2.0"'
 
 BUNDLE_COPYRIGHT="$(/usr/libexec/PlistBuddy -c 'Print :NSHumanReadableCopyright' "$ROOT_DIR/Packaging/Info.plist")"
 [[ "$BUNDLE_COPYRIGHT" != *"All rights reserved"* ]] \
   || fail "bundle copyright must not claim All rights reserved"
+[[ "$BUNDLE_COPYRIGHT" == 'Copyright © 2026 Rafal Sikora. Licensed under Apache-2.0.' ]] \
+  || fail "bundle copyright must name Rafal Sikora and Apache-2.0"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$ROOT_DIR/Packaging/Info.plist" 2>/dev/null || true)" == Patchwright.icns ]] \
   || fail "CFBundleIconFile must be Patchwright.icns"
 
@@ -163,8 +173,8 @@ KEY_BYTES="$(printf '%s' "$SPARKLE_PUBLIC_KEY" | /usr/bin/base64 -D 2>/dev/null 
 for target in \
   '#build-and-verify' \
   'https://github.com/rsitech-ai/patchwright/releases' \
-  'LICENSE-MIT' \
-  'LICENSE-APACHE' \
+  'LICENSE' \
+  'NOTICE' \
   'CONTRIBUTING.md' \
   'SECURITY.md' \
   'PRIVACY.md' \
