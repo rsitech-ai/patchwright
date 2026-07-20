@@ -1,0 +1,38 @@
+name: Feature request
+description: Propose a focused improvement to Patchwright.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What concrete workflow or safety problem should be solved?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior, not an implementation mandate.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Security, privacy, and compatibility impact
+      description: Note any effect on process execution, GitHub permissions, stored data, or existing workflows.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues and documentation.
+          required: true
+        - label: I did not include credentials, private source, or personal data.
+          required: true

@@ -7,3 +7,9 @@
 *.sqlite3*
 *.sock
 .DS_Store
+*.log
+*.tmp
+*.swp
+.env
+.env.*
+!.env.example

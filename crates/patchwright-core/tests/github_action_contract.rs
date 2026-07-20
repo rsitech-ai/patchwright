@@ -9,10 +9,13 @@ fn github_app_smoke_draft_action_deserializes() {
         "title": "[Patchwright E2E] Approval-gated draft",
         "head": "patchwright/e2e",
         "base": "main",
-        "body": "qualification"
+        "body": "qualification",
+        "expectedHeadSha": SHA_A,
+        "expectedBaseSha": SHA_B
     });
     let action: GitHubAction = serde_json::from_value(encoded).unwrap();
-    assert_eq!(action.expected_base_sha(), None);
+    assert_eq!(action.expected_head_sha(), Some(SHA_A));
+    assert_eq!(action.expected_base_sha(), Some(SHA_B));
 }
 use serde_json::json;
 
@@ -37,12 +40,12 @@ fn every_delivery_and_merge_action_has_stable_documented_identity() {
         GitHubAction::push_intent("feat/fix", SHA_B).unwrap(),
         GitHubAction::comment(12, "Applied the verified fix.").unwrap(),
         GitHubAction::review(12, SHA_A, ReviewEvent::Approve, "Verified.", vec![]).unwrap(),
-        GitHubAction::resolve_review_thread(12, "PRRT_kwDOExample").unwrap(),
+        GitHubAction::resolve_review_thread(12, "PRRT_kwDOExample", SHA_A).unwrap(),
         GitHubAction::check_run("Patchwright", SHA_B, "completed", Some("success")).unwrap(),
-        GitHubAction::draft_pull_request("Fix", "feat/fix", "main", "Body").unwrap(),
+        GitHubAction::draft_pull_request("Fix", "feat/fix", "main", "Body", SHA_A, SHA_B).unwrap(),
         GitHubAction::update_pull_request_branch(12, SHA_A).unwrap(),
-        GitHubAction::ready_pull_request(12).unwrap(),
-        GitHubAction::close_pull_request(12).unwrap(),
+        GitHubAction::ready_pull_request(12, SHA_A).unwrap(),
+        GitHubAction::close_pull_request(12, SHA_A).unwrap(),
         GitHubAction::close_issue(13).unwrap(),
         GitHubAction::enqueue_pull_request(12, SHA_B).unwrap(),
         GitHubAction::merge_pull_request(12, SHA_B, MergeMethod::Squash).unwrap(),
@@ -68,23 +71,46 @@ fn action_contract_rejects_ambiguous_or_unsafe_boundaries() {
     assert!(GitHubAction::comment(1, &"x".repeat(65_537)).is_err());
     assert!(GitHubAction::comment(1, "Authorization: Bearer ghs_secret").is_err());
     assert!(GitHubAction::close_issue(0).is_err());
-    assert!(GitHubAction::resolve_review_thread(1, "").is_err());
-    assert!(GitHubAction::resolve_review_thread(1, "PRRT_bad space").is_err());
+    assert!(GitHubAction::resolve_review_thread(1, "", SHA_A).is_err());
+    assert!(GitHubAction::resolve_review_thread(1, "PRRT_bad space", SHA_A).is_err());
     assert!(GitHubAction::merge_pull_request(1, SHA_B, MergeMethod::Merge).is_ok());
     assert!(RemoteIdentity::new(0, 7, "octo/fixture").is_err());
     assert!(RemoteIdentity::new(1, 0, "octo/fixture").is_err());
     assert!(RemoteIdentity::new(1, 7, "not-a-repository").is_err());
     assert!(RemotePrecondition::new(Some("short"), Some(SHA_B), 1).is_err());
-    for legacy_false_sha in [
-        json!({"kind":"readyPullRequest","pullRequestNumber":1,"expectedHeadSha":SHA_A}),
-        json!({"kind":"closePullRequest","pullRequestNumber":1,"expectedHeadSha":SHA_A}),
-        json!({"kind":"resolveReviewThread","pullRequestNumber":1,"threadId":"PRRT_example","expectedHeadSha":SHA_A}),
-        json!({"kind":"draftPullRequest","title":"Draft","head":"feat/test","base":"main","body":"Body","expectedBaseSha":SHA_B}),
+    for malformed_sha in [
+        json!({"kind":"readyPullRequest","pullRequestNumber":1,"expectedHeadSha":"short"}),
+        json!({"kind":"closePullRequest","pullRequestNumber":1,"expectedHeadSha":"short"}),
+        json!({"kind":"resolveReviewThread","pullRequestNumber":1,"threadId":"PRRT_example","expectedHeadSha":"short"}),
+        json!({"kind":"draftPullRequest","title":"Draft","head":"feat/test","base":"main","body":"Body","expectedHeadSha":SHA_A,"expectedBaseSha":"short"}),
     ] {
         assert!(
-            serde_json::from_value::<GitHubAction>(legacy_false_sha).is_err(),
-            "removed SHA claims must fail closed instead of silently weakening authorization"
+            serde_json::from_value::<GitHubAction>(malformed_sha).is_err(),
+            "malformed SHA claims must fail closed"
         );
+    }
+}
+
+#[test]
+fn state_changing_pull_request_actions_require_exact_commit_identity() {
+    let bound_actions = [
+        json!({"kind":"resolveReviewThread","pullRequestNumber":1,"threadId":"PRRT_example","expectedHeadSha":SHA_A}),
+        json!({"kind":"draftPullRequest","title":"Draft","head":"feat/test","base":"main","body":"Body","expectedHeadSha":SHA_A,"expectedBaseSha":SHA_B}),
+        json!({"kind":"readyPullRequest","pullRequestNumber":1,"expectedHeadSha":SHA_A}),
+        json!({"kind":"closePullRequest","pullRequestNumber":1,"expectedHeadSha":SHA_A}),
+    ];
+    for encoded in bound_actions {
+        let action = serde_json::from_value::<GitHubAction>(encoded).unwrap();
+        assert_eq!(action.expected_head_sha(), Some(SHA_A));
+    }
+
+    for unbound in [
+        json!({"kind":"resolveReviewThread","pullRequestNumber":1,"threadId":"PRRT_example"}),
+        json!({"kind":"draftPullRequest","title":"Draft","head":"feat/test","base":"main","body":"Body"}),
+        json!({"kind":"readyPullRequest","pullRequestNumber":1}),
+        json!({"kind":"closePullRequest","pullRequestNumber":1}),
+    ] {
+        assert!(serde_json::from_value::<GitHubAction>(unbound).is_err());
     }
 }
 

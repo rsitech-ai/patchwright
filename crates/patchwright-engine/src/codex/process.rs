@@ -317,23 +317,15 @@ impl CodexProcess {
         duration: Duration,
         operation: &'static str,
     ) -> Result<String, CodexProcessError> {
-        let mut bytes = Vec::new();
-        let count = timeout(duration, self.stdout.read_until(b'\n', &mut bytes))
-            .await
-            .map_err(|_| CodexProcessError::Timeout {
-                operation,
-                duration,
-            })?
-            .map_err(|source| CodexProcessError::Io { operation, source })?;
-        if count == 0 {
-            return Err(CodexProcessError::UnexpectedEof);
-        }
-        if bytes.len() > MAX_LINE_BYTES + 1 {
-            return Err(CodexProcessError::ProtocolLineTooLarge(bytes.len()));
-        }
-        if bytes.last() == Some(&b'\n') {
-            bytes.pop();
-        }
+        let mut bytes = timeout(
+            duration,
+            read_bounded_protocol_line(&mut self.stdout, operation),
+        )
+        .await
+        .map_err(|_| CodexProcessError::Timeout {
+            operation,
+            duration,
+        })??;
         if bytes.last() == Some(&b'\r') {
             bytes.pop();
         }
@@ -372,6 +364,37 @@ impl CodexProcess {
     async fn finish_stderr_capture(&mut self) {
         if let Some(task) = self.stderr_task.take() {
             let _ = task.await;
+        }
+    }
+}
+
+async fn read_bounded_protocol_line(
+    stdout: &mut BufReader<ChildStdout>,
+    operation: &'static str,
+) -> Result<Vec<u8>, CodexProcessError> {
+    let mut bytes = Vec::new();
+    loop {
+        let available = stdout
+            .fill_buf()
+            .await
+            .map_err(|source| CodexProcessError::Io { operation, source })?;
+        if available.is_empty() {
+            return if bytes.is_empty() {
+                Err(CodexProcessError::UnexpectedEof)
+            } else {
+                Ok(bytes)
+            };
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let take = newline.unwrap_or(available.len());
+        if bytes.len().saturating_add(take) > MAX_LINE_BYTES {
+            return Err(CodexProcessError::ProtocolLineTooLarge(MAX_LINE_BYTES + 1));
+        }
+        bytes.extend_from_slice(&available[..take]);
+        let consumed = take + usize::from(newline.is_some());
+        stdout.consume(consumed);
+        if newline.is_some() {
+            return Ok(bytes);
         }
     }
 }
