@@ -2,9 +2,14 @@
 
 Patchwright is beta software provided without warranty or a service-level
 agreement. Community support is offered on a best-effort basis through
-[GitHub Issues](https://github.com/s1korrrr/patchwright/issues). There is no
+[GitHub Issues](https://github.com/rsitech-ai/patchwright/issues). There is no
 promise of response time, resolution, compatibility, continued maintenance, or
 individual support.
+
+General project correspondence can be sent to the RSI Tech maintainers at
+[info@rsitech.ai](mailto:info@rsitech.ai). Please do not send vulnerability
+details through public issues; use the confidential process in
+[SECURITY.md](SECURITY.md).
 
 Before opening an issue:
 

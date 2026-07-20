@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 
 final class UpdateConfigurationTests: XCTestCase {
-    private let expectedFeedURL = "https://github.com/s1korrrr/patchwright/releases/latest/download/appcast.xml"
+    private let expectedFeedURL = "https://github.com/rsitech-ai/patchwright/releases/latest/download/appcast.xml"
     private let expectedSparkleRevision = "6276ba2b404829d139c45ff98427cf90e2efc59b"
 
     func testSparkleIsPinnedExactlyAndLinkedForAnAppBundle() throws {

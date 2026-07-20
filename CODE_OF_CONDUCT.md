@@ -60,7 +60,7 @@ representative at an online or offline event.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported privately through the repository's
-[private reporting form](https://github.com/s1korrrr/patchwright/security/advisories/new).
+[private reporting form](https://github.com/rsitech-ai/patchwright/security/advisories/new).
 Do not include a conduct report in a public issue. Complaints will be reviewed
 and investigated fairly as maintainer capacity allows; no response time is
 promised.

@@ -2,14 +2,13 @@
 
 Patchwright is a local-first, macOS-native engineering control plane for GitHub. It separates private language-model assistance from a durable coding-agent runtime and makes every approval, command, diff, test, and remote mutation auditable.
 
-**Status:** beta. The current source manifests are version `0.1.1`; the latest
-published artifact remains the version shown on GitHub Releases until a newer
-release completes signing, notarization, clean-machine verification, and
-promotion.
+**Status:** beta. The current source manifests are version `0.2.0`. GitHub may
+also carry a clearly labeled community prerelease for review and evaluation;
+that archive is ad-hoc signed and is not an Apple-notarized distribution.
 
 Build Patchwright from [source](#build-and-verify). Official Developer ID-signed
 and Apple-notarized downloads are published through
-[GitHub Releases](https://github.com/s1korrrr/patchwright/releases). See the
+[GitHub Releases](https://github.com/rsitech-ai/patchwright/releases). See the
 [direct-download guide](docs/direct-download.md) for installation and
 verification.
 
@@ -17,8 +16,12 @@ Project policies: [Contributing](CONTRIBUTING.md) ·
 [Security](SECURITY.md) · [Privacy](PRIVACY.md) · [Support](SUPPORT.md) ·
 [Code of Conduct](CODE_OF_CONDUCT.md) · [Changelog](CHANGELOG.md)
 
-Patchwright is available under your choice of the
-[MIT License](LICENSE-MIT) or [Apache License 2.0](LICENSE-APACHE).
+Patchwright is maintained by [RSI Tech](https://rsitech.ai). Public and
+confidential project correspondence can be sent to
+[info@rsitech.ai](mailto:info@rsitech.ai).
+
+Copyright © 2026 Rafal Sikora. Patchwright is available under the
+[Apache License 2.0](LICENSE); see the accompanying [NOTICE](NOTICE).
 
 This repository contains the Stage 1–3 MVP:
 
@@ -106,6 +109,12 @@ explicit promotion step. See the [direct-download guide](docs/direct-download.md
 [release readiness](docs/release-readiness.md), and
 [clean-machine test plan](docs/clean-machine-test-plan.md).
 
+When Developer ID and notarization credentials are unavailable,
+`script/package_community_release.sh` builds an ad-hoc-signed app from the
+exact clean tagged checkout and packages it with source, SBOM, and notice
+bindings. These community prerelease artifacts do not satisfy the official
+release gates.
+
 ## Safety
 
 Merge is disabled by default and can execute only for a typed pull-request task after an exact action preview, a separate merge-class approval, a fresh exact-head-SHA precondition, and a single-use execution claim. GitHub writes, network access, dependency installation, and workflow changes require action-specific approval. Set `PATCHWRIGHT_AUTOMATION_DISABLED=1` to fail closed for every mutating capability while retaining read-only inspection.
@@ -117,4 +126,4 @@ still execute repository-controlled build scripts, plugins, and tests with the
 current macOS user's file and network access. Review untrusted changes before
 confirming verification.
 
-See [the product design](docs/superpowers/specs/2026-07-13-patchwright-stages-1-3-design.md), [production plan](docs/production-plan.md), and [security operations](docs/security.md).
+See [the architecture](docs/architecture.md), [production operations](docs/production-plan.md), and [security operations](docs/security.md).

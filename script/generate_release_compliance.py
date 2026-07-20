@@ -120,7 +120,7 @@ def swift_packages(metadata: dict[str, Any]) -> list[dict[str, str]]:
         {
             "name": root_name,
             "version": root_version,
-            "license": "MIT OR Apache-2.0",
+            "license": "Apache-2.0",
             "source": "workspace",
             "ecosystem": "Swift",
             "first_party": "true",
@@ -353,7 +353,7 @@ def build_documents(
                 "SPDXID": spdx_id("File", name, checksum),
                 "fileName": name,
                 "checksums": [{"algorithm": "SHA256", "checksumValue": checksum}],
-                "licenseConcluded": "MIT OR Apache-2.0",
+                "licenseConcluded": "Apache-2.0",
                 "licenseInfoInFiles": ["NOASSERTION"],
                 "copyrightText": "NOASSERTION",
             }
@@ -370,7 +370,7 @@ def build_documents(
         "dataLicense": "CC0-1.0",
         "SPDXID": "SPDXRef-DOCUMENT",
         "name": "Patchwright release SBOM",
-        "documentNamespace": f"https://github.com/s1korrrr/patchwright/spdx/{namespace_digest}",
+        "documentNamespace": f"https://github.com/rsitech-ai/patchwright/spdx/{namespace_digest}",
         "creationInfo": {"created": created_timestamp(), "creators": ["Tool: Patchwright compliance generator"]},
         "packages": package_rows,
         "files": files,
