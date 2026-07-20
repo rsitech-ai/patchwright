@@ -3,8 +3,8 @@ set -euo pipefail
 umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${PATCHWRIGHT_VERSION:-0.1.1}"
-BUILD="${PATCHWRIGHT_BUILD:-2}"
+VERSION="${PATCHWRIGHT_VERSION:-0.2.0}"
+BUILD="${PATCHWRIGHT_BUILD:-3}"
 SPARKLE_ACCOUNT="ai.patchwright.app.release-v1"
 SIGNING_KEYCHAIN="${PATCHWRIGHT_SIGNING_KEYCHAIN:-}"
 APPCAST_STAGE=""
@@ -80,8 +80,8 @@ SPARKLE_BIN="$ROOT_DIR/.build/artifacts/sparkle/Sparkle/bin"
 APPCAST_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/patchwright-appcast.XXXXXX")"
 /usr/bin/ditto "$DMG_PATH" "$APPCAST_STAGE/$(basename "$DMG_PATH")"
 "$SPARKLE_BIN/generate_appcast" --account "$SPARKLE_ACCOUNT" \
-  --download-url-prefix "https://github.com/s1korrrr/patchwright/releases/download/v$VERSION/" \
-  --link "https://github.com/s1korrrr/patchwright/releases/tag/v$VERSION" --versions "$BUILD" --maximum-deltas 0 \
+  --download-url-prefix "https://github.com/rsitech-ai/patchwright/releases/download/v$VERSION/" \
+  --link "https://github.com/rsitech-ai/patchwright/releases/tag/v$VERSION" --versions "$BUILD" --maximum-deltas 0 \
   -o "$APPCAST_STAGE/appcast.xml" "$APPCAST_STAGE"
 APPCAST_PATH="$RELEASE_ROOT/appcast.xml"
 /usr/bin/ditto "$APPCAST_STAGE/appcast.xml" "$APPCAST_PATH"

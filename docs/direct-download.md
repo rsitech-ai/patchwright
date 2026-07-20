@@ -1,7 +1,7 @@
 # Direct download and installation
 
 Patchwright is distributed outside any app marketplace. Official binaries are
-published only through [GitHub Releases](https://github.com/s1korrrr/patchwright/releases).
+published only through [GitHub Releases](https://github.com/rsitech-ai/patchwright/releases).
 Each release must be signed with an Apple **Developer ID Application** identity,
 accepted by **Apple notarization**, and stapled before publication.
 
@@ -34,6 +34,27 @@ spctl --assess --type open --context context:primary-signature --verbose=4 Patch
 
 The release page also publishes `appcast.xml` for signed Sparkle updates. The
 feed and archive signatures are checked by Patchwright before extraction.
+
+## Community prerelease
+
+The repository may publish a ZIP labeled `community` for source review and
+evaluation when Developer ID or notarization credentials are unavailable. A
+community prerelease is ad-hoc signed and is **not Developer ID signed or Apple notarized**.
+It is not included in the signed Sparkle update feed and is not an
+official trusted binary distribution.
+
+Download the ZIP, its `.sha256` file, and its JSON manifest into the same
+directory, then verify the archive before expanding it:
+
+```sh
+shasum -a 256 -c Patchwright-<version>-community.<n>-macos-<architecture>.zip.sha256
+```
+
+The manifest binds the archive digest to the exact Git commit and tag and
+states the signing and notarization status. Gatekeeper may block an unnotarized
+archive. Do not disable Gatekeeper or strip quarantine metadata to work around
+that warning; build the tagged source locally if a community prerelease does
+not meet your trust requirements.
 
 ## Source builds
 

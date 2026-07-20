@@ -401,7 +401,7 @@ def verify_candidate(candidate_path: Path, repo: Path, now: datetime) -> tuple[d
     item = enclosure_items[0]
     versions = item.findall(f"{sparkle}version")
     short_versions = item.findall(f"{sparkle}shortVersionString")
-    expected_url = f"https://github.com/s1korrrr/patchwright/releases/download/{identity['tag']}/{identity['artifact_filename']}"
+    expected_url = f"https://github.com/rsitech-ai/patchwright/releases/download/{identity['tag']}/{identity['artifact_filename']}"
     if enclosure.get("url") != expected_url or enclosure.get("length") != str(artifact_stat.st_size) or enclosure.get("type") != "application/octet-stream" or len(versions) != 1 or versions[0].text != identity["build"] or len(short_versions) != 1 or short_versions[0].text != identity["version"]:
         raise VerificationError("signed appcast enclosure does not match candidate")
     appcast_bytes = read_bytes(appcast, "signed appcast", MAX_JSON_BYTES)

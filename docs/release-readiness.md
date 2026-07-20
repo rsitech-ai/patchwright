@@ -28,7 +28,7 @@ Then run:
 export PATCHWRIGHT_DEVELOPER_ID='Developer ID Application: Exact Name (TEAMID)'
 export PATCHWRIGHT_SIGNING_KEYCHAIN='/absolute/path/to/Release.keychain-db'
 export PATCHWRIGHT_NOTARY_PROFILE=Patchwright
-PATCHWRIGHT_VERSION=0.1.1 PATCHWRIGHT_BUILD=2 ./script/release.sh
+PATCHWRIGHT_VERSION=0.2.0 PATCHWRIGHT_BUILD=3 ./script/release.sh
 ```
 
 The output remains under `~/.patchwright/release-work` until every active gate

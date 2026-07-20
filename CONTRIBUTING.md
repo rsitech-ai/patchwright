@@ -38,7 +38,7 @@ sign-offs before merge.
 
 Unless you explicitly state otherwise, contributions intentionally submitted
 for inclusion in Patchwright are licensed under the repository's
-`MIT OR Apache-2.0` terms, without additional terms or conditions.
+Apache License 2.0 terms, without additional terms or conditions.
 
 Community participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
 Security vulnerabilities must follow the private process in

@@ -30,7 +30,11 @@ if [[ -n "$EXISTING_ISSUE_NUMBER" ]]; then
 fi
 
 [[ -n "$TARGET_OWNER" && -n "$TARGET_REPOSITORY" ]] || fail "set the disposable owner and repository"
-[[ "$NORMALIZED_TARGET" != "s1korrrr/patchwright" ]] || fail "the Patchwright production repository is forbidden"
+case "$NORMALIZED_TARGET" in
+  rsitech-ai/patchwright|s1korrrr/patchwright)
+    fail "the Patchwright production repository is forbidden"
+    ;;
+esac
 [[ "$TARGET" == "$ALLOWLIST" ]] || fail "PATCHWRIGHT_GITHUB_E2E_ALLOWLIST must exactly equal $TARGET"
 [[ "$CONFIRMATION" == "authorize:$TARGET" ]] || fail "set PATCHWRIGHT_GITHUB_E2E_CONFIRM=authorize:$TARGET for this one run"
 [[ "$TARGET_REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]] || fail "set the numeric disposable repository ID"
