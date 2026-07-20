@@ -431,7 +431,8 @@ def require_rejected(name: str, mutate) -> None:
     case_output = base / "promotion"
     command = promotion_command(case_repo, case_candidate, case_external, case_output)
     mutate(case_repo, case_candidate, case_external, case_output, command)
-    rejected = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+    # ponytail: ceiling=must exceed verify_ed25519.swift cold-start (inner timeout=30); raise if Swift helper stays cold-path slow
+    rejected = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
     if rejected.returncode == 0:
         raise SystemExit(f"promotion unexpectedly accepted {name}")
     if "release evidence rejected:" not in rejected.stderr and "usage:" not in rejected.stderr:
