@@ -57,7 +57,8 @@ It never replaces or relaxes the Developer ID path above.
 
 5. Verify the ZIP checksum and expanded app signature from a separate temporary
    directory, then publish it only as a GitHub prerelease with the manifest,
-   SBOM, third-party notices, and an explicit not-notarized warning.
+   SBOM, third-party notices, project license, project notice, and an explicit
+   not-notarized warning.
 
 Community artifacts must not include `appcast.xml`, use the GitHub `latest`
 release designation, or claim Gatekeeper, Developer ID, notarization,

@@ -10,6 +10,8 @@ All notable user-facing and distribution changes are documented here. Patchwrigh
   app archive and checksum to the exact clean Git commit and release tag.
 - Publish machine-readable community release metadata that states the app
   architecture, minimum macOS version, signing class, and notarization status.
+- Embed and publish the Apache project license and RSI Tech project notice with
+  the community app alongside third-party attribution evidence.
 
 ### Changed
 

@@ -76,7 +76,11 @@ require_text script/build_release_components.sh 'VERSION="${PATCHWRIGHT_VERSION:
 require_text script/build_release_components.sh 'BUILD="${PATCHWRIGHT_BUILD:-3}"'
 require_text script/build_release_components.sh 'MODE="community"'
 require_text script/build_release_components.sh 'Contents/Resources/PrivacyInfo.xcprivacy'
+require_text script/build_release_components.sh 'Contents/Resources/LICENSE.txt'
+require_text script/build_release_components.sh 'Contents/Resources/NOTICE.txt'
 require_text script/package_community_release.sh 'community assembly checksums failed'
+require_text script/package_community_release.sh 'project_license_sha256'
+require_text script/package_community_release.sh 'project_notice_sha256'
 if grep -Fq -- '--app' "$ROOT_DIR/script/package_community_release.sh" "$ROOT_DIR/docs/RELEASING.md"; then
   fail "community packager must build from the exact checkout instead of accepting --app"
 fi

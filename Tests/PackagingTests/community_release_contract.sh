@@ -17,6 +17,8 @@ FIXTURE_REPO="$TMP_ROOT/repository"
 OUTPUT_DIR="$TMP_ROOT/output"
 mkdir -p "$FIXTURE_REPO/script" "$TMP_ROOT/builds"
 cp "$PACKAGER" "$FIXTURE_REPO/script/package_community_release.sh"
+printf 'Apache License\nVersion 2.0, January 2004\n' >"$FIXTURE_REPO/LICENSE"
+printf 'Patchwright fixture notice\n' >"$FIXTURE_REPO/NOTICE"
 cat >"$FIXTURE_REPO/script/build_release_components.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -51,6 +53,10 @@ printf '<?xml version="1.0"?><plist version="1.0"><dict/></plist>\n' \
 printf '# Third-Party Notices\n\nFake dependency.\n' \
   >"$APP_PATH/Contents/Resources/THIRD_PARTY_NOTICES.md"
 printf 'Fake license\n' >"$APP_PATH/Contents/Resources/third-party-licenses/Fake/LICENSE"
+cp "$ROOT_DIR/LICENSE" "$APP_PATH/Contents/Resources/LICENSE.txt"
+cp "$ROOT_DIR/NOTICE" "$APP_PATH/Contents/Resources/NOTICE.txt"
+cp "$ROOT_DIR/LICENSE" "$WORK_ROOT/reproducibility/LICENSE"
+cp "$ROOT_DIR/NOTICE" "$WORK_ROOT/reproducibility/NOTICE"
 /usr/bin/codesign --force --sign - "$APP_PATH"
 git -C "$ROOT_DIR" archive --format=tar.gz --output="$WORK_ROOT/reproducibility/source.tar.gz" HEAD
 COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD)"
@@ -59,13 +65,18 @@ printf '{"spdxVersion":"SPDX-2.3","dataLicense":"CC0-1.0"}\n' >"$WORK_ROOT/evide
 cp "$APP_PATH/Contents/Resources/THIRD_PARTY_NOTICES.md" "$WORK_ROOT/evidence/third-party-notices.md"
 SBOM_SHA256="$(shasum -a 256 "$WORK_ROOT/evidence/sbom.spdx.json" | awk '{print $1}')"
 NOTICES_SHA256="$(shasum -a 256 "$WORK_ROOT/evidence/third-party-notices.md" | awk '{print $1}')"
+PROJECT_LICENSE_SHA256="$(shasum -a 256 "$WORK_ROOT/reproducibility/LICENSE" | awk '{print $1}')"
+PROJECT_NOTICE_SHA256="$(shasum -a 256 "$WORK_ROOT/reproducibility/NOTICE" | awk '{print $1}')"
 jq -n --arg app_path "$APP_PATH" --arg version "$VERSION" --arg build "$BUILD" \
   --arg git_commit "$COMMIT" --arg source_archive_sha256 "$SOURCE_SHA256" \
   --arg sbom_sha256 "$SBOM_SHA256" --arg notices_sha256 "$NOTICES_SHA256" \
+  --arg project_license_sha256 "$PROJECT_LICENSE_SHA256" \
+  --arg project_notice_sha256 "$PROJECT_NOTICE_SHA256" \
   '{schema_version:1,kind:"patchwright.community-assembly",app_path:$app_path,
     version:$version,build:$build,git_commit:$git_commit,dirty:false,
     signing:"ad-hoc",notarized:false,source_archive_sha256:$source_archive_sha256,
-    compliance:{sbom_sha256:$sbom_sha256,third_party_notices_sha256:$notices_sha256}}' \
+    compliance:{sbom_sha256:$sbom_sha256,third_party_notices_sha256:$notices_sha256,
+      project_license_sha256:$project_license_sha256,project_notice_sha256:$project_notice_sha256}}' \
   >"$WORK_ROOT/evidence/community-assembly.json"
 (
   cd "$WORK_ROOT"
@@ -85,7 +96,7 @@ chmod +x "$FIXTURE_REPO/script/package_community_release.sh" "$FIXTURE_REPO/scri
 git -C "$FIXTURE_REPO" init -q
 git -C "$FIXTURE_REPO" config user.name Fixture
 git -C "$FIXTURE_REPO" config user.email fixture@example.invalid
-git -C "$FIXTURE_REPO" add script
+git -C "$FIXTURE_REPO" add script LICENSE NOTICE
 git -C "$FIXTURE_REPO" commit -qm fixture
 git -C "$FIXTURE_REPO" tag v0.2.0-community.1
 
@@ -107,7 +118,10 @@ CHECKSUM="$ARCHIVE.sha256"
 MANIFEST="$OUTPUT_DIR/Patchwright-0.2.0-community.1-manifest.json"
 SBOM="$OUTPUT_DIR/Patchwright-0.2.0-community.1-sbom.spdx.json"
 NOTICES="$OUTPUT_DIR/Patchwright-0.2.0-community.1-third-party-notices.md"
-for output in "$ARCHIVE" "$CHECKSUM" "$MANIFEST" "$SBOM" "$NOTICES"; do
+PROJECT_LICENSE="$OUTPUT_DIR/Patchwright-0.2.0-community.1-LICENSE.txt"
+PROJECT_NOTICE="$OUTPUT_DIR/Patchwright-0.2.0-community.1-NOTICE.txt"
+for output in "$ARCHIVE" "$CHECKSUM" "$MANIFEST" "$SBOM" "$NOTICES" \
+  "$PROJECT_LICENSE" "$PROJECT_NOTICE"; do
   [[ -f "$output" ]] || fail "packager did not emit $(basename "$output")"
 done
 (cd "$OUTPUT_DIR" && shasum -a 256 -c "$(basename "$CHECKSUM")")
@@ -122,6 +136,14 @@ EXPANDED_APP="$EXPANDED/Patchwright.app"
   || fail "community archive omitted third-party notices"
 [[ -f "$EXPANDED_APP/Contents/Resources/third-party-licenses/Fake/LICENSE" ]] \
   || fail "community archive omitted the third-party license tree"
+cmp "$FIXTURE_REPO/LICENSE" "$EXPANDED_APP/Contents/Resources/LICENSE.txt" \
+  || fail "community archive omitted the exact Apache project license"
+cmp "$FIXTURE_REPO/NOTICE" "$EXPANDED_APP/Contents/Resources/NOTICE.txt" \
+  || fail "community archive omitted the exact project notice"
+cmp "$FIXTURE_REPO/LICENSE" "$PROJECT_LICENSE" \
+  || fail "community release asset omitted the exact Apache project license"
+cmp "$FIXTURE_REPO/NOTICE" "$PROJECT_NOTICE" \
+  || fail "community release asset omitted the exact project notice"
 /usr/bin/codesign --verify --deep --strict "$EXPANDED_APP"
 
 COMMIT="$(git -C "$FIXTURE_REPO" rev-parse HEAD)"
@@ -131,7 +153,8 @@ jq -e --arg commit "$COMMIT" \
    .git_commit == $commit and .signing == "ad-hoc" and .notarized == false and
    .minimum_macos == "26.0" and .architecture == "arm64" and
    (.source_archive_sha256 | length) == 64 and (.sbom_sha256 | length) == 64 and
-   (.third_party_notices_sha256 | length) == 64' \
+   (.third_party_notices_sha256 | length) == 64 and
+   (.project_license_sha256 | length) == 64 and (.project_notice_sha256 | length) == 64' \
   "$MANIFEST" >/dev/null || fail "manifest did not preserve source and compliance bindings"
 
 if PATCHWRIGHT_RELEASE_WORK_ROOT="$TMP_ROOT/tampered-builds" PATCHWRIGHT_FIXTURE_TAMPER=1 \
