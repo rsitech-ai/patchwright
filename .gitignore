@@ -13,3 +13,13 @@
 .env
 .env.*
 !.env.example
+
+/.codex/
+/.engineering-agent/
+/.cursor/
+/.claude/
+/.agents/
+/AGENTS.md
+/SOUL.md
+/USER.md
+/MEMORY.md
