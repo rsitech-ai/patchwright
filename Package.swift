@@ -9,7 +9,7 @@ let package = Package(
         .executable(name: "Patchwright", targets: ["PatchwrightApp"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.2"),
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.4"),
     ],
     targets: [
         .target(name: "PatchwrightCore"),
