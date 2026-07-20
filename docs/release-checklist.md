@@ -22,3 +22,12 @@
 - [ ] `promotion-manifest.json` binds the candidate manifest, every gate, `release-evidence.json`, and `release-assets.json`; `promotion-readiness.json` binds the promotion manifest digest.
 - [ ] The promoted release is uploaded to GitHub Releases with the DMG, `.sha256`, and `appcast.xml`; the public URLs and updater feed are rechecked.
 - [ ] The release report lists any remaining external gate independently and never upgrades a partial result to ready.
+
+## Community prerelease gate
+
+- [ ] Use this lane only when the Developer ID/notarization path is unavailable; do not alter `script/release.sh` or official evidence gates.
+- [ ] The exact source commit is merged through a reviewed pull request, clean, and tagged `v<version>-community.<n>`.
+- [ ] `./script/verify.sh`, `./script/smoke.sh`, and `./script/build_and_run.sh --verify` pass on that exact commit.
+- [ ] `script/package_community_release.sh` emits the ZIP, portable SHA-256 sidecar, and manifest with `signing: ad-hoc` and `notarized: false`.
+- [ ] The downloaded ZIP checksum and expanded app signature are reverified independently before the superseded GitHub release is removed.
+- [ ] The GitHub entry is a prerelease, does not publish `appcast.xml`, and states that Gatekeeper may block the unnotarized app.

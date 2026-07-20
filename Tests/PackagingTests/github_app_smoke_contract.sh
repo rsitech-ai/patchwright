@@ -29,10 +29,15 @@ assert_blocked \
 
 assert_blocked \
   "the Patchwright production repository is forbidden" \
-  PATCHWRIGHT_GITHUB_E2E_OWNER=S1KORRRR \
+  PATCHWRIGHT_GITHUB_E2E_OWNER=rsitech-ai \
+  PATCHWRIGHT_GITHUB_E2E_REPOSITORY=patchwright
+
+assert_blocked \
+  "the Patchwright production repository is forbidden" \
+  PATCHWRIGHT_GITHUB_E2E_OWNER=RSITECH-AI \
   PATCHWRIGHT_GITHUB_E2E_REPOSITORY=Patchwright \
-  PATCHWRIGHT_GITHUB_E2E_ALLOWLIST=S1KORRRR/Patchwright \
-  PATCHWRIGHT_GITHUB_E2E_CONFIRM=authorize:S1KORRRR/Patchwright
+  PATCHWRIGHT_GITHUB_E2E_ALLOWLIST=RSITECH-AI/Patchwright \
+  PATCHWRIGHT_GITHUB_E2E_CONFIRM=authorize:RSITECH-AI/Patchwright
 
 assert_blocked \
   "PATCHWRIGHT_GITHUB_E2E_ALLOWLIST must exactly equal example/qualification" \

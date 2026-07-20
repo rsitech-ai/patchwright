@@ -2,7 +2,7 @@
 
 Patchwright is beta software provided without warranty or a service-level
 agreement. Community support is offered on a best-effort basis through
-[GitHub Issues](https://github.com/s1korrrr/patchwright/issues). There is no
+[GitHub Issues](https://github.com/rsitech-ai/patchwright/issues). There is no
 promise of response time, resolution, compatibility, continued maintenance, or
 individual support.
 

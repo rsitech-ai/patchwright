@@ -7,7 +7,7 @@ developer tooling and review action previews before approving them.
 ## Report a vulnerability privately
 
 Do not open a public issue for a suspected vulnerability. Use GitHub's
-[private vulnerability reporting form](https://github.com/s1korrrr/patchwright/security/advisories/new).
+[private vulnerability reporting form](https://github.com/rsitech-ai/patchwright/security/advisories/new).
 If that form is unavailable, contact a maintainer privately through the contact
 method on their GitHub profile.
 

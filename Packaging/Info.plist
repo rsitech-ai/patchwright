@@ -19,9 +19,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.1</string>
+    <string>0.2.0</string>
     <key>CFBundleVersion</key>
-    <string>2</string>
+    <string>3</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.developer-tools</string>
     <key>LSMinimumSystemVersion</key>
@@ -33,7 +33,7 @@
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>SUFeedURL</key>
-    <string>https://github.com/s1korrrr/patchwright/releases/latest/download/appcast.xml</string>
+    <string>https://github.com/rsitech-ai/patchwright/releases/latest/download/appcast.xml</string>
     <key>SUPublicEDKey</key>
     <string>oMzk7aUjqsQFvrRBZDd5JsXaeTh8B4pQrJ7n6YHRWUA=</string>
     <key>SURequireSignedFeed</key>

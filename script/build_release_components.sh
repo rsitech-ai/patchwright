@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${PATCHWRIGHT_VERSION:-0.1.1}"
-BUILD="${PATCHWRIGHT_BUILD:-2}"
+VERSION="${PATCHWRIGHT_VERSION:-0.2.0}"
+BUILD="${PATCHWRIGHT_BUILD:-3}"
 OUTPUT_PARENT="${PATCHWRIGHT_RELEASE_WORK_ROOT:-$HOME/.patchwright/release-work}"
 ALLOW_DIRTY="${PATCHWRIGHT_ALLOW_DIRTY:-0}"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$ ]] || { echo "invalid PATCHWRIGHT_VERSION" >&2; exit 64; }
