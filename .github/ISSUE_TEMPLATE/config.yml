@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/s1korrrr/patchwright/security/advisories/new
+    url: https://github.com/rsitech-ai/patchwright/security/advisories/new
     about: Report suspected vulnerabilities privately. Do not open a public issue.
   - name: Support policy
-    url: https://github.com/s1korrrr/patchwright/blob/main/SUPPORT.md
+    url: https://github.com/rsitech-ai/patchwright/blob/main/SUPPORT.md
     about: Review supported questions, diagnostics, and privacy guidance before opening an issue.

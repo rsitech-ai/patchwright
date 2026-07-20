@@ -8,6 +8,7 @@ bash -n script/smoke_github_app.sh
 Tests/PackagingTests/github_app_smoke_contract.sh
 Tests/PackagingTests/release_security_contract.sh
 Tests/PackagingTests/release_contract.sh
+Tests/PackagingTests/community_release_contract.sh
 Tests/PackagingTests/compliance_contract.sh
 Tests/PackagingTests/candidate_evidence_contract.sh
 Tests/PackagingTests/promotion_contract.sh

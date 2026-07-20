@@ -370,7 +370,7 @@ def build_documents(
         "dataLicense": "CC0-1.0",
         "SPDXID": "SPDXRef-DOCUMENT",
         "name": "Patchwright release SBOM",
-        "documentNamespace": f"https://github.com/s1korrrr/patchwright/spdx/{namespace_digest}",
+        "documentNamespace": f"https://github.com/rsitech-ai/patchwright/spdx/{namespace_digest}",
         "creationInfo": {"created": created_timestamp(), "creators": ["Tool: Patchwright compliance generator"]},
         "packages": package_rows,
         "files": files,

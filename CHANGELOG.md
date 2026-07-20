@@ -2,6 +2,33 @@
 
 All notable user-facing and distribution changes are documented here. Patchwright follows semantic versioning for public releases.
 
+## [0.2.0] - 2026-07-20
+
+### Added
+
+- Add a reproducible community-prerelease packager that binds an ad-hoc-signed
+  app archive and checksum to the exact clean Git commit and release tag.
+- Publish machine-readable community release metadata that states the app
+  architecture, minimum macOS version, signing class, and notarization status.
+
+### Changed
+
+- Move the canonical public repository and release URLs to the RSI Tech
+  organization at `rsitech-ai/patchwright`.
+- Require the live GitHub App qualification smoke to reject both the canonical
+  organization repository and the legacy founder-account redirect.
+- Separate community prerelease downloads from the unchanged Developer ID,
+  notarization, clean-machine, and independent-promotion release contract.
+
+### Hardened
+
+- Require exact approved head and base identities immediately before supported
+  pull-request mutations.
+- Bound Codex protocol messages and request-wide resources, redact
+  credential-shaped durable content, and bind completion to exact active
+  request, thread, and turn identities.
+- Apply one global resource budget to nested GitHub snapshot fan-out.
+
 ## [0.1.1] - 2026-07-18
 
 ### Fixed
@@ -30,5 +57,6 @@ All notable user-facing and distribution changes are documented here. Patchwrigh
 
 - Initial public technical-beta release of the local-first Patchwright app, engine, and relay.
 
-[0.1.1]: https://github.com/s1korrrr/patchwright/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/s1korrrr/patchwright/releases/tag/v0.1.0
+[0.2.0]: https://github.com/rsitech-ai/patchwright/compare/v0.1.1...v0.2.0-community.1
+[0.1.1]: https://github.com/rsitech-ai/patchwright/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/rsitech-ai/patchwright/releases/tag/v0.1.0
