@@ -2,6 +2,11 @@
 
 Patchwright is a local-first, macOS-native engineering control plane for GitHub. It separates private language-model assistance from a durable coding-agent runtime and makes every approval, command, diff, test, and remote mutation auditable.
 
+**Status:** beta. The current source manifests are version `0.1.1`; the latest
+published artifact remains the version shown on GitHub Releases until a newer
+release completes signing, notarization, clean-machine verification, and
+promotion.
+
 Build Patchwright from [source](#build-and-verify). Official Developer ID-signed
 and Apple-notarized downloads are published through
 [GitHub Releases](https://github.com/s1korrrr/patchwright/releases). See the
@@ -55,7 +60,7 @@ Patchwright can build a read-only local snapshot from the GitHub account already
 gh auth status
 ```
 
-Launch the app and choose **Sync GitHub** in the toolbar or **Task → Sync GitHub** (`⌘⇧G`). The default sync discovers up to 100 accessible repositories and, per repository, ingests up to 1,000 records from each paginated resource:
+Launch the app and choose **Sync GitHub** in the toolbar or **Task → Sync GitHub** (`⌘⇧G`). The default sync discovers up to 100 accessible repositories. Each repository refresh uses a global budget of 100 records per top-level resource and divides nested review, review-thread, and check-run budgets across the ingested pull requests:
 
 - issues and pull requests;
 - issue comments, pull-request review comments, and submitted reviews;
@@ -104,5 +109,12 @@ explicit promotion step. See the [direct-download guide](docs/direct-download.md
 ## Safety
 
 Merge is disabled by default and can execute only for a typed pull-request task after an exact action preview, a separate merge-class approval, a fresh exact-head-SHA precondition, and a single-use execution claim. GitHub writes, network access, dependency installation, and workflow changes require action-specific approval. Set `PATCHWRIGHT_AUTOMATION_DISABLED=1` to fail closed for every mutating capability while retaining read-only inspection.
+
+Repository verification commands such as `cargo test --workspace` and
+`swift test` are not OS-sandboxed. Patchwright shows the exact commands and
+requires a separate confirmation immediately before running them, but they
+still execute repository-controlled build scripts, plugins, and tests with the
+current macOS user's file and network access. Review untrusted changes before
+confirming verification.
 
 See [the product design](docs/superpowers/specs/2026-07-13-patchwright-stages-1-3-design.md), [production plan](docs/production-plan.md), and [security operations](docs/security.md).

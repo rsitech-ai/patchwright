@@ -31,8 +31,8 @@ async fn capture_request(
         .push((method.clone(), format!("/{path}"), body.clone()));
     let response = if method == Method::GET && path.ends_with("/pulls/4") {
         json!({"id":91,"node_id":"PR_node","number":4,"html_url":"https://example.invalid/pull/4","draft":true,"head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}})
-    } else if method == Method::GET && path.ends_with("/git/ref/heads/main") {
-        json!({"ref":"refs/heads/main","object":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}})
+    } else if method == Method::GET && path.contains("/git/ref/heads/") {
+        json!({"ref":format!("refs/heads/{}", path.split("/git/ref/heads/").nth(1).unwrap()),"object":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}})
     } else if path.ends_with("/git/refs") {
         json!({"ref":body["ref"],"object":{"sha":body["sha"]}})
     } else if path == "graphql"
@@ -72,7 +72,12 @@ async fn resolves_only_the_exact_owned_review_thread_identity() {
         .execute(
             "octo",
             "fixture",
-            &GitHubAction::resolve_review_thread(4, "PRRT_kwDOExample").unwrap(),
+            &GitHubAction::resolve_review_thread(
+                4,
+                "PRRT_kwDOExample",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -116,10 +121,10 @@ async fn emits_documented_identity_and_sha_bound_requests() {
         )
         .unwrap(),
         GitHubAction::check_run("Patchwright", sha, "completed", Some("success")).unwrap(),
-        GitHubAction::draft_pull_request("title", "feat/test", "main", "body").unwrap(),
+        GitHubAction::draft_pull_request("title", "feat/test", "main", "body", sha, sha).unwrap(),
         GitHubAction::update_pull_request_branch(4, sha).unwrap(),
-        GitHubAction::ready_pull_request(4).unwrap(),
-        GitHubAction::close_pull_request(4).unwrap(),
+        GitHubAction::ready_pull_request(4, sha).unwrap(),
+        GitHubAction::close_pull_request(4, sha).unwrap(),
         GitHubAction::close_issue(5).unwrap(),
         GitHubAction::merge_pull_request(4, sha, MergeMethod::Squash).unwrap(),
     ];
@@ -152,22 +157,27 @@ async fn emits_documented_identity_and_sha_bound_requests() {
         json!({"path":"src/lib.rs","line":9,"side":"RIGHT","body":"inline body"})
     );
     assert_eq!(requests[3].2["conclusion"], "success");
-    assert_eq!(requests[4].2["draft"], true);
-    assert_eq!(requests[5].2, json!({"expected_head_sha":sha}));
+    assert_eq!(requests[4].0, Method::GET);
+    assert_eq!(requests[4].1, "/repos/octo/fixture/git/ref/heads/feat/test");
+    assert_eq!(requests[5].0, Method::GET);
+    assert_eq!(requests[5].1, "/repos/octo/fixture/git/ref/heads/main");
+    assert_eq!(requests[6].2["draft"], true);
+    assert_eq!(requests[7].2, json!({"expected_head_sha":sha}));
     assert_eq!(
-        requests[6],
+        requests[8],
         (
             Method::GET,
             "/repos/octo/fixture/pulls/4".into(),
             Value::Null
         )
     );
-    assert_eq!(requests[7].0, Method::POST);
-    assert_eq!(requests[7].1, "/graphql");
-    assert_eq!(requests[7].2["variables"]["pullRequestId"], "PR_node");
-    assert_eq!(requests[8].2, json!({"state":"closed"}));
+    assert_eq!(requests[9].0, Method::POST);
+    assert_eq!(requests[9].1, "/graphql");
+    assert_eq!(requests[9].2["variables"]["pullRequestId"], "PR_node");
+    assert_eq!(requests[10].0, Method::GET);
+    assert_eq!(requests[11].2, json!({"state":"closed"}));
     assert_eq!(
-        requests[9],
+        requests[12],
         (
             Method::PATCH,
             "/repos/octo/fixture/issues/5".into(),
@@ -175,13 +185,41 @@ async fn emits_documented_identity_and_sha_bound_requests() {
         )
     );
     assert_eq!(
-        requests[10],
+        requests[13],
         (
             Method::PUT,
             "/repos/octo/fixture/pulls/4/merge".into(),
             json!({"sha":sha,"merge_method":"squash"})
         )
     );
+}
+
+#[tokio::test]
+async fn state_changing_pull_request_actions_reject_a_changed_remote_sha() {
+    let (client, _) = client().await;
+    let stale_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let actions = [
+        GitHubAction::resolve_review_thread(4, "PRRT_kwDOExample", stale_sha).unwrap(),
+        GitHubAction::draft_pull_request(
+            "title",
+            "feat/test",
+            "main",
+            "body",
+            stale_sha,
+            stale_sha,
+        )
+        .unwrap(),
+        GitHubAction::ready_pull_request(4, stale_sha).unwrap(),
+        GitHubAction::close_pull_request(4, stale_sha).unwrap(),
+    ];
+
+    for action in actions {
+        assert!(
+            client.execute("octo", "fixture", &action).await.is_err(),
+            "{} must fail closed when the remote SHA changes",
+            action.action_kind()
+        );
+    }
 }
 
 #[tokio::test]
@@ -263,7 +301,8 @@ async fn preflight_read_with_unparseable_body_is_a_definite_invalid_response() {
         .execute(
             "octo",
             "fixture",
-            &GitHubAction::ready_pull_request(4).unwrap(),
+            &GitHubAction::ready_pull_request(4, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap(),
         )
         .await
         .unwrap_err();
@@ -278,7 +317,8 @@ async fn successful_mutation_with_untrusted_semantics_is_ambiguous() {
         .execute(
             "octo",
             "fixture",
-            &GitHubAction::ready_pull_request(4).unwrap(),
+            &GitHubAction::ready_pull_request(4, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap(),
         )
         .await
         .unwrap_err();

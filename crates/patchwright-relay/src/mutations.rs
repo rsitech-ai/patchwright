@@ -114,6 +114,7 @@ impl GitHubMutationClient {
             GitHubAction::ResolveReviewThread {
                 pull_request_number,
                 thread_id,
+                expected_head_sha,
             } => {
                 let identity = self
                     .request_value(
@@ -143,6 +144,12 @@ impl GitHubMutationClient {
                 {
                     return Err(MutationError::ReviewThreadMismatch);
                 }
+                require_sha(
+                    thread
+                        .pointer("/pullRequest/headRefOid")
+                        .and_then(Value::as_str),
+                    expected_head_sha,
+                )?;
                 if thread.get("isResolved").and_then(Value::as_bool) == Some(true) {
                     return Ok(MutationResult {
                         node_id: Some(thread_id.clone()),
@@ -200,7 +207,11 @@ impl GitHubMutationClient {
                 head,
                 base,
                 body,
+                expected_head_sha,
+                expected_base_sha,
             } => {
+                self.require_ref_sha(&prefix, head, expected_head_sha).await?;
+                self.require_ref_sha(&prefix, base, expected_base_sha).await?;
                 self.request(
                     Method::POST,
                     &format!("{prefix}/pulls"),
@@ -223,6 +234,7 @@ impl GitHubMutationClient {
             }
             GitHubAction::ReadyPullRequest {
                 pull_request_number,
+                expected_head_sha,
             } => {
                 let pull = self
                     .request_value(
@@ -232,6 +244,10 @@ impl GitHubMutationClient {
                         RequestEffect::Read,
                     )
                     .await?;
+                require_sha(
+                    pull.pointer("/head/sha").and_then(Value::as_str),
+                    expected_head_sha,
+                )?;
                 if pull.get("draft").and_then(Value::as_bool) == Some(false) {
                     return Ok(decode_value(&pull));
                 }
@@ -280,7 +296,20 @@ impl GitHubMutationClient {
             }
             GitHubAction::ClosePullRequest {
                 pull_request_number,
+                expected_head_sha,
             } => {
+                let pull = self
+                    .request_value(
+                        Method::GET,
+                        &format!("{prefix}/pulls/{pull_request_number}"),
+                        None,
+                        RequestEffect::Read,
+                    )
+                    .await?;
+                require_sha(
+                    pull.pointer("/head/sha").and_then(Value::as_str),
+                    expected_head_sha,
+                )?;
                 self.request(
                     Method::PATCH,
                     &format!("{prefix}/pulls/{pull_request_number}"),
@@ -332,6 +361,26 @@ impl GitHubMutationClient {
         expectation
             .decode(&value)
             .ok_or(MutationError::AmbiguousTransport)
+    }
+
+    async fn require_ref_sha(
+        &self,
+        prefix: &str,
+        reference: &str,
+        expected_sha: &str,
+    ) -> Result<(), MutationError> {
+        let value = self
+            .request_value(
+                Method::GET,
+                &format!("{prefix}/git/ref/heads/{reference}"),
+                None,
+                RequestEffect::Read,
+            )
+            .await?;
+        require_sha(
+            value.pointer("/object/sha").and_then(Value::as_str),
+            expected_sha,
+        )
     }
 
     async fn request_value(
@@ -482,6 +531,14 @@ fn valid_sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn require_sha(actual: Option<&str>, expected: &str) -> Result<(), MutationError> {
+    match actual {
+        Some(actual) if actual == expected => Ok(()),
+        Some(actual) if valid_sha(actual) => Err(MutationError::RemoteCommitChanged),
+        _ => Err(MutationError::InvalidResponse),
+    }
+}
+
 const fn review_event(event: ReviewEvent) -> &'static str {
     match event {
         ReviewEvent::Approve => "APPROVE",
@@ -539,6 +596,8 @@ pub enum MutationError {
     MergeQueueRequired,
     #[error("review thread identity does not match the approved pull request")]
     ReviewThreadMismatch,
+    #[error("remote commit identity changed after approval")]
+    RemoteCommitChanged,
     #[error("GitHub App is not allowed to resolve this review thread")]
     ReviewThreadNotResolvable,
     #[error("GitHub GraphQL mutation was rejected")]

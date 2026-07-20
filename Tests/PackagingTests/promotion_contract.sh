@@ -449,6 +449,16 @@ def duplicate_candidate(_repo, candidate, _external, _output, _command):
 require_rejected("duplicate-json-key", duplicate_candidate)
 
 
+def malformed_signing_team_id(_repo, candidate, _external, _output, _command):
+    value = json.loads(candidate.read_text(encoding="utf-8"))
+    value["signing"]["team_id"] = "NOT-A-TEAM-ID"
+    write_json(candidate, value)
+    refreeze(candidate)
+
+
+require_rejected("malformed-signing-team-id", malformed_signing_team_id)
+
+
 def symlink_candidate(_repo, candidate, _external, _output, _command):
     target = candidate.with_name("candidate-target.json")
     candidate.rename(target)

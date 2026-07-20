@@ -205,6 +205,31 @@ async fn termination_cleans_up_the_owned_process_group() {
     assert!(!pid_exists(descendant_pid));
 }
 
+#[tokio::test]
+async fn rejects_an_oversized_unterminated_line_before_the_request_timeout() {
+    let _test_guard = PROCESS_TEST_LOCK.lock().await;
+    let root = tempdir().unwrap();
+    let fake = FakeCodexAppServer::create(
+        root.path(),
+        "codex-cli 0.144.2",
+        "dd if=/dev/zero bs=1048576 count=5 2>/dev/null | tr '\\000' x; sleep 60",
+    );
+    let executable = CodexExecutable::discover(Some(fake.path())).await.unwrap();
+    let config = CodexProcessConfig {
+        request_timeout: Duration::from_millis(500),
+        shutdown_grace: Duration::from_millis(50),
+        ..CodexProcessConfig::default()
+    };
+    let factory = CodexProcessFactory::new(executable, config);
+    let mut process = factory.launch("oversized-line", root.path()).unwrap();
+
+    assert!(matches!(
+        process.read_line().await,
+        Err(CodexProcessError::ProtocolLineTooLarge(_))
+    ));
+    process.terminate().await.unwrap();
+}
+
 fn pid_exists(pid: i32) -> bool {
     nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
 }

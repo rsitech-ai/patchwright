@@ -337,6 +337,8 @@ fn delivery_target_and_branch_are_bound_to_the_task_contract() {
             &format!("patchwright/{}", pull_task.id),
             "main",
             "Resolves the task",
+            &"f".repeat(40),
+            &"a".repeat(40),
         )
         .unwrap(),
         RemotePrecondition::new(None, Some(&"a".repeat(40)), 4).unwrap(),
@@ -612,7 +614,7 @@ fn successful_close_actions_complete_without_merge_lifecycle_states() {
         ),
         (
             Capability::ClosePullRequest,
-            GitHubAction::close_pull_request(7).unwrap(),
+            GitHubAction::close_pull_request(7, &"b".repeat(40)).unwrap(),
         ),
     ];
 
@@ -621,10 +623,11 @@ fn successful_close_actions_complete_without_merge_lifecycle_states() {
         let store = EventStore::open(&directory.path().join("engine.sqlite3")).unwrap();
         let mut task = fixture_with_capability(&store, capability);
         save_at_delivery_approval(&store, &mut task);
+        let expected_head_sha = action.expected_head_sha().map(str::to_owned);
         let action = GitHubActionPreview::new(
             RemoteIdentity::new(42, 84, "octocat/hello").unwrap(),
             action,
-            RemotePrecondition::new(None, None, 4).unwrap(),
+            RemotePrecondition::new(expected_head_sha.as_deref(), None, 4).unwrap(),
         )
         .unwrap();
         let preview = preview_delivery(&store, task.id, action).unwrap();
