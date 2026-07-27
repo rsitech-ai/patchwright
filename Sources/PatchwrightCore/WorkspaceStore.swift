@@ -753,6 +753,8 @@ public final class WorkspaceStore: ObservableObject {
     }
 
     public func queueState(for item: GitHubWorkItem) -> PullRequestQueueState {
+        // Merged wins over workflow tier so closed merges never look "ready".
+        if item.merged == true { return .merged }
         if let decision = queueDecision(for: item) {
             switch decision.tier {
             case .critical, .ready: return .ready

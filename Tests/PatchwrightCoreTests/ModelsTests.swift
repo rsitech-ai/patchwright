@@ -133,6 +133,41 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(snapshot.workItems.first?.labels, ["bug"])
         XCTAssertEqual(snapshot.workItems.first?.assignees, ["hubot"])
         XCTAssertEqual(snapshot.workItems.first?.milestone, "v1")
+        XCTAssertEqual(snapshot.workItems.first?.lifecycleStatusLabel, "Open")
+        XCTAssertTrue(snapshot.workItems.first?.hasComments == true)
+    }
+
+    func testPullRequestLifecycleStatusPrefersMergedOverClosed() throws {
+        let open = try decodeWorkItem(
+            #"{"id":1,"repositoryFullName":"octocat/hello","number":1,"kind":"pullRequest","title":"Open","state":"open","body":null,"author":"octocat","htmlUrl":"https://github.com/octocat/hello/pull/1","draft":false,"commentsCount":0,"updatedAt":"2026-07-13T10:00:00Z","merged":false,"labels":[],"assignees":[],"milestone":null}"#
+        )
+        let closed = try decodeWorkItem(
+            #"{"id":2,"repositoryFullName":"octocat/hello","number":2,"kind":"pullRequest","title":"Closed","state":"closed","body":null,"author":"octocat","htmlUrl":"https://github.com/octocat/hello/pull/2","draft":false,"commentsCount":0,"updatedAt":"2026-07-13T10:00:00Z","merged":false,"labels":[],"assignees":[],"milestone":null}"#
+        )
+        let merged = try decodeWorkItem(
+            #"{"id":3,"repositoryFullName":"octocat/hello","number":3,"kind":"pullRequest","title":"Merged","state":"closed","body":null,"author":"octocat","htmlUrl":"https://github.com/octocat/hello/pull/3","draft":false,"commentsCount":2,"updatedAt":"2026-07-13T10:00:00Z","merged":true,"mergeCommitSha":"ffffffffffffffffffffffffffffffffffffffff","headSha":"abc1234","headCommittedAt":"2026-07-13T08:30:00Z","labels":[],"assignees":[],"milestone":null}"#
+        )
+        XCTAssertEqual(open.lifecycleStatusLabel, "Open")
+        XCTAssertTrue(open.isOpen)
+        XCTAssertFalse(open.hasComments)
+        XCTAssertEqual(closed.lifecycleStatusLabel, "Closed")
+        XCTAssertFalse(closed.isOpen)
+        XCTAssertEqual(merged.lifecycleStatusLabel, "Merged")
+        XCTAssertFalse(merged.isOpen)
+        XCTAssertTrue(merged.hasComments)
+    }
+
+    @MainActor
+    func testQueueStateMarksMergedPullRequests() throws {
+        let store = WorkspaceStore(engine: FailingEngine(), healthRetryAttempts: 1)
+        let merged = try decodeWorkItem(
+            #"{"id":3,"repositoryFullName":"octocat/hello","number":3,"kind":"pullRequest","title":"Merged","state":"closed","body":null,"author":"octocat","htmlUrl":"https://github.com/octocat/hello/pull/3","draft":false,"commentsCount":0,"updatedAt":"2026-07-13T10:00:00Z","merged":true,"reviewDecision":"approved","ciHealth":"passing","labels":[],"assignees":[],"milestone":null}"#
+        )
+        XCTAssertEqual(store.queueState(for: merged), .merged)
+    }
+
+    private func decodeWorkItem(_ json: String) throws -> GitHubWorkItem {
+        try JSONDecoder.patchwright.decode(GitHubWorkItem.self, from: Data(json.utf8))
     }
 
     func testDecodesLegacyGitHubRepositorySnapshotWithNewMetadataAbsent() throws {

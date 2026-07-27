@@ -113,12 +113,17 @@ struct WorkspaceTableView: View {
             .width(min: 190, ideal: 360)
             TableColumn("Status") { item in
                 VStack(alignment: .leading, spacing: 2) {
+                    StatusText(value: item.lifecycleStatusLabel)
                     StatusText(value: item.ciHealth ?? "unknown")
-                    StatusText(value: item.reviewDecision ?? "required")
                         .font(.caption)
+                    if item.hasComments {
+                        Text("\(item.commentsCount) comments")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
-            .width(min: 90, ideal: 110)
+            .width(min: 90, ideal: 120)
             TableColumn("Updated") { item in TimestampText(date: item.updatedAt) }
                 .width(min: 85, ideal: 105)
         }
@@ -141,6 +146,21 @@ struct WorkspaceTableView: View {
                 }
             }
             .width(min: 190, ideal: 300)
+            TableColumn("State") { item in
+                VStack(alignment: .leading, spacing: 2) {
+                    StatusText(value: item.lifecycleStatusLabel)
+                    if item.hasComments {
+                        Text("\(item.commentsCount) comments")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("No comments")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+            .width(min: 88, ideal: 110)
             TableColumn("CI") { item in StatusText(value: item.ciHealth ?? "unknown") }
                 .width(min: 70, ideal: 82)
             TableColumn("Review") { item in StatusText(value: item.reviewDecision ?? "required") }

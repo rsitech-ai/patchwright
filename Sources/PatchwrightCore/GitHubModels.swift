@@ -82,6 +82,20 @@ public struct GitHubWorkItem: Codable, Identifiable, Equatable, Sendable {
     public var headSHA: String? { headSha }
     public var mergeCommitSHA: String? { mergeCommitSha }
     public var htmlURL: String { htmlUrl }
+
+    /// Open / Closed / Merged for operator-facing status pills and queue columns.
+    public var lifecycleStatusLabel: String {
+        if kind == .pullRequest, merged == true { return "Merged" }
+        let trimmed = state.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "Unknown" }
+        return trimmed.capitalized
+    }
+
+    public var isOpen: Bool {
+        state.caseInsensitiveCompare("open") == .orderedSame
+    }
+
+    public var hasComments: Bool { commentsCount > 0 }
 }
 
 public struct GitHubDiscussion: Codable, Identifiable, Equatable, Sendable {

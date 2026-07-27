@@ -118,7 +118,7 @@ async fn authenticated_source_paginates_and_separates_issues_from_pull_requests(
         .route("/repos/{owner}/{repo}/pulls/{number}", get(pull_detail))
         .route("/repos/{owner}/{repo}/pulls/{number}/reviews", get(reviews))
         .route("/graphql", post(review_threads))
-        .route("/repos/{owner}/{repo}/issues/comments", get(empty_array))
+        .route("/repos/{owner}/{repo}/issues/comments", get(issue_comments))
         .route("/repos/{owner}/{repo}/pulls/comments", get(empty_array))
         .route("/repos/{owner}/{repo}/actions/runs", get(workflow_runs))
         .route("/repos/{owner}/{repo}/commits/{sha}", get(commit))
@@ -142,7 +142,7 @@ async fn authenticated_source_paginates_and_separates_issues_from_pull_requests(
     assert_eq!(account.login, "octocat");
     assert_eq!(repositories.len(), 2);
     assert_eq!(repositories[1].full_name, "octocat/second");
-    assert_eq!(snapshot.work_items.len(), 2);
+    assert_eq!(snapshot.work_items.len(), 3);
     assert_eq!(snapshot.checks.len(), 2);
     assert_eq!(snapshot.workflow_runs.len(), 2);
     assert_enriched_snapshot(&snapshot);
@@ -168,7 +168,7 @@ async fn authenticated_source_paginates_and_separates_issues_from_pull_requests(
             .iter()
             .filter(|item| item.kind == WorkItemKind::PullRequest)
             .count(),
-        1
+        2
     );
     assert_eq!(
         observed_authorization.lock().unwrap().as_slice(),
@@ -208,8 +208,11 @@ fn assert_enriched_snapshot(snapshot: &patchwright_engine::GitHubRepositorySnaps
     let pull_request = snapshot
         .work_items
         .iter()
-        .find(|item| item.kind == WorkItemKind::PullRequest)
+        .find(|item| item.kind == WorkItemKind::PullRequest && item.number == 2)
         .unwrap();
+    assert_eq!(pull_request.state, "open");
+    assert_eq!(pull_request.merged, Some(false));
+    assert_eq!(pull_request.comments_count, 4);
     assert_eq!(
         pull_request.created_at.as_deref(),
         Some("2026-07-12T08:00:00Z")
@@ -242,6 +245,31 @@ fn assert_enriched_snapshot(snapshot: &patchwright_engine::GitHubRepositorySnaps
     assert_eq!(pull_request.additions, 12);
     assert_eq!(pull_request.deletions, 3);
     assert_eq!(pull_request.changed_files, 2);
+    assert!(
+        snapshot
+            .discussions
+            .iter()
+            .any(|entry| entry.item_number == 2 && entry.kind == "issueComment")
+    );
+
+    let merged = snapshot
+        .work_items
+        .iter()
+        .find(|item| item.kind == WorkItemKind::PullRequest && item.number == 3)
+        .unwrap();
+    assert_eq!(merged.state, "closed");
+    assert_eq!(merged.merged, Some(true));
+    assert_eq!(
+        merged.merge_commit_sha.as_deref(),
+        Some("ffffffffffffffffffffffffffffffffffffffff")
+    );
+    assert_eq!(merged.comments_count, 1);
+    assert_eq!(merged.head_sha.as_deref(), Some("def456"));
+    assert_eq!(
+        merged.head_committed_at.as_deref(),
+        Some("2026-07-13T08:30:00Z")
+    );
+    assert_eq!(merged.updated_at, "2026-07-14T12:00:00Z");
 }
 
 async fn repositories(Query(query): Query<HashMap<String, String>>) -> impl IntoResponse {
@@ -273,20 +301,56 @@ async fn issues(Path((_owner, _repo)): Path<(String, String)>) -> Json<Value> {
 }
 
 async fn pulls() -> Json<Value> {
-    Json(
-        json!([{"id":20,"number":2,"title":"Pull","state":"open","body":"PR body","user":{"login":"octocat"},"html_url":"https://github.com/octocat/first/pull/2","draft":true,"head":{"sha":"abc123","ref":"feature","repo":{"full_name":"fork/first","fork":true}},"base":{"sha":"base123","ref":"main"},"created_at":"2026-07-12T08:00:00Z","updated_at":"2026-07-13T10:00:00Z","maintainer_can_modify":true}]),
-    )
+    Json(json!([
+        {
+            "id":20,"number":2,"title":"Pull","state":"open","body":"PR body","user":{"login":"octocat"},
+            "html_url":"https://github.com/octocat/first/pull/2","draft":true,
+            "head":{"sha":"abc123","ref":"feature","repo":{"full_name":"fork/first","fork":true}},
+            "base":{"sha":"base123","ref":"main"},"created_at":"2026-07-12T08:00:00Z",
+            "updated_at":"2026-07-13T10:00:00Z","maintainer_can_modify":true
+        },
+        {
+            "id":21,"number":3,"title":"Landed","state":"closed","body":"Merged PR body","user":{"login":"octocat"},
+            "html_url":"https://github.com/octocat/first/pull/3","draft":false,
+            "head":{"sha":"def456","ref":"shipped","repo":{"full_name":"octocat/first","fork":false}},
+            "base":{"sha":"base123","ref":"main"},"created_at":"2026-07-10T08:00:00Z",
+            "updated_at":"2026-07-14T12:00:00Z","maintainer_can_modify":false
+        }
+    ]))
 }
 
-async fn pull_detail() -> Json<Value> {
+async fn pull_detail(Path((_owner, _repo, number)): Path<(String, String, u64)>) -> Json<Value> {
+    if number == 3 {
+        return Json(json!({
+            "id":21,"number":3,"title":"Landed","state":"closed","body":"Merged PR body","user":{"login":"octocat"},
+            "html_url":"https://github.com/octocat/first/pull/3","draft":false,
+            "head":{"sha":"def456","ref":"shipped","repo":{"full_name":"octocat/first","fork":false}},
+            "base":{"sha":"base123","ref":"main"},"created_at":"2026-07-10T08:00:00Z",
+            "updated_at":"2026-07-14T12:00:00Z","maintainer_can_modify":false,
+            "mergeable":null,"mergeable_state":"unknown","rebaseable":null,
+            "merged":true,"merge_commit_sha":"ffffffffffffffffffffffffffffffffffffffff",
+            "comments":1,"additions":4,"deletions":1,"changed_files":1
+        }));
+    }
     Json(json!({
         "id":20,"number":2,"title":"Pull","state":"open","body":"PR body","user":{"login":"octocat"},
         "html_url":"https://github.com/octocat/first/pull/2","draft":true,
         "head":{"sha":"abc123","ref":"feature","repo":{"full_name":"fork/first","fork":true}},
         "base":{"sha":"base123","ref":"main"},"created_at":"2026-07-12T08:00:00Z","updated_at":"2026-07-13T10:00:00Z",
         "maintainer_can_modify":true,"mergeable":false,"mergeable_state":"dirty","rebaseable":false,
-        "additions":12,"deletions":3,"changed_files":2
+        "merged":false,"comments":4,"additions":12,"deletions":3,"changed_files":2
     }))
+}
+
+async fn issue_comments() -> Json<Value> {
+    Json(json!([{
+        "id": 60,
+        "body": "Looks promising",
+        "user": {"login": "reviewer"},
+        "html_url": "https://github.com/octocat/first/pull/2#issuecomment-60",
+        "issue_url": "https://api.github.com/repos/octocat/first/issues/2",
+        "updated_at": "2026-07-13T09:15:00Z"
+    }]))
 }
 
 async fn commit(Path((_owner, _repo, sha)): Path<(String, String, String)>) -> Json<Value> {
@@ -347,7 +411,13 @@ async fn empty_array() -> Json<Value> {
     Json(json!([]))
 }
 
-async fn check_runs(Query(query): Query<HashMap<String, String>>) -> impl IntoResponse {
+async fn check_runs(
+    Path((_owner, _repo, sha)): Path<(String, String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    if sha != "abc123" {
+        return Json(json!({"check_runs": []})).into_response();
+    }
     let page = query.get("page").map_or("1", String::as_str);
     let run = |id, name, conclusion| json!({"id":id,"name":name,"status":"completed","conclusion":conclusion,"html_url":"https://example/check"});
     if page == "1" {

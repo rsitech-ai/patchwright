@@ -91,9 +91,23 @@ struct GitHubRepositoryView: View {
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
-                statusPill(item.state.capitalized, symbol: item.state == "open" ? "circle.fill" : "checkmark.circle.fill", tint: item.state == "open" ? .green : .purple)
+                statusPill(
+                    item.lifecycleStatusLabel,
+                    symbol: item.merged == true
+                        ? "checkmark.seal.fill"
+                        : (item.isOpen ? "circle.fill" : "checkmark.circle.fill"),
+                    tint: item.merged == true ? .indigo : (item.isOpen ? .green : .secondary)
+                )
                 if item.draft { statusPill("Draft", symbol: "pencil", tint: .secondary) }
+                if item.hasComments {
+                    statusPill(
+                        "\(item.commentsCount) comment\(item.commentsCount == 1 ? "" : "s")",
+                        symbol: "bubble.left",
+                        tint: .secondary
+                    )
+                }
                 Label(item.author, systemImage: "person.crop.circle")
+                Label("Updated", systemImage: "clock")
                 TimestampText(date: item.updatedAt)
             }
             .font(.caption)
@@ -129,6 +143,24 @@ struct GitHubRepositoryView: View {
                 if let ci = item.ciHealth { Label(ci.capitalized, systemImage: ci == "success" ? "checkmark.circle.fill" : "circle.dashed") }
             }
             .font(.caption.weight(.medium))
+            HStack(spacing: 12) {
+                if let sha = item.headSHA {
+                    Label(String(sha.prefix(7)), systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+                        .font(.caption.monospaced())
+                        .help(sha)
+                        .textSelection(.enabled)
+                }
+                Label("Latest commit", systemImage: "clock.arrow.circlepath")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TimestampText(date: item.headCommittedAt)
+                if item.merged == true, let mergeSha = item.mergeCommitSHA {
+                    Label("Merge \(String(mergeSha.prefix(7)))", systemImage: "arrow.triangle.merge")
+                        .font(.caption.monospaced())
+                        .help(mergeSha)
+                        .textSelection(.enabled)
+                }
+            }
         }
         .padding(10)
         .background(.quaternary.opacity(0.32), in: RoundedRectangle(cornerRadius: 9))
